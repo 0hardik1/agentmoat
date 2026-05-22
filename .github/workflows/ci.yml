@@ -67,10 +67,12 @@ jobs:
           # behaviour is obvious to readers of this file.
           cache: true
 
-      # golangci-lint-action@v6 wraps the golangci-lint binary, handles its
+      # golangci-lint-action@v7 wraps the golangci-lint binary, handles its
       # own caching for the analyzer state, and respects .golangci.yml.
+      # v7 is required for golangci-lint v2; v6 only understood the v1 wire
+      # format.
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           # Pin to a known-good golangci-lint release. Bumping this is a
           # deliberate decision (new lints can break builds), so we update it
