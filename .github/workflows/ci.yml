@@ -13,7 +13,7 @@
 #     `golangci/golangci-lint-action@v6`, which understands the .golangci.yml
 #     at the repo root.
 #   * `test`: runs `go test -race -cover ./...` on a matrix. The matrix has
-#     a single dimension today (go-version: 1.23 on ubuntu-latest) but is
+#     a single dimension today (go-version: 1.26 on ubuntu-latest) but is
 #     written as a matrix so we can add more Go versions or OSes later
 #     without restructuring the workflow.
 #
@@ -58,7 +58,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          # Matches the toolchain in go.mod. golangci-lint refuses to lint a
+          # module that targets a Go version newer than the one it was built
+          # against, so the lint version below must also be built with this
+          # toolchain or newer.
+          go-version: '1.26'
           # `cache: true` is the default but stated explicitly so the
           # behaviour is obvious to readers of this file.
           cache: true
@@ -70,12 +74,13 @@ jobs:
         with:
           # Pin to a known-good golangci-lint release. Bumping this is a
           # deliberate decision (new lints can break builds), so we update it
-          # in its own PR.
-          version: v1.62.2
+          # in its own PR. v2 uses a new config format (version: "2"); see
+          # .golangci.yml at the repo root.
+          version: v2.12.2
 
   # ----------------------------- test ------------------------------------
-  # Runs the unit-test suite. The matrix is single-cell today (Go 1.23 on
-  # ubuntu-latest); structured as a matrix so adding cells (Go 1.24,
+  # Runs the unit-test suite. The matrix is single-cell today (Go 1.26 on
+  # ubuntu-latest); structured as a matrix so adding cells (Go 1.27,
   # macos-latest, etc.) later is a one-line change.
   test:
     name: Test
@@ -86,7 +91,9 @@ jobs:
       # right default for when the matrix grows.
       fail-fast: false
       matrix:
-        go-version: ['1.23']
+        # Must match go.mod's `go` directive. Earlier toolchains lack
+        # `covdata` and break `go test -cover`.
+        go-version: ['1.26']
         os: [ubuntu-latest]
     steps:
       - name: Check out repository
