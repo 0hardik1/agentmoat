@@ -11,6 +11,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/0hardik1/agentmoat/pkg/output"
 )
 
 // Global flag values. Each subcommand reads from these; we keep them at
@@ -25,6 +27,17 @@ var (
 	flagIncludeSystem bool
 	flagRulesYAML     string
 	flagExplain       bool
+
+	// flagNoColor disables ANSI escapes in the table renderer even when
+	// stdout is a TTY. The CLI honors this AND the NO_COLOR env var (per
+	// no-color.org). See pkg/output/style.go: ColorEnabled.
+	flagNoColor bool
+
+	// flagQuiet suppresses orchestrator progress lines on stderr. Each
+	// runX swaps cmd.ErrOrStderr() for io.Discard when this is set, which
+	// the orchestrators document as the silencing path (pkg/agentmoat/
+	// options.go: ScanOptions.Stderr et al.).
+	flagQuiet bool
 )
 
 // newRootCmd builds the root cobra.Command and attaches subcommands.
@@ -67,6 +80,13 @@ Documentation: see docs/ in the repo or run 'agentmoat explain <topic>'.`,
 		"path to classifier rules YAML override (default: built-in only)")
 	pf.BoolVar(&flagExplain, "explain", false,
 		"add inline educational notes to output where supported")
+	// --no-color and --quiet do not have a short form: there is no widely-
+	// accepted convention for them, and the existing short flags (-A, -l,
+	// -n, -o) already cover the kubectl muscle memory.
+	pf.BoolVar(&flagNoColor, "no-color", false,
+		"disable ANSI color in the table output (also honors NO_COLOR env)")
+	pf.BoolVarP(&flagQuiet, "quiet", "q", false,
+		"suppress progress messages on stderr (good for scripts)")
 
 	// Subcommands.
 	root.AddCommand(newScanCmd())
@@ -84,7 +104,20 @@ Documentation: see docs/ in the repo or run 'agentmoat explain <topic>'.`,
 // Documented in docs/exit-codes.md.
 func Execute() int {
 	if err := newRootCmd().Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %s\n", err.Error())
+		// Style the error prefix when stderr is a colored TTY. We
+		// deliberately keep the lowercase "error: " in the plain path to
+		// match prior behavior (and the convention many Unix tools use);
+		// the colored variant capitalizes "Error" because the visual
+		// distinction is what carries the meaning when a human reads it.
+		useColor := output.ColorEnabled(os.Stderr, flagNoColor)
+		if useColor {
+			s := output.NewStyles(true)
+			// Bold red prefix, then the error message.
+			prefix := s.Bold.Render(s.Danger.Render("Error:"))
+			fmt.Fprintf(os.Stderr, "%s %s\n", prefix, err.Error())
+		} else {
+			fmt.Fprintf(os.Stderr, "error: %s\n", err.Error())
+		}
 		return 1
 	}
 	return exitCode

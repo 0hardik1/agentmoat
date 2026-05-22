@@ -1,7 +1,18 @@
-// Package output: smoke tests for the Phase 3 renderers (VerifyReport,
-// ExplainDocument). The Phase 1/2 renderers are exercised by the integration
-// e2e in scripts/e2e.sh; the new renderers also get a unit-level smoke here
-// so a future refactor of the dispatcher cannot silently drop a Kind.
+// Tests for the table renderer (table.go) and the explain renderer
+// (explain.go). These tests pin behavior at the "shape" level (substring
+// assertions on title, summary keywords, headers, key data cells) rather
+// than full golden files. Two reasons:
+//
+//  1. The plan explicitly asks for table-driven, not golden.
+//  2. lipgloss/table chooses padding based on the widest cell, so a single
+//     character change in fixture data would invalidate every byte of a
+//     golden snapshot for no real signal.
+//
+// All tests use a bytes.Buffer writer (non-*os.File, so ColorEnabled
+// returns false on its own) and pass RenderOptions{NoColor: true}. That
+// guarantees plain text on every CI and dev machine, regardless of the
+// terminal's color profile.
+
 package output
 
 import (
@@ -10,9 +21,416 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/0hardik1/agentmoat/internal/schema"
 	"sigs.k8s.io/yaml"
+
+	"github.com/0hardik1/agentmoat/internal/schema"
 )
+
+// renderToString is a small helper that runs Render with NoColor=true and
+// returns the resulting string. Tests then make `strings.Contains` style
+// assertions.
+func renderToString(t *testing.T, doc any) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := Render(doc, FormatTable, &buf, RenderOptions{NoColor: true}); err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	return buf.String()
+}
+
+func TestRenderScanReportTable(t *testing.T) {
+	t.Parallel()
+
+	// Build a minimal ScanReport with one of each compatibility class so
+	// we can assert that all three semantic colors and badges fire.
+	report := schema.NewScanReport()
+	report.Metadata.Cluster = "kind-agentmoat-e2e"
+	report.Spec.Summary = schema.Summary{
+		Total:        3,
+		Compatible:   1,
+		NeedsReview:  1,
+		Incompatible: 1,
+	}
+	report.Spec.Workloads = []schema.WorkloadResult{
+		{
+			Kind: "Deployment", Namespace: "default", Name: "web",
+			Compatibility:  schema.CompatibilityCompatible,
+			Recommendation: "set runtimeClassName: gvisor",
+		},
+		{
+			Kind: "Deployment", Namespace: "default", Name: "queue",
+			Compatibility: schema.CompatibilityReview,
+			Reasons: []schema.Reason{
+				{RuleID: "network-throughput", Severity: schema.SeverityInfo},
+			},
+			Recommendation: "review network throughput",
+		},
+		{
+			Kind: "DaemonSet", Namespace: "kube-system", Name: "node-exporter",
+			Compatibility: schema.CompatibilityIncompatible,
+			Reasons: []schema.Reason{
+				{RuleID: "host-network", Severity: schema.SeverityError},
+				{RuleID: "raw-socket", Severity: schema.SeverityError},
+			},
+			Recommendation: "do not migrate",
+		},
+	}
+
+	out := renderToString(t, report)
+
+	wantSubs := []string{
+		"agentmoat scan",              // title
+		"cluster: kind-agentmoat-e2e", // subtitle chip
+		"SUMMARY",                     // summary label
+		"compatible 1",                // counts
+		"review 1",                    //
+		"incompatible 1",              //
+		"NAMESPACE", "KIND", "NAME",   // headers
+		"VERDICT", "REASONS", "RECOMMENDATION",
+		"web", // row data
+		"node-exporter",
+		"set runtimeClassName: gvisor",
+		"host-network",
+		// Badge symbols (plain text in NoColor mode is just symbol+space+status)
+		"✓ compatible",
+		"⚠ review",
+		"✗ incompatible",
+	}
+	for _, s := range wantSubs {
+		if !strings.Contains(out, s) {
+			t.Errorf("scan output missing %q\nfull output:\n%s", s, out)
+		}
+	}
+}
+
+func TestRenderScanReportTable_Empty(t *testing.T) {
+	t.Parallel()
+	report := schema.NewScanReport()
+	report.Spec.Summary = schema.Summary{Total: 0}
+
+	out := renderToString(t, report)
+	// Title + SUMMARY still print; the placeholder is the part that
+	// tells the user there were zero workloads to walk.
+	if !strings.Contains(out, "agentmoat scan") {
+		t.Errorf("empty scan missing title\nfull output:\n%s", out)
+	}
+	if !strings.Contains(out, "(no workloads found)") {
+		t.Errorf("empty scan missing placeholder\nfull output:\n%s", out)
+	}
+}
+
+func TestRenderMigrationPlanTable(t *testing.T) {
+	t.Parallel()
+
+	plan := schema.NewMigrationPlan()
+	plan.Metadata.PlanHash = "sha256:abc123"
+	plan.Spec.Options = schema.PlannerOptions{RuntimeClassName: "gvisor"}
+	plan.Spec.Summary = schema.PlanSummary{Total: 2, Included: 1, Excluded: 1}
+	plan.Spec.Steps = []schema.PlanStep{
+		{
+			Order: 1,
+			Target: schema.WorkloadRef{
+				Kind: "Deployment", Namespace: "default", Name: "web",
+			},
+			Action:           "set-runtime-class",
+			RuntimeClassName: "gvisor",
+			AddToleration:    true,
+			WaitFor:          "Ready",
+			RiskScore:        10,
+			Notes:            "fronted by LB",
+		},
+	}
+	plan.Spec.Excluded = []schema.ExcludedWorkload{
+		{
+			Target: schema.WorkloadRef{
+				Kind: "DaemonSet", Namespace: "kube-system", Name: "node-exporter",
+			},
+			Compatibility: schema.CompatibilityIncompatible,
+			Reason:        "host-network",
+		},
+	}
+
+	out := renderToString(t, plan)
+	wantSubs := []string{
+		"agentmoat plan",
+		"plan-hash: sha256:abc123",
+		"runtime-class: gvisor",
+		"SUMMARY",
+		"total 2", "included 1", "excluded 1",
+		// step table headers + data
+		"#", "RISK", "WAIT-FOR", "NOTES",
+		"web", "Ready", "fronted by LB",
+		// excluded section
+		"Excluded workloads:",
+		"node-exporter", "host-network",
+		"✗ incompatible",
+	}
+	for _, s := range wantSubs {
+		if !strings.Contains(out, s) {
+			t.Errorf("plan output missing %q\nfull output:\n%s", s, out)
+		}
+	}
+}
+
+func TestRenderMigrationPlanTable_NoIncluded(t *testing.T) {
+	t.Parallel()
+	plan := schema.NewMigrationPlan()
+	plan.Metadata.PlanHash = "sha256:empty"
+	plan.Spec.Options = schema.PlannerOptions{RuntimeClassName: "gvisor"}
+	plan.Spec.Summary = schema.PlanSummary{Total: 0}
+
+	out := renderToString(t, plan)
+	if !strings.Contains(out, "(no included steps)") {
+		t.Errorf("expected empty-state placeholder, got:\n%s", out)
+	}
+	// Excluded section should not print when there are no excluded entries.
+	if strings.Contains(out, "Excluded workloads:") {
+		t.Errorf("Excluded section should be omitted when empty, got:\n%s", out)
+	}
+}
+
+func TestRenderApplyResultTable(t *testing.T) {
+	t.Parallel()
+
+	res := schema.NewApplyResult()
+	res.Metadata.PlanHash = "sha256:abc"
+	res.Metadata.DryRun = true
+	res.Spec.Summary = schema.ApplySummary{
+		Total: 4, Applied: 2, AlreadyApplied: 1, Skipped: 0, Failed: 1,
+	}
+	res.Spec.Steps = []schema.StepResult{
+		{
+			Order: 1,
+			Target: schema.WorkloadRef{
+				Kind: "Deployment", Namespace: "default", Name: "web",
+			},
+			Status: schema.StepStatusApplied,
+			Patch:  `{"spec":{"template":{"spec":{"runtimeClassName":"gvisor"}}}}`,
+		},
+		{
+			Order: 2,
+			Target: schema.WorkloadRef{
+				Kind: "Deployment", Namespace: "default", Name: "queue",
+			},
+			Status: schema.StepStatusAlreadyApplied,
+		},
+		{
+			Order: 3,
+			Target: schema.WorkloadRef{
+				Kind: "CronJob", Namespace: "batch", Name: "nightly",
+			},
+			Status: schema.StepStatusFailed,
+			Error:  "API server rejected patch",
+		},
+	}
+
+	out := renderToString(t, res)
+	wantSubs := []string{
+		"agentmoat apply",
+		"plan-hash: sha256:abc",
+		"dry-run: true",
+		"SUMMARY",
+		"applied 2", "already-applied 1", "skipped 0", "failed 1",
+		"#", "STATUS", "NOTE",
+		"web", "queue", "nightly",
+		"API server rejected patch",
+		"✓ applied",
+		"→ already-applied",
+		"✗ failed",
+	}
+	for _, s := range wantSubs {
+		if !strings.Contains(out, s) {
+			t.Errorf("apply output missing %q\nfull output:\n%s", s, out)
+		}
+	}
+}
+
+func TestRenderApplyResultTable_Empty(t *testing.T) {
+	t.Parallel()
+	res := schema.NewApplyResult()
+	res.Metadata.DryRun = false
+	out := renderToString(t, res)
+	if !strings.Contains(out, "(no steps)") {
+		t.Errorf("expected empty-state placeholder, got:\n%s", out)
+	}
+	if !strings.Contains(out, "dry-run: false") {
+		t.Errorf("expected dry-run: false chip, got:\n%s", out)
+	}
+}
+
+func TestRenderRollbackResultTable(t *testing.T) {
+	t.Parallel()
+
+	rb := schema.NewRollbackResult()
+	rb.Metadata.PlanHash = "sha256:abc"
+	rb.Metadata.DryRun = false
+	rb.Spec.Summary = schema.ApplySummary{Total: 1, Applied: 1}
+	rb.Spec.Steps = []schema.StepResult{
+		{
+			Order: 1,
+			Target: schema.WorkloadRef{
+				Kind: "Deployment", Namespace: "default", Name: "web",
+			},
+			Status: schema.StepStatusApplied,
+		},
+	}
+
+	out := renderToString(t, rb)
+	wantSubs := []string{
+		"agentmoat rollback", // title uses the action word
+		"plan-hash: sha256:abc",
+		"dry-run: false",
+		"applied 1",
+		"web",
+		"✓ applied",
+	}
+	for _, s := range wantSubs {
+		if !strings.Contains(out, s) {
+			t.Errorf("rollback output missing %q\nfull output:\n%s", s, out)
+		}
+	}
+}
+
+// TestRender_PlainOutputHasNoANSI is a guardrail: with NoColor:true and a
+// bytes.Buffer writer, the output must not contain ANSI escape codes (so
+// piped output is "real" plain text downstream consumers can parse).
+func TestRender_PlainOutputHasNoANSI(t *testing.T) {
+	t.Parallel()
+	report := schema.NewScanReport()
+	report.Spec.Summary = schema.Summary{Total: 1, Compatible: 1}
+	report.Spec.Workloads = []schema.WorkloadResult{
+		{Kind: "Deployment", Namespace: "ns", Name: "x",
+			Compatibility: schema.CompatibilityCompatible},
+	}
+	out := renderToString(t, report)
+	if strings.ContainsRune(out, 0x1b) {
+		t.Errorf("plain output contains ESC (0x1b), want none. output:\n%q", out)
+	}
+}
+
+// TestRender_JSONIsByteIdenticalRegardlessOfOpts pins the schema-stability
+// invariant: machine output must not change based on color/quiet flags.
+func TestRender_JSONIsByteIdenticalRegardlessOfOpts(t *testing.T) {
+	t.Parallel()
+	report := schema.NewScanReport()
+	report.Spec.Summary = schema.Summary{Total: 1, Compatible: 1}
+	report.Spec.Workloads = []schema.WorkloadResult{
+		{Kind: "Deployment", Namespace: "ns", Name: "x",
+			Compatibility: schema.CompatibilityCompatible},
+	}
+	var a, b, c bytes.Buffer
+	if err := Render(report, FormatJSON, &a, RenderOptions{NoColor: false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Render(report, FormatJSON, &b, RenderOptions{NoColor: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Render(report, FormatJSON, &c, RenderOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(a.Bytes(), b.Bytes()) || !bytes.Equal(b.Bytes(), c.Bytes()) {
+		t.Errorf("JSON output varies with RenderOptions:\nNoColor=false:\n%s\nNoColor=true:\n%s\nzero-value:\n%s",
+			a.String(), b.String(), c.String())
+	}
+}
+
+// TestRender_YAMLIsByteIdenticalRegardlessOfOpts is the YAML counterpart.
+func TestRender_YAMLIsByteIdenticalRegardlessOfOpts(t *testing.T) {
+	t.Parallel()
+	report := schema.NewScanReport()
+	report.Spec.Summary = schema.Summary{Total: 0}
+	var a, b bytes.Buffer
+	if err := Render(report, FormatYAML, &a, RenderOptions{NoColor: false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Render(report, FormatYAML, &b, RenderOptions{NoColor: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(a.Bytes(), b.Bytes()) {
+		t.Errorf("YAML output varies with RenderOptions")
+	}
+}
+
+// TestSummarizeReasons exercises the inline cap and the "(+N more)" tail
+// directly (it is a pure helper, so the assertion is exact).
+func TestSummarizeReasons(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   []schema.Reason
+		want string
+	}{
+		{"none", nil, "-"},
+		{"one", []schema.Reason{
+			{RuleID: "a", Severity: schema.SeverityError},
+		}, "a(error)"},
+		{"three", []schema.Reason{
+			{RuleID: "a", Severity: schema.SeverityError},
+			{RuleID: "b", Severity: schema.SeverityWarn},
+			{RuleID: "c", Severity: schema.SeverityInfo},
+		}, "a(error); b(warn); c(info)"},
+		{"more than cap", []schema.Reason{
+			{RuleID: "a", Severity: schema.SeverityError},
+			{RuleID: "b", Severity: schema.SeverityWarn},
+			{RuleID: "c", Severity: schema.SeverityInfo},
+			{RuleID: "d", Severity: schema.SeverityInfo},
+			{RuleID: "e", Severity: schema.SeverityInfo},
+		}, "a(error); b(warn); c(info) (+2 more)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summarizeReasons(tc.in)
+			if got != tc.want {
+				t.Errorf("summarizeReasons(%v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCompactPatchPreview pins the truncation and compaction behavior of
+// the apply-table patch-preview helper.
+func TestCompactPatchPreview(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "compacts whitespace",
+			in:   "{ \"a\": 1 }",
+			want: `{"a":1}`,
+		},
+		{
+			name: "truncates at 60 chars",
+			in:   `{"spec":{"template":{"spec":{"runtimeClassName":"gvisor","tolerations":[{"key":"runtime","value":"gvisor","effect":"NoSchedule"}]}}}}`,
+			// compactPatchPreview keeps the first 57 chars and appends "..."
+			// for a total length of 60.
+			want: `{"spec":{"template":{"spec":{"runtimeClassName":"gvisor",...`,
+		},
+		{
+			name: "invalid JSON passed through",
+			in:   "not json",
+			want: "not json",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := compactPatchPreview(tc.in)
+			if got != tc.want {
+				t.Errorf("compactPatchPreview = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// VerifyReport renderer tests.
+//
+// These tests preserve the schema/envelope assertions main contributed
+// (testdata round-trips, kind/apiVersion checks) but adapt the substring
+// list to the new lipgloss-style header + SUMMARY shape.
+// ---------------------------------------------------------------------------
 
 func sampleVerifyReport() *schema.VerifyReport {
 	r := schema.NewVerifyReport()
@@ -53,32 +471,45 @@ func sampleVerifyReport() *schema.VerifyReport {
 // ACTUAL / PROBE values land in the right cells.
 func TestRenderVerifyReportTable(t *testing.T) {
 	t.Parallel()
-	var buf bytes.Buffer
-	if err := Render(sampleVerifyReport(), FormatTable, &buf); err != nil {
-		t.Fatalf("Render: %v", err)
-	}
-	out := buf.String()
+	out := renderToString(t, sampleVerifyReport())
 
 	wantStrings := []string{
-		"agentmoat verify: 2 steps verified",
-		"ok: 1",
-		"mismatch: 1",
-		"plan-hash: hash-1",
-		"in-pod-probe: true",
-		"STATUS",
-		"KIND/NS/NAME",
-		"EXPECTED",
-		"ACTUAL",
-		"PROBE",
-		"MESSAGE",
-		"Deployment/ns-a/web",
+		"agentmoat verify",   // title (Bold in TTY, plain here)
+		"plan-hash: hash-1",  // subtitle chip
+		"in-pod-probe: true", // subtitle chip
+		"SUMMARY",            // summary label
+		"ok 1",               // semantic-colored counts
+		"mismatch 1",         //
+		"error 0",            //
+		"#", "STATUS",        // headers
+		"KIND/NS/NAME",       //
+		"EXPECTED", "ACTUAL", //
+		"PROBE", "MESSAGE", //
+		"Deployment/ns-a/web", // row data
 		"StatefulSet/ns-b/cache",
-		"(empty)", // displayActual for the mismatch row
+		"(empty)",    // displayActual for the mismatch row
+		"✓ ok",       // badges in NoColor mode
+		"⚠ mismatch", //
 	}
 	for _, want := range wantStrings {
 		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q\nfull output:\n%s", want, out)
+			t.Errorf("verify output missing %q\nfull output:\n%s", want, out)
 		}
+	}
+}
+
+// TestRenderVerifyReportTable_Empty pins the empty-results placeholder.
+func TestRenderVerifyReportTable_Empty(t *testing.T) {
+	t.Parallel()
+	r := schema.NewVerifyReport()
+	r.Metadata.PlanHash = "hash-empty"
+	r.Metadata.InPodProbe = false
+	out := renderToString(t, r)
+	if !strings.Contains(out, "(no results)") {
+		t.Errorf("expected empty placeholder, got:\n%s", out)
+	}
+	if !strings.Contains(out, "in-pod-probe: false") {
+		t.Errorf("expected in-pod-probe: false chip, got:\n%s", out)
 	}
 }
 
@@ -92,7 +523,7 @@ func TestRenderVerifyReportJSONYAML(t *testing.T) {
 
 	t.Run("json", func(t *testing.T) {
 		var buf bytes.Buffer
-		if err := Render(r, FormatJSON, &buf); err != nil {
+		if err := Render(r, FormatJSON, &buf, RenderOptions{}); err != nil {
 			t.Fatalf("Render(JSON): %v", err)
 		}
 		var got map[string]any
@@ -104,7 +535,7 @@ func TestRenderVerifyReportJSONYAML(t *testing.T) {
 
 	t.Run("yaml", func(t *testing.T) {
 		var buf bytes.Buffer
-		if err := Render(r, FormatYAML, &buf); err != nil {
+		if err := Render(r, FormatYAML, &buf, RenderOptions{}); err != nil {
 			t.Fatalf("Render(YAML): %v", err)
 		}
 		var got map[string]any
@@ -145,10 +576,15 @@ func assertVerifyEnvelope(t *testing.T, got map[string]any) {
 	}
 }
 
-// TestRenderExplainDocumentTable_TopicMode asserts the renderer prints the
-// raw markdown content when Spec.Content is set. The e2e asserts the
-// stdout begins with "# " so we cover that here too.
-func TestRenderExplainDocumentTable_TopicMode(t *testing.T) {
+// ---------------------------------------------------------------------------
+// ExplainDocument renderer tests.
+// ---------------------------------------------------------------------------
+
+// TestRenderExplainDocumentTable_TopicMode_Plain asserts that with NoColor=true
+// (production-realistic for pipes and CI) the renderer prints the raw
+// markdown content. The e2e asserts the stdout begins with "# " so we cover
+// that here too.
+func TestRenderExplainDocumentTable_TopicMode_Plain(t *testing.T) {
 	t.Parallel()
 	d := schema.NewExplainDocument()
 	d.Spec = schema.ExplainSpec{
@@ -156,16 +592,37 @@ func TestRenderExplainDocumentTable_TopicMode(t *testing.T) {
 		Content: "# RuntimeClass 101\n\nbody.\n",
 		Topics:  []string{"runtimeclass"},
 	}
-	var buf bytes.Buffer
-	if err := Render(d, FormatTable, &buf); err != nil {
-		t.Fatalf("Render: %v", err)
-	}
-	out := buf.String()
+	out := renderToString(t, d)
 	if !strings.HasPrefix(out, "# RuntimeClass 101") {
 		t.Errorf("output should start with '# ': got %q", out)
 	}
 	if !strings.Contains(out, "body.") {
 		t.Errorf("output missing body: %q", out)
+	}
+}
+
+// TestRenderExplainDocumentTable_TopicMode_AutoDowngradesNonTTY asserts that
+// even when the caller hasn't set NoColor (RenderOptions{}), the renderer
+// downgrades to plain because the writer is non-*os.File. This mirrors the
+// production call path: stdout-as-pipe -> ColorEnabled returns false -> we
+// skip glamour. Downstream tools see the raw markdown they expect.
+func TestRenderExplainDocumentTable_TopicMode_AutoDowngradesNonTTY(t *testing.T) {
+	t.Parallel()
+	d := schema.NewExplainDocument()
+	d.Spec = schema.ExplainSpec{
+		Topic:   "runtimeclass",
+		Content: "# RuntimeClass 101\n\nbody.\n",
+	}
+	var buf bytes.Buffer
+	if err := Render(d, FormatTable, &buf, RenderOptions{NoColor: false}); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := buf.String()
+	if strings.ContainsRune(out, 0x1b) {
+		t.Errorf("expected no ANSI (non-TTY writer downgrades color): output:\n%q", out)
+	}
+	if !strings.HasPrefix(out, "# RuntimeClass 101") {
+		t.Errorf("output should still start with raw markdown: %q", out)
 	}
 }
 
@@ -177,11 +634,10 @@ func TestRenderExplainDocumentTable_ListMode(t *testing.T) {
 	d.Spec = schema.ExplainSpec{
 		Topics: []string{"compatibility", "gvisor", "performance", "runtimeclass", "threat-model"},
 	}
-	var buf bytes.Buffer
-	if err := Render(d, FormatTable, &buf); err != nil {
-		t.Fatalf("Render: %v", err)
+	out := renderToString(t, d)
+	if !strings.Contains(out, "agentmoat explain: available topics") {
+		t.Errorf("list-mode output missing header, got:\n%s", out)
 	}
-	out := buf.String()
 	for _, topic := range d.Spec.Topics {
 		if !strings.Contains(out, topic) {
 			t.Errorf("list-mode output missing topic %q\noutput: %s", topic, out)
@@ -200,7 +656,7 @@ func TestRenderExplainDocumentJSON(t *testing.T) {
 		Topics:  []string{"runtimeclass"},
 	}
 	var buf bytes.Buffer
-	if err := Render(d, FormatJSON, &buf); err != nil {
+	if err := Render(d, FormatJSON, &buf, RenderOptions{}); err != nil {
 		t.Fatalf("Render(JSON): %v", err)
 	}
 	var got map[string]any
@@ -224,7 +680,7 @@ func TestRenderExplainDocumentJSON(t *testing.T) {
 func TestRenderUnknownType(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	err := Render(struct{ Foo int }{Foo: 1}, FormatTable, &buf)
+	err := Render(struct{ Foo int }{Foo: 1}, FormatTable, &buf, RenderOptions{})
 	if err == nil {
 		t.Fatalf("expected error for unknown type")
 	}

@@ -21,6 +21,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -70,6 +71,17 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	renderOpts := output.RenderOptions{
+		NoColor: flagNoColor || os.Getenv("NO_COLOR") != "",
+	}
+
+	// --quiet -> orchestrator stderr is io.Discard. See the same idiom
+	// in scan.go (kept duplicated here for clarity at the call site).
+	stderr := cmd.ErrOrStderr()
+	if flagQuiet {
+		stderr = io.Discard
+	}
+
 	opts := agentmoat.PlanOptions{
 		ScanOptions: agentmoat.ScanOptions{
 			KubeconfigPath: flagKubeconfig,
@@ -79,13 +91,13 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 			IncludeSystem:  flagIncludeSystem,
 			LabelSelector:  flagLabelSelector,
 			RulesYAMLPath:  flagRulesYAML,
-			Stderr:         cmd.ErrOrStderr(),
+			Stderr:         stderr,
 		},
 		Planner: schema.PlannerOptions{
 			IncludeReview:    flagPlanIncludeReview,
 			RuntimeClassName: flagPlanRuntimeClass,
 		},
-		Stderr: cmd.ErrOrStderr(),
+		Stderr: stderr,
 	}
 
 	// Source resolution: if --scan was given, load the report from disk
@@ -103,7 +115,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	return output.Render(plan, format, cmd.OutOrStdout())
+	return output.Render(plan, format, cmd.OutOrStdout(), renderOpts)
 }
 
 // loadScanReport reads and parses a ScanReport from disk. The file may be

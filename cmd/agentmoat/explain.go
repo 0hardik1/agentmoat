@@ -18,6 +18,8 @@
 package main
 
 import (
+	"os"
+
 	"github.com/spf13/cobra"
 
 	"github.com/0hardik1/agentmoat/pkg/agentmoat"
@@ -57,6 +59,14 @@ func runExplain(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// renderOpts plumbing mirrors the other runX functions. --quiet is
+	// effectively a no-op for explain (the orchestrator is offline and
+	// silent), but we honor the flag at this layer so the global semantics
+	// stay consistent: setting --quiet never makes anything noisier.
+	renderOpts := output.RenderOptions{
+		NoColor: flagNoColor || os.Getenv("NO_COLOR") != "",
+	}
+
 	opts := agentmoat.ExplainOptions{}
 	if len(args) == 1 {
 		opts.Topic = args[0]
@@ -70,5 +80,5 @@ func runExplain(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	return output.Render(doc, format, cmd.OutOrStdout())
+	return output.Render(doc, format, cmd.OutOrStdout(), renderOpts)
 }

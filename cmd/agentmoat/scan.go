@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -43,6 +44,22 @@ func runScan(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	// Build the render options once. NoColor is the OR of the explicit
+	// flag and the NO_COLOR env (the renderer also checks the env, but
+	// we OR here so the env decision is visible at the CLI level too).
+	renderOpts := output.RenderOptions{
+		NoColor: flagNoColor || os.Getenv("NO_COLOR") != "",
+	}
+
+	// --quiet swaps stderr for io.Discard so the orchestrator's progress
+	// lines vanish without any orchestrator-side branching. The
+	// orchestrator option docs (pkg/agentmoat/options.go) explicitly
+	// name io.Discard as the silencing path.
+	stderr := cmd.ErrOrStderr()
+	if flagQuiet {
+		stderr = io.Discard
+	}
+
 	// Default behavior: if no namespace is specified, scan all namespaces.
 	allNs := flagAllNamespaces || len(flagNamespaces) == 0
 
@@ -54,7 +71,7 @@ func runScan(cmd *cobra.Command, _ []string) error {
 		IncludeSystem:  flagIncludeSystem,
 		LabelSelector:  flagLabelSelector,
 		RulesYAMLPath:  flagRulesYAML,
-		Stderr:         cmd.ErrOrStderr(),
+		Stderr:         stderr,
 	}
 
 	report, err := agentmoat.Scan(context.Background(), opts)
@@ -63,7 +80,7 @@ func runScan(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Render to stdout. Stderr already received progress messages.
-	if err := output.Render(report, format, cmd.OutOrStdout()); err != nil {
+	if err := output.Render(report, format, cmd.OutOrStdout(), renderOpts); err != nil {
 		return err
 	}
 
@@ -83,6 +100,3 @@ func hasIncompatible(report *schema.ScanReport) bool {
 	}
 	return false
 }
-
-// _ keeps the os import live in case future flags need it.
-var _ = os.Stdout
