@@ -39,9 +39,13 @@ func Apply(ctx context.Context, opts ApplyOptions) (*schema.ApplyResult, error) 
 		return nil, fmt.Errorf("apply: loading plan: %w", err)
 	}
 
-	client, _, err := kube.NewClient(opts.KubeconfigPath, opts.Context)
-	if err != nil {
-		return nil, fmt.Errorf("apply: building kubernetes client: %w", err)
+	client := opts.KubeClient
+	if client == nil {
+		cs, _, err := kube.NewClient(opts.KubeconfigPath, opts.Context)
+		if err != nil {
+			return nil, fmt.Errorf("apply: building kubernetes client: %w", err)
+		}
+		client = cs
 	}
 
 	res, err := applier.Apply(ctx, applier.Options{
@@ -80,9 +84,13 @@ func Rollback(ctx context.Context, opts RollbackOptions) (*schema.RollbackResult
 		return nil, fmt.Errorf("rollback: loading plan: %w", err)
 	}
 
-	client, _, err := kube.NewClient(opts.KubeconfigPath, opts.Context)
-	if err != nil {
-		return nil, fmt.Errorf("rollback: building kubernetes client: %w", err)
+	client := opts.KubeClient
+	if client == nil {
+		cs, _, err := kube.NewClient(opts.KubeconfigPath, opts.Context)
+		if err != nil {
+			return nil, fmt.Errorf("rollback: building kubernetes client: %w", err)
+		}
+		client = cs
 	}
 
 	res, err := applier.Rollback(ctx, applier.Options{

@@ -13,6 +13,9 @@ import (
 	"io"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
+	"github.com/0hardik1/agentmoat/pkg/verifier"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 // ScanOptions configures a Scan() call. Zero value is meaningful: it
@@ -53,6 +56,13 @@ type ScanOptions struct {
 	// (counts, timings, "scanning namespace X..."). Defaults to os.Stderr
 	// in cmd/. Set to io.Discard to silence.
 	Stderr io.Writer
+
+	// KubeClient is an optional pre-built Kubernetes client. When non-nil,
+	// Scan() skips its internal kube.NewClient call and uses this client
+	// directly. Used by the MCP server's unit tests to inject a fake
+	// clientset (pkg/applier/applier_test.go pattern). Production callers
+	// (CLI) leave this nil so the standard kubeconfig loader runs.
+	KubeClient kubernetes.Interface
 }
 
 // PlanOptions configures pkg/agentmoat.Plan. Plan() either reads a
@@ -98,6 +108,11 @@ type ApplyOptions struct {
 
 	// Stderr is the writer for progress messages.
 	Stderr io.Writer
+
+	// KubeClient is an optional pre-built Kubernetes client. See the
+	// equivalent field on ScanOptions. Used only by the MCP server's
+	// unit tests; CLI callers leave it nil.
+	KubeClient kubernetes.Interface
 }
 
 // RollbackOptions is the rollback-side counterpart of ApplyOptions. Fields
@@ -126,6 +141,52 @@ type VerifyOptions struct {
 	// Stderr is the writer for progress messages. Defaults to os.Stderr
 	// in cmd/. Set to io.Discard to silence.
 	Stderr io.Writer
+
+	// KubeClient is an optional pre-built Kubernetes client. See ScanOptions.
+	KubeClient kubernetes.Interface
+
+	// RestConfig is the rest.Config that backs the in-pod probe (the SPDY
+	// exec transport needs TLS material that the typed Clientset does not
+	// expose). Production callers leave this nil; the orchestrator builds
+	// both client and config together via kube.NewClient. Tests that inject
+	// a fake KubeClient and a fake ExecRunner can leave this nil too, since
+	// the fake ExecRunner short-circuits before SPDY is dialed.
+	RestConfig *rest.Config
+
+	// ExecRunner is the testing seam for the in-pod probe. When non-nil
+	// AND InPodProbe is true, the verifier uses this ExecRunner instead
+	// of building the default SPDY one. CLI callers leave this nil so
+	// the production probe runs.
+	ExecRunner verifier.ExecRunner
+}
+
+// AssessWorkloadOptions configures pkg/agentmoat.AssessWorkload, the
+// single-workload counterpart to Scan. The MCP server's assess_workload
+// tool calls this so an operator (or an LLM acting on behalf of one) can
+// classify one named workload without paying the cost of a cluster-wide
+// scan.
+type AssessWorkloadOptions struct {
+	// KubeconfigPath and Context are the same as ScanOptions.
+	KubeconfigPath string
+	Context        string
+
+	// Kind is the Kubernetes kind: Pod | Deployment | StatefulSet |
+	// DaemonSet | Job | CronJob. Required.
+	Kind string
+
+	// Namespace and Name uniquely identify the target workload. Required.
+	Namespace string
+	Name      string
+
+	// RulesYAMLPath, when non-empty, layers a YAML override file on top
+	// of the built-in classifier rules. Same semantics as ScanOptions.
+	RulesYAMLPath string
+
+	// Stderr is the writer for progress messages.
+	Stderr io.Writer
+
+	// KubeClient is an optional pre-built Kubernetes client. See ScanOptions.
+	KubeClient kubernetes.Interface
 }
 
 // ExplainOptions configures pkg/agentmoat.Explain. Explain is offline: it

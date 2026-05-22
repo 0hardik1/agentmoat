@@ -41,9 +41,19 @@ func Verify(ctx context.Context, opts VerifyOptions) (*schema.VerifyReport, erro
 		return nil, fmt.Errorf("verify: loading plan: %w", err)
 	}
 
-	client, cfg, err := kube.NewClient(opts.KubeconfigPath, opts.Context)
-	if err != nil {
-		return nil, fmt.Errorf("verify: building kubernetes client: %w", err)
+	// Honor the testing seam first; if no client was injected, build the
+	// production one. The verifier also needs a *rest.Config when the
+	// caller asks for the in-pod probe and did not supply a fake Exec
+	// runner; we plumb both through.
+	client := opts.KubeClient
+	cfg := opts.RestConfig
+	if client == nil {
+		cs, restCfg, err := kube.NewClient(opts.KubeconfigPath, opts.Context)
+		if err != nil {
+			return nil, fmt.Errorf("verify: building kubernetes client: %w", err)
+		}
+		client = cs
+		cfg = restCfg
 	}
 
 	res, err := verifier.Verify(ctx, verifier.Options{
@@ -51,6 +61,7 @@ func Verify(ctx context.Context, opts VerifyOptions) (*schema.VerifyReport, erro
 		Config:           cfg,
 		Plan:             plan,
 		InPodProbe:       opts.InPodProbe,
+		Exec:             opts.ExecRunner,
 		Stderr:           stderr,
 		Cluster:          kube.CurrentContext(opts.KubeconfigPath),
 		AgentmoatVersion: Version,

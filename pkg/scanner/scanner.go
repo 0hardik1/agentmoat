@@ -532,6 +532,87 @@ func workloadFromPod(p *corev1.Pod) Workload {
 	}
 }
 
+// GetByRef fetches a single workload by (kind, namespace, name) and returns
+// the canonical Workload. This is the single-workload counterpart to
+// Enumerate: the MCP server's `assess_workload` tool calls it (via
+// pkg/agentmoat.AssessWorkload) so an operator can classify one named
+// workload without paying for a full cluster scan.
+//
+// kind must match one of the strings the rest of the scanner uses
+// ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod").
+// Unknown kinds return a "scanner.GetByRef: unsupported kind" error so the
+// orchestrator can translate it into an MCP tool-result error.
+//
+// The unexported workloadFromX helpers are reused so canonicalization
+// (label/annotation copying, PodSpec unwrap, image-ref collection) lives in
+// exactly one place. apierrors.IsNotFound is preserved on the wrapped
+// error so callers can branch on a missing workload if they want to.
+func GetByRef(ctx context.Context, client kubernetes.Interface, kind, namespace, name string) (Workload, error) {
+	if client == nil {
+		return Workload{}, fmt.Errorf("scanner.GetByRef: nil client")
+	}
+	if namespace == "" || name == "" {
+		return Workload{}, fmt.Errorf("scanner.GetByRef: namespace and name are required")
+	}
+	fetch, ok := getByRefFetchers[kind]
+	if !ok {
+		return Workload{}, fmt.Errorf("scanner.GetByRef: unsupported kind %q", kind)
+	}
+	w, err := fetch(ctx, client, namespace, name)
+	if err != nil {
+		return Workload{}, fmt.Errorf("get %s %s/%s: %w", kind, namespace, name, err)
+	}
+	return w, nil
+}
+
+// getByRefFetchers maps each supported Kind to the typed Get + converter
+// pair. Split out so GetByRef stays under the linter's cyclomatic limit
+// and so adding a new Kind is a single map entry.
+var getByRefFetchers = map[string]func(ctx context.Context, client kubernetes.Interface, namespace, name string) (Workload, error){
+	"Deployment": func(ctx context.Context, c kubernetes.Interface, ns, n string) (Workload, error) {
+		obj, err := c.AppsV1().Deployments(ns).Get(ctx, n, metav1.GetOptions{})
+		if err != nil {
+			return Workload{}, err
+		}
+		return workloadFromDeployment(obj), nil
+	},
+	"StatefulSet": func(ctx context.Context, c kubernetes.Interface, ns, n string) (Workload, error) {
+		obj, err := c.AppsV1().StatefulSets(ns).Get(ctx, n, metav1.GetOptions{})
+		if err != nil {
+			return Workload{}, err
+		}
+		return workloadFromStatefulSet(obj), nil
+	},
+	"DaemonSet": func(ctx context.Context, c kubernetes.Interface, ns, n string) (Workload, error) {
+		obj, err := c.AppsV1().DaemonSets(ns).Get(ctx, n, metav1.GetOptions{})
+		if err != nil {
+			return Workload{}, err
+		}
+		return workloadFromDaemonSet(obj), nil
+	},
+	"Job": func(ctx context.Context, c kubernetes.Interface, ns, n string) (Workload, error) {
+		obj, err := c.BatchV1().Jobs(ns).Get(ctx, n, metav1.GetOptions{})
+		if err != nil {
+			return Workload{}, err
+		}
+		return workloadFromJob(obj), nil
+	},
+	"CronJob": func(ctx context.Context, c kubernetes.Interface, ns, n string) (Workload, error) {
+		obj, err := c.BatchV1().CronJobs(ns).Get(ctx, n, metav1.GetOptions{})
+		if err != nil {
+			return Workload{}, err
+		}
+		return workloadFromCronJob(obj), nil
+	},
+	"Pod": func(ctx context.Context, c kubernetes.Interface, ns, n string) (Workload, error) {
+		obj, err := c.CoreV1().Pods(ns).Get(ctx, n, metav1.GetOptions{})
+		if err != nil {
+			return Workload{}, err
+		}
+		return workloadFromPod(obj), nil
+	},
+}
+
 // copyMap returns a shallow copy of m. We never share map references with
 // the API objects returned by client-go: downstream code (the classifier,
 // planner, etc.) should be able to read these maps without worrying about
