@@ -2,50 +2,50 @@
 //
 // Why this file exists
 //
-//   The single most important property of a migration plan is that *low-risk
-//   workloads roll first*. If the operator notices something is wrong, the
-//   plan should have already moved the easy stuff (stateless web frontends,
-//   cooperative agents) before touching the scary stuff (StatefulSet
-//   databases, DaemonSets that run on every node). The orderer assigns each
-//   workload a deterministic integer "risk score" derived from its kind and
-//   the classifier reasons that fired against it, then sorts ascending.
+//	The single most important property of a migration plan is that *low-risk
+//	workloads roll first*. If the operator notices something is wrong, the
+//	plan should have already moved the easy stuff (stateless web frontends,
+//	cooperative agents) before touching the scary stuff (StatefulSet
+//	databases, DaemonSets that run on every node). The orderer assigns each
+//	workload a deterministic integer "risk score" derived from its kind and
+//	the classifier reasons that fired against it, then sorts ascending.
 //
 // Scoring rubric
 //
-//   The score is a sum of contributions. Each contribution is small
-//   (single-digit) so the score stays comprehensible when printed in the
-//   plan envelope. The exact magnitudes are tuned for the v1 fixture set
-//   in test/testdata/fixtures/; they are not load-bearing across the rest of
-//   the codebase. Three categories:
+//	The score is a sum of contributions. Each contribution is small
+//	(single-digit) so the score stays comprehensible when printed in the
+//	plan envelope. The exact magnitudes are tuned for the v1 fixture set
+//	in test/testdata/fixtures/; they are not load-bearing across the rest of
+//	the codebase. Three categories:
 //
-//     1. Controller kind:
-//          Deployment, Job, CronJob  -> 0  (cooperative scale; restart-safe).
-//          Pod                       -> 1  (standalone; rolling means
-//                                          delete+recreate by the operator).
-//          DaemonSet                 -> 3  (every node feels the change).
-//          StatefulSet               -> 5  (ordered, identity-stable; rolls
-//                                          one pod at a time and may need
-//                                          PVC/PV churn).
+//	  1. Controller kind:
+//	       Deployment, Job, CronJob  -> 0  (cooperative scale; restart-safe).
+//	       Pod                       -> 1  (standalone; rolling means
+//	                                       delete+recreate by the operator).
+//	       DaemonSet                 -> 3  (every node feels the change).
+//	       StatefulSet               -> 5  (ordered, identity-stable; rolls
+//	                                       one pod at a time and may need
+//	                                       PVC/PV churn).
 //
-//     2. Severity hints carried by Reasons:
-//          info-only reasons         -> +0 (no operational risk).
-//          one warn reason           -> +2
-//          multiple warn reasons     -> +3
+//	  2. Severity hints carried by Reasons:
+//	       info-only reasons         -> +0 (no operational risk).
+//	       one warn reason           -> +2
+//	       multiple warn reasons     -> +3
 //
-//     3. Overhead category (info-class reason already capped):
-//          network-throughput        -> +2 (performance-sensitive; cap-aware
-//                                          operators want to validate first).
-//          syscall-heavy             -> +1
+//	  3. Overhead category (info-class reason already capped):
+//	       network-throughput        -> +2 (performance-sensitive; cap-aware
+//	                                       operators want to validate first).
+//	       syscall-heavy             -> +1
 //
-//   Workloads with at least one error-class reason should never reach this
-//   scorer: the orderer's caller (planner.Plan) filters Incompatible workloads
-//   into the Excluded list before calling Order(). Defensive nil-handling is
-//   still cheap here.
+//	Workloads with at least one error-class reason should never reach this
+//	scorer: the orderer's caller (planner.Plan) filters Incompatible workloads
+//	into the Excluded list before calling Order(). Defensive nil-handling is
+//	still cheap here.
 //
 // Tie-breaker
 //
-//   Two workloads with the same score fall back to (Namespace, Kind, Name)
-//   lexicographic order so output stays deterministic.
+//	Two workloads with the same score fall back to (Namespace, Kind, Name)
+//	lexicographic order so output stays deterministic.
 package planner
 
 import (

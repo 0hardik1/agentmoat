@@ -95,39 +95,21 @@ func Enumerate(ctx context.Context, client kubernetes.Interface, opts EnumerateO
 	if err != nil {
 		return nil, fmt.Errorf("listing Deployments: %w", err)
 	}
-	for i := range deployments {
-		d := &deployments[i]
-		if cluster && !opts.IncludeSystem && isSystemNamespace(d.Namespace) {
-			continue
-		}
-		out = append(out, workloadFromDeployment(d))
-	}
+	out = appendDeployments(out, deployments, cluster, opts.IncludeSystem)
 
 	// 2) StatefulSets
 	statefulSets, err := listStatefulSets(ctx, client, namespaces, opts.LabelSelector, pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("listing StatefulSets: %w", err)
 	}
-	for i := range statefulSets {
-		s := &statefulSets[i]
-		if cluster && !opts.IncludeSystem && isSystemNamespace(s.Namespace) {
-			continue
-		}
-		out = append(out, workloadFromStatefulSet(s))
-	}
+	out = appendStatefulSets(out, statefulSets, cluster, opts.IncludeSystem)
 
 	// 3) DaemonSets
 	daemonSets, err := listDaemonSets(ctx, client, namespaces, opts.LabelSelector, pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("listing DaemonSets: %w", err)
 	}
-	for i := range daemonSets {
-		ds := &daemonSets[i]
-		if cluster && !opts.IncludeSystem && isSystemNamespace(ds.Namespace) {
-			continue
-		}
-		out = append(out, workloadFromDaemonSet(ds))
-	}
+	out = appendDaemonSets(out, daemonSets, cluster, opts.IncludeSystem)
 
 	// 4) CronJobs (parents). We do these before Jobs so we know which Jobs
 	// to skip below.
@@ -135,13 +117,7 @@ func Enumerate(ctx context.Context, client kubernetes.Interface, opts EnumerateO
 	if err != nil {
 		return nil, fmt.Errorf("listing CronJobs: %w", err)
 	}
-	for i := range cronJobs {
-		cj := &cronJobs[i]
-		if cluster && !opts.IncludeSystem && isSystemNamespace(cj.Namespace) {
-			continue
-		}
-		out = append(out, workloadFromCronJob(cj))
-	}
+	out = appendCronJobs(out, cronJobs, cluster, opts.IncludeSystem)
 
 	// 5) Jobs. Skip any Job whose Controller=true OwnerReference points at
 	// a CronJob: those are CronJob children and already accounted for.
@@ -149,16 +125,7 @@ func Enumerate(ctx context.Context, client kubernetes.Interface, opts EnumerateO
 	if err != nil {
 		return nil, fmt.Errorf("listing Jobs: %w", err)
 	}
-	for i := range jobs {
-		j := &jobs[i]
-		if cluster && !opts.IncludeSystem && isSystemNamespace(j.Namespace) {
-			continue
-		}
-		if hasControllerOfKind(j.OwnerReferences, "CronJob") {
-			continue
-		}
-		out = append(out, workloadFromJob(j))
-	}
+	out = appendJobs(out, jobs, cluster, opts.IncludeSystem)
 
 	// 6) Pods. Skip any Pod owned by a ReplicaSet, StatefulSet, DaemonSet,
 	// or Job: those are already covered by the controller rows above.
@@ -166,9 +133,80 @@ func Enumerate(ctx context.Context, client kubernetes.Interface, opts EnumerateO
 	if err != nil {
 		return nil, fmt.Errorf("listing Pods: %w", err)
 	}
-	for i := range pods {
-		p := &pods[i]
-		if cluster && !opts.IncludeSystem && isSystemNamespace(p.Namespace) {
+	out = appendPods(out, pods, cluster, opts.IncludeSystem)
+
+	sortWorkloads(out)
+	return out, nil
+}
+
+// shouldSkipSystem returns true when a cluster-wide list should skip this
+// namespace because it is a system namespace and the caller did not opt in.
+func shouldSkipSystem(ns string, cluster, includeSystem bool) bool {
+	return cluster && !includeSystem && isSystemNamespace(ns)
+}
+
+func appendDeployments(out []Workload, items []appsv1.Deployment, cluster, includeSystem bool) []Workload {
+	for i := range items {
+		d := &items[i]
+		if shouldSkipSystem(d.Namespace, cluster, includeSystem) {
+			continue
+		}
+		out = append(out, workloadFromDeployment(d))
+	}
+	return out
+}
+
+func appendStatefulSets(out []Workload, items []appsv1.StatefulSet, cluster, includeSystem bool) []Workload {
+	for i := range items {
+		s := &items[i]
+		if shouldSkipSystem(s.Namespace, cluster, includeSystem) {
+			continue
+		}
+		out = append(out, workloadFromStatefulSet(s))
+	}
+	return out
+}
+
+func appendDaemonSets(out []Workload, items []appsv1.DaemonSet, cluster, includeSystem bool) []Workload {
+	for i := range items {
+		ds := &items[i]
+		if shouldSkipSystem(ds.Namespace, cluster, includeSystem) {
+			continue
+		}
+		out = append(out, workloadFromDaemonSet(ds))
+	}
+	return out
+}
+
+func appendCronJobs(out []Workload, items []batchv1.CronJob, cluster, includeSystem bool) []Workload {
+	for i := range items {
+		cj := &items[i]
+		if shouldSkipSystem(cj.Namespace, cluster, includeSystem) {
+			continue
+		}
+		out = append(out, workloadFromCronJob(cj))
+	}
+	return out
+}
+
+func appendJobs(out []Workload, items []batchv1.Job, cluster, includeSystem bool) []Workload {
+	for i := range items {
+		j := &items[i]
+		if shouldSkipSystem(j.Namespace, cluster, includeSystem) {
+			continue
+		}
+		if hasControllerOfKind(j.OwnerReferences, "CronJob") {
+			continue
+		}
+		out = append(out, workloadFromJob(j))
+	}
+	return out
+}
+
+func appendPods(out []Workload, items []corev1.Pod, cluster, includeSystem bool) []Workload {
+	for i := range items {
+		p := &items[i]
+		if shouldSkipSystem(p.Namespace, cluster, includeSystem) {
 			continue
 		}
 		if hasControllerOfKind(p.OwnerReferences,
@@ -177,19 +215,21 @@ func Enumerate(ctx context.Context, client kubernetes.Interface, opts EnumerateO
 		}
 		out = append(out, workloadFromPod(p))
 	}
+	return out
+}
 
-	// Deterministic ordering so JSON/YAML diffs across runs are stable.
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Namespace != out[j].Namespace {
-			return out[i].Namespace < out[j].Namespace
+// sortWorkloads applies the deterministic ordering used in the report so
+// JSON/YAML diffs across runs are stable.
+func sortWorkloads(workloads []Workload) {
+	sort.SliceStable(workloads, func(i, j int) bool {
+		if workloads[i].Namespace != workloads[j].Namespace {
+			return workloads[i].Namespace < workloads[j].Namespace
 		}
-		if out[i].Kind != out[j].Kind {
-			return out[i].Kind < out[j].Kind
+		if workloads[i].Kind != workloads[j].Kind {
+			return workloads[i].Kind < workloads[j].Kind
 		}
-		return out[i].Name < out[j].Name
+		return workloads[i].Name < workloads[j].Name
 	})
-
-	return out, nil
 }
 
 // isSystemNamespace returns true if the namespace is one of the reserved

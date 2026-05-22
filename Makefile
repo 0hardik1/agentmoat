@@ -49,7 +49,7 @@ BIN_DIR := ./bin
 
 # Declare every target as phony. None of these targets produce a file at the
 # literal name of the target, so Make should always run the recipe.
-.PHONY: help build test lint tidy clean version kind-up kind-down e2e
+.PHONY: help build test lint tidy clean version kind-build kind-up kind-down e2e
 
 help: ## Print this help message (default target).
 	@# The awk pattern below scans this Makefile for lines of the form
@@ -97,17 +97,30 @@ version: ## Print the version string that build would embed.
 	@echo "GIT_SHA=$(GIT_SHA)"
 
 # ---------------------------------------------------------------------------
-# STUB targets: these are wired up here so the contract is visible from
-# Phase 0, but the implementation arrives in later phases (see plan.md
-# Section 14). Each prints a TODO marker and exits 0 so CI can call them
-# without failing the build before the feature lands.
+# Local cluster + end-to-end. The kind targets shell out to scripts under
+# scripts/ so the same logic is reachable from CI without going through
+# Make (and so contributors can run the steps individually while
+# debugging). All targets honor:
+#
+#   CLUSTER_NAME   kind cluster name (default: agentmoat-e2e)
+#   KEEP_CLUSTER   set to 1 to keep the cluster after `make e2e`
+#
+# kind topology: a stock control-plane + a worker node built from
+# kind/Dockerfile.gvisor-node (real runsc + containerd v2 shim baked in,
+# labelled `runtime=gvisor`). `make kind-build` builds the worker image;
+# `make kind-up` builds it implicitly before creating the cluster.
 # ---------------------------------------------------------------------------
 
-kind-up: ## (stub) Bring up a local kind cluster with gVisor preinstalled.
-	@echo "TODO: filled by later phases"
+kind-build: ## Build the gVisor-enabled kind worker image (idempotent).
+	@./scripts/build-gvisor-node.sh
 
-kind-down: ## (stub) Tear down the local kind cluster.
-	@echo "TODO: filled by later phases"
+kind-up: kind-build ## Bring up the local kind cluster used by `make e2e`.
+	@./scripts/kind-up.sh
 
-e2e: ## (stub) Run the Ginkgo e2e suite against the kind cluster.
-	@echo "TODO: filled by later phases"
+kind-down: ## Tear down the local kind cluster created by `make kind-up`.
+	@./scripts/kind-down.sh
+
+e2e: build ## Build the binary and run scripts/e2e.sh against a real kind cluster.
+	@# The script handles cluster create/delete itself so iterating with
+	@# KEEP_CLUSTER=1 reuses an existing cluster on subsequent runs.
+	@./scripts/e2e.sh

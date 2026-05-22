@@ -67,7 +67,7 @@ func Scan(ctx context.Context, opts ScanOptions) (*schema.ScanReport, error) {
 		// Surface override warnings (unknown IDs) on stderr but do not fail
 		// the run; the operator may be intentionally future-proofing.
 		for _, w := range warns {
-			fmt.Fprintf(stderr, "warning: %s\n", w)
+			_, _ = fmt.Fprintf(stderr, "warning: %s\n", w)
 		}
 	}
 
@@ -81,7 +81,7 @@ func Scan(ctx context.Context, opts ScanOptions) (*schema.ScanReport, error) {
 		enumOpts.Namespaces = opts.Namespaces
 	}
 
-	fmt.Fprintln(stderr, "scanning cluster...")
+	_, _ = fmt.Fprintln(stderr, "scanning cluster...")
 	workloads, err := scanner.Enumerate(ctx, client, enumOpts)
 	if err != nil {
 		return nil, fmt.Errorf("enumerating workloads: %w", err)
@@ -128,7 +128,7 @@ func Scan(ctx context.Context, opts ScanOptions) (*schema.ScanReport, error) {
 		Workloads: results,
 	}
 
-	fmt.Fprintf(stderr, "scanned %d workloads (compatible: %d, review: %d, incompatible: %d)\n",
+	_, _ = fmt.Fprintf(stderr, "scanned %d workloads (compatible: %d, review: %d, incompatible: %d)\n",
 		report.Spec.Summary.Total,
 		report.Spec.Summary.Compatible,
 		report.Spec.Summary.NeedsReview,

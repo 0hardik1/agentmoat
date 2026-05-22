@@ -46,11 +46,12 @@ func TestAppend_WritesJSONL(t *testing.T) {
 		t.Fatalf("Append #2: %v", err)
 	}
 
+	// #nosec G304 -- path is a t.TempDir() join; not attacker-controlled.
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("open audit file: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var lines []Entry
 	sc := bufio.NewScanner(f)
@@ -91,6 +92,7 @@ func TestAppend_PreservesProvidedTimestamp(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 
+	// #nosec G304 -- path is a t.TempDir() join; not attacker-controlled.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read: %v", err)

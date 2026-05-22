@@ -15,7 +15,7 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print agentmoat version and build info",
 		Run: func(cmd *cobra.Command, _ []string) {
-			fmt.Fprintf(cmd.OutOrStdout(), "agentmoat %s (%s)\n", Version, GitSHA)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "agentmoat %s (%s)\n", Version, GitSHA)
 		},
 	}
 }

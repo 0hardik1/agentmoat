@@ -19,15 +19,15 @@ import (
 // newWorkload constructs a Workload from a few options. Callers pass in
 // only the fields they need; the rest are zero-valued.
 type workloadOpts struct {
-	hostNetwork  bool
-	hostPID      bool
-	hostIPC      bool
-	privileged   bool
-	addCaps      []corev1.Capability
-	volumes      []corev1.Volume
-	gpuLimit     bool
-	images       []string
-	annotations  map[string]string
+	hostNetwork bool
+	hostPID     bool
+	hostIPC     bool
+	privileged  bool
+	addCaps     []corev1.Capability
+	volumes     []corev1.Volume
+	gpuLimit    bool
+	images      []string
+	annotations map[string]string
 }
 
 func newWorkload(o workloadOpts) scanner.Workload {

@@ -2,21 +2,21 @@
 //
 // Both functions follow the same shape:
 //
-//   1. Validate options.
-//   2. For every namespace the plan touches, read the existing
-//      `agentmoat.io/plan-hash` annotation.
-//   3. Walk the plan's steps in order. For each step:
-//        a. Decide if the step is needed (idempotency: if the namespace
-//           annotation already equals plan.Metadata.PlanHash, the step
-//           is `already-applied`).
-//        b. Build the patch bytes for the step.
-//        c. In dry-run mode, surface the patch in the StepResult and
-//           continue.
-//        d. Otherwise, send the patch to the API server, emit an
-//           Event, and append an audit line.
-//   4. If all steps in a namespace succeeded, write the namespace
-//      annotation (for Apply) or clear it (for Rollback).
-//   5. Return the assembled ApplyResult / RollbackResult.
+//  1. Validate options.
+//  2. For every namespace the plan touches, read the existing
+//     `agentmoat.io/plan-hash` annotation.
+//  3. Walk the plan's steps in order. For each step:
+//     a. Decide if the step is needed (idempotency: if the namespace
+//     annotation already equals plan.Metadata.PlanHash, the step
+//     is `already-applied`).
+//     b. Build the patch bytes for the step.
+//     c. In dry-run mode, surface the patch in the StepResult and
+//     continue.
+//     d. Otherwise, send the patch to the API server, emit an
+//     Event, and append an audit line.
+//  4. If all steps in a namespace succeeded, write the namespace
+//     annotation (for Apply) or clear it (for Rollback).
+//  5. Return the assembled ApplyResult / RollbackResult.
 //
 // The applier is NOT concurrent. PlannerOptions.MaxParallel is honored as
 // an envelope value (echoed back so the operator knows what the plan asked
@@ -111,7 +111,7 @@ func Apply(ctx context.Context, opts Options) (*schema.ApplyResult, error) {
 		if opts.DryRun {
 			sr.Status = schema.StepStatusApplied
 			stepResults = append(stepResults, sr)
-			fmt.Fprintf(stderr, "dry-run: would patch %s/%s %s\n",
+			_, _ = fmt.Fprintf(stderr, "dry-run: would patch %s/%s %s\n",
 				step.Target.Kind, step.Target.Namespace, step.Target.Name)
 			emitAudit(opts, step, sr, "apply")
 			continue
@@ -122,7 +122,7 @@ func Apply(ctx context.Context, opts Options) (*schema.ApplyResult, error) {
 			sr.Status = schema.StepStatusFailed
 			sr.Error = err.Error()
 			allSuccess[ns] = false
-			fmt.Fprintf(stderr, "failed: %s/%s %s: %v\n",
+			_, _ = fmt.Fprintf(stderr, "failed: %s/%s %s: %v\n",
 				step.Target.Kind, step.Target.Namespace, step.Target.Name, err)
 			stepResults = append(stepResults, sr)
 			emitAudit(opts, step, sr, "apply")
@@ -132,7 +132,7 @@ func Apply(ctx context.Context, opts Options) (*schema.ApplyResult, error) {
 		sr.Status = schema.StepStatusApplied
 		stepResults = append(stepResults, sr)
 		touchedNamespaces[ns] = true
-		fmt.Fprintf(stderr, "applied: %s/%s %s\n",
+		_, _ = fmt.Fprintf(stderr, "applied: %s/%s %s\n",
 			step.Target.Kind, step.Target.Namespace, step.Target.Name)
 		if opts.EmitEvents {
 			emitEvent(ctx, opts.Client, step, "Applied", "RuntimeClass set to "+step.RuntimeClassName)
@@ -144,14 +144,7 @@ func Apply(ctx context.Context, opts Options) (*schema.ApplyResult, error) {
 	// succeeded (or was already-applied). A namespace with even one
 	// failed step is intentionally NOT stamped: a re-run should retry.
 	if !opts.DryRun {
-		for _, ns := range affectedNamespaces(opts.Plan) {
-			if !allSuccess[ns] {
-				continue
-			}
-			if _, err := writeNamespaceAnnotation(ctx, opts.Client, ns, opts.Plan.Metadata.PlanHash, false); err != nil {
-				fmt.Fprintf(stderr, "warning: could not stamp namespace %s with plan-hash: %v\n", ns, err)
-			}
-		}
+		writeNamespaceStamps(ctx, opts.Client, opts.Plan, allSuccess, stderr, opts.Plan.Metadata.PlanHash, "stamp")
 	}
 
 	res.Spec = schema.ApplySpec{
@@ -202,7 +195,7 @@ func Rollback(ctx context.Context, opts Options) (*schema.RollbackResult, error)
 	}
 
 	// Walk in reverse order so the highest-risk (last-applied) workloads
-	// roll back first: this minimises the time the cluster spends in a
+	// roll back first: this minimizes the time the cluster spends in a
 	// partially-rolled-back state if one of the patches fails.
 	for i := len(opts.Plan.Spec.Steps) - 1; i >= 0; i-- {
 		step := opts.Plan.Spec.Steps[i]
@@ -235,7 +228,7 @@ func Rollback(ctx context.Context, opts Options) (*schema.RollbackResult, error)
 		if opts.DryRun {
 			sr.Status = schema.StepStatusApplied
 			stepResults = append(stepResults, sr)
-			fmt.Fprintf(stderr, "dry-run: would un-patch %s/%s %s\n",
+			_, _ = fmt.Fprintf(stderr, "dry-run: would un-patch %s/%s %s\n",
 				step.Target.Kind, step.Target.Namespace, step.Target.Name)
 			emitAudit(opts, step, sr, "rollback")
 			continue
@@ -255,7 +248,7 @@ func Rollback(ctx context.Context, opts Options) (*schema.RollbackResult, error)
 			sr.Status = schema.StepStatusFailed
 			sr.Error = err.Error()
 			allSuccess[ns] = false
-			fmt.Fprintf(stderr, "rollback failed: %s/%s %s: %v\n",
+			_, _ = fmt.Fprintf(stderr, "rollback failed: %s/%s %s: %v\n",
 				step.Target.Kind, step.Target.Namespace, step.Target.Name, err)
 			stepResults = append(stepResults, sr)
 			emitAudit(opts, step, sr, "rollback")
@@ -264,7 +257,7 @@ func Rollback(ctx context.Context, opts Options) (*schema.RollbackResult, error)
 
 		sr.Status = schema.StepStatusApplied
 		stepResults = append(stepResults, sr)
-		fmt.Fprintf(stderr, "rolled back: %s/%s %s\n",
+		_, _ = fmt.Fprintf(stderr, "rolled back: %s/%s %s\n",
 			step.Target.Kind, step.Target.Namespace, step.Target.Name)
 		if opts.EmitEvents {
 			emitEvent(ctx, opts.Client, step, "RolledBack", "RuntimeClass cleared")
@@ -275,14 +268,7 @@ func Rollback(ctx context.Context, opts Options) (*schema.RollbackResult, error)
 	// Clear the namespace annotation for any namespace where every step
 	// rolled back successfully.
 	if !opts.DryRun {
-		for _, ns := range affectedNamespaces(opts.Plan) {
-			if !allSuccess[ns] {
-				continue
-			}
-			if _, err := writeNamespaceAnnotation(ctx, opts.Client, ns, "", false); err != nil {
-				fmt.Fprintf(stderr, "warning: could not clear plan-hash on namespace %s: %v\n", ns, err)
-			}
-		}
+		writeNamespaceStamps(ctx, opts.Client, opts.Plan, allSuccess, stderr, "", "clear plan-hash on")
 	}
 
 	// The rollback walked steps in reverse; re-sort the per-step results
@@ -311,6 +297,22 @@ func validate(opts Options) error {
 		return fmt.Errorf("applier: opts.Plan is nil")
 	}
 	return nil
+}
+
+// writeNamespaceStamps writes (or clears) the plan-hash annotation on every
+// namespace where every step in the plan succeeded. A namespace with even
+// one failed step is intentionally NOT stamped/cleared so a re-run can
+// retry. Used by both Apply (value = planHash, verb = "stamp") and Rollback
+// (value = "", verb = "clear plan-hash on").
+func writeNamespaceStamps(ctx context.Context, client kubernetes.Interface, plan *schema.MigrationPlan, allSuccess map[string]bool, stderr io.Writer, value, verb string) {
+	for _, ns := range affectedNamespaces(plan) {
+		if !allSuccess[ns] {
+			continue
+		}
+		if _, err := writeNamespaceAnnotation(ctx, client, ns, value, false); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: could not %s namespace %s: %v\n", verb, ns, err)
+		}
+	}
 }
 
 // readAllNamespaceAnnotations reads the agentmoat.io/plan-hash annotation
@@ -412,7 +414,7 @@ func emitAudit(opts Options, step schema.PlanStep, result schema.StepResult, act
 		if stderr == nil {
 			stderr = os.Stderr
 		}
-		fmt.Fprintf(stderr, "warning: audit append failed: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "warning: audit append failed: %v\n", err)
 	}
 }
 

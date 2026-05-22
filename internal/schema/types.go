@@ -454,10 +454,10 @@ type StepResult struct {
 // different Kind. Reusing StepResult keeps consumers from having to teach
 // the renderer two near-identical shapes.
 type RollbackResult struct {
-	APIVersion string           `json:"apiVersion" yaml:"apiVersion"`
-	Kind       string           `json:"kind"       yaml:"kind"`
-	Metadata   ApplyMetadata    `json:"metadata"   yaml:"metadata"`
-	Spec       RollbackSpec     `json:"spec"       yaml:"spec"`
+	APIVersion string        `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string        `json:"kind"       yaml:"kind"`
+	Metadata   ApplyMetadata `json:"metadata"   yaml:"metadata"`
+	Spec       RollbackSpec  `json:"spec"       yaml:"spec"`
 }
 
 // NewRollbackResult returns an empty RollbackResult with the envelope filled.

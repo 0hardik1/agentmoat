@@ -8,27 +8,27 @@
 //
 // Step-by-step (parallels the doc comment on Plan itself):
 //
-//   1. Walk every WorkloadResult in the input report. Decide
-//      include-vs-exclude:
-//        - Compatibility == Incompatible -> Excluded with the join of rule
-//          IDs as the reason.
-//        - Compatibility == Review       -> Excluded unless opts.IncludeReview
-//                                            is true.
-//        - Compatibility == Compatible   -> Included.
+//  1. Walk every WorkloadResult in the input report. Decide
+//     include-vs-exclude:
+//     - Compatibility == Incompatible -> Excluded with the join of rule
+//     IDs as the reason.
+//     - Compatibility == Review       -> Excluded unless opts.IncludeReview
+//     is true.
+//     - Compatibility == Compatible   -> Included.
 //
-//   2. Score the included workloads via ordering.Order(). The orderer also
-//      tie-breaks deterministically on (Namespace, Kind, Name).
+//  2. Score the included workloads via ordering.Order(). The orderer also
+//     tie-breaks deterministically on (Namespace, Kind, Name).
 //
-//   3. Materialise PlanStep entries in the ordered slice. Each step is a
-//      declarative description: action=set-runtime-class, the target's
-//      identity, the runtime class name, an AddToleration flag, a WaitFor
-//      hint, and a Notes string. The applier turns these into patches.
+//  3. Materialize PlanStep entries in the ordered slice. Each step is a
+//     declarative description: action=set-runtime-class, the target's
+//     identity, the runtime class name, an AddToleration flag, a WaitFor
+//     hint, and a Notes string. The applier turns these into patches.
 //
-//   4. Compute the PlanHash by hashing the step list (deterministic, sorted
-//      input, see hashSteps).
+//  4. Compute the PlanHash by hashing the step list (deterministic, sorted
+//     input, see hashSteps).
 //
-//   5. Return a fully-formed *schema.MigrationPlan with envelope filled and
-//      Spec.Options echoing what the planner used.
+//  5. Return a fully-formed *schema.MigrationPlan with envelope filled and
+//     Spec.Options echoing what the planner used.
 //
 // The planner deliberately does NOT generate the JSON patch bytes here. That
 // keeps the planner package free of K8s API types, and means a Phase 2 reader
@@ -128,8 +128,8 @@ func Plan(report *schema.ScanReport, opts Options) (*schema.MigrationPlan, error
 	// must produce the same PlanHash so namespace-annotation idempotency
 	// works across operator runs.
 	hashIn := struct {
-		Steps   []schema.PlanStep      `json:"steps"`
-		Options schema.PlannerOptions  `json:"options"`
+		Steps   []schema.PlanStep     `json:"steps"`
+		Options schema.PlannerOptions `json:"options"`
 	}{
 		Steps:   steps,
 		Options: effective,

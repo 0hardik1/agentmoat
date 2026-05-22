@@ -11,7 +11,7 @@
 //     tier is used when an operator wants to point at a specific cluster
 //     without exporting KUBECONFIG.
 //
-//  2. Standard search path. The loader honours the KUBECONFIG env var (a
+//  2. Standard search path. The loader honors the KUBECONFIG env var (a
 //     colon-separated list, just like kubectl) and falls back to
 //     ~/.kube/config. This is the most common path on a workstation.
 //
@@ -40,7 +40,7 @@ import (
 )
 
 // userAgent is sent on every API request so cluster admins can attribute
-// traffic in audit logs. Keep this short and recognisable.
+// traffic in audit logs. Keep this short and recognizable.
 const userAgent = "agentmoat"
 
 // Client-side rate limits. The defaults baked into client-go (QPS=5,

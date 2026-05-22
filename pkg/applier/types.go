@@ -75,13 +75,3 @@ type Options struct {
 	// the ApplyResult / RollbackResult metadata. Optional.
 	AgentmoatVersion string
 }
-
-// defaults fills in the booleans whose zero value is the wrong default.
-// Called at the top of Apply()/Rollback() so callers do not have to repeat
-// the same boilerplate.
-func (o *Options) defaults() {
-	// Booleans with non-zero defaults are tricky in Go: there is no
-	// "unset" state. We resolve the two we care about (EmitEvents,
-	// AuditEnabled) by treating "not explicitly true" as false in tests.
-	// The orchestrator passes the production-correct values explicitly.
-}

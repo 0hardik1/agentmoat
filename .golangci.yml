@@ -2,10 +2,10 @@
 # agentmoat: golangci-lint configuration
 # ---------------------------------------------------------------------------
 #
-# This file is consumed by golangci-lint v1.62+ (the schema below assumes
-# v1.62 or newer). It is the single source of truth for what "lint clean"
-# means in this repo: contributors run `make lint`, CI runs the same command,
-# and there is no second config to drift.
+# Consumed by golangci-lint v2 (the schema below uses the `version: "2"`
+# config format introduced in golangci-lint v2.0). Single source of truth
+# for what "lint clean" means in this repo: `make lint` runs the same
+# command as CI.
 #
 # Philosophy:
 #   * Enable the linters that catch real bugs and the ones that enforce a
@@ -20,32 +20,32 @@
 #     down CI for no benefit.
 # ---------------------------------------------------------------------------
 
+version: "2"
+
 run:
   # Generous timeout: cold caches in CI plus a growing codebase can push past
   # the default 1m. 5m is comfortably above what we observe in practice.
   timeout: 5m
   # Tests are first-class code in this repo (the e2e suite is large), so we
-  # lint them too. Anything that should NOT be linted goes under skip-dirs.
+  # lint them too.
   tests: true
-  # skip-dirs: paths excluded from linting. testdata/ is fixture data, not
-  # code we ship; linting it is noise.
-  skip-dirs:
-    - test/testdata
 
 output:
-  # colored-line-number is human-friendly in a terminal and still parseable
-  # by editors. Switch to `github-actions` in CI if we want PR annotations.
-  format: colored-line-number
-  # Print issues even if the same line has multiple findings: surfacing all
-  # of them at once shortens the fix-rebuild-lint loop.
-  print-issued-lines: true
-  print-linter-name: true
+  # text output prints one finding per line and is colorized when stdout is
+  # a TTY. We surface the linter name and the offending source line so the
+  # fix-rebuild-lint loop is as tight as possible.
+  formats:
+    text:
+      path: stdout
+      print-linter-name: true
+      print-issued-lines: true
+      colors: true
 
 linters:
-  # We explicitly list every linter under `enable` and use `disable-all` so
-  # the surface is deterministic. The default set changes between releases
-  # of golangci-lint; pinning to an explicit list avoids surprise breakage.
-  disable-all: true
+  # `default: none` is the v2 equivalent of v1's `disable-all: true`. We
+  # explicitly enumerate every linter we run so the surface is deterministic
+  # across golangci-lint upgrades.
+  default: none
   enable:
     # govet: the official Go vet checks (printf format strings, struct tag
     # syntax, atomic alignment, lostcancel, etc). High signal, low noise.
@@ -56,15 +56,9 @@ linters:
     # staticcheck: SA-series checks for real bugs (nil derefs, unreachable
     # code, dead writes). The strongest single static analyzer for Go.
     - staticcheck
-    # gofmt: enforces canonical formatting. Running `gofmt -s` also catches
-    # simplifications (e.g. `interface{}` to `any`).
-    - gofmt
-    # goimports: formats imports into the standard three groups (stdlib,
-    # third-party, this module) and removes unused imports.
-    - goimports
-    # gocyclo: flags overly complex functions. min-complexity 15 is permissive
-    # enough that normal switch-heavy K8s code passes, but catches genuine
-    # spaghetti before it spreads.
+    # gocyclo: flags overly complex functions. min-complexity 15 is
+    # permissive enough that normal switch-heavy K8s code passes, but
+    # catches genuine spaghetti before it spreads.
     - gocyclo
     # gosec: security-focused checks. Particularly relevant for a tool that
     # handles kubeconfigs, runs shell commands, and exposes an MCP surface.
@@ -83,34 +77,47 @@ linters:
     # unused: detects unused constants, variables, functions, and types.
     # Helps keep dead code from accumulating during refactors.
     - unused
+  settings:
+    gocyclo:
+      # 15 is the project's complexity budget. Functions above this should be
+      # split. The number is a deliberate stricter-than-default (default 30)
+      # value: a v1 CLI should not have any 30-branch functions.
+      min-complexity: 15
+    gosec:
+      # Excludes for findings that are too noisy in early-stage scaffolding.
+      # Add back once the relevant code paths are real.
+      excludes:
+        # G104 ("Errors unhandled"): errcheck already covers this with
+        # better context-aware reporting, so we disable the gosec duplicate.
+        - G104
+    revive:
+      # Keep revive at default rules for now. We tune severity per-rule in
+      # later phases once we have more code to set policy on.
+      severity: warning
+    misspell:
+      # US English is the project's documented spelling convention.
+      locale: US
+  exclusions:
+    # In v2 the legacy "we know better" excludes are opt-in via the
+    # `default` preset. We leave the preset list empty (same as v1's
+    # `exclude-use-default: false`) so the lint surface stays honest.
+    paths:
+      # Fixture data, not code we ship; linting it is noise.
+      - test/testdata
 
-linters-settings:
-  gocyclo:
-    # 15 is the project's complexity budget. Functions above this should be
-    # split. The number is a deliberate stricter-than-default (default 30)
-    # value: a v1 CLI should not have any 30-branch functions.
-    min-complexity: 15
-  gosec:
-    # Excludes for findings that are too noisy in early-stage scaffolding.
-    # Add back once the relevant code paths are real.
-    excludes:
-      # G104 ("Errors unhandled"): errcheck already covers this with better
-      # context-aware reporting, so we disable the gosec duplicate.
-      - G104
-  revive:
-    # Keep revive at default rules for now. We tune severity per-rule in
-    # later phases once we have more code to set policy on.
-    severity: warning
-  misspell:
-    # US English is the project's documented spelling convention.
-    locale: US
+formatters:
+  # In v2 the formatting linters live in their own block (formatters run
+  # before linters so style noise does not mask real findings).
+  enable:
+    # gofmt: enforces canonical formatting. `gofmt -s` also catches
+    # simplifications (e.g. `interface{}` to `any`).
+    - gofmt
+    # goimports: formats imports into the standard three groups (stdlib,
+    # third-party, this module) and removes unused imports.
+    - goimports
 
 issues:
   # Increase the default-low caps so all findings show up in CI rather than
   # being hidden behind "showing first N of M".
   max-issues-per-linter: 0
   max-same-issues: 0
-  # Do not auto-exclude default issues. golangci-lint ships with a set of
-  # "we know better, ignore this" defaults that hide genuine findings. We
-  # opt out so the lint surface is honest.
-  exclude-use-default: false
