@@ -473,15 +473,23 @@ assert_eq "explain namespace name" "$NAMESPACE" "$NS_NAME"
 
 NS_TOTAL=$(jq -r '.spec.namespace.summary.total' "$WORK_DIR/explain-ns.json")
 NS_COMPAT=$(jq -r '.spec.namespace.summary.compatible' "$WORK_DIR/explain-ns.json")
+NS_REVIEW=$(jq -r '.spec.namespace.summary.needsReview' "$WORK_DIR/explain-ns.json")
 NS_INCOMPAT=$(jq -r '.spec.namespace.summary.incompatible' "$WORK_DIR/explain-ns.json")
-assert_eq "explain namespace summary.total" 3 "$NS_TOTAL"
+# The namespace carries one workload per classifier rule plus the original
+# web / cache / host-net trio (see test/e2e/manifests/workloads.yaml). Keep
+# the bucket counts in sync with that fixture: 2 compatible (web, cache),
+# 5 review-required, 7 incompatible.
+assert_eq "explain namespace summary.total" 14 "$NS_TOTAL"
 assert_eq "explain namespace summary.compatible" 2 "$NS_COMPAT"
-assert_eq "explain namespace summary.incompatible" 1 "$NS_INCOMPAT"
+assert_eq "explain namespace summary.needsReview" 5 "$NS_REVIEW"
+assert_eq "explain namespace summary.incompatible" 7 "$NS_INCOMPAT"
 
 # Every workload in the namespace must appear in the deep document.
 NS_NAMES=$(jq -r '.spec.namespace.workloads | map(.name) | sort | join(",")' \
   "$WORK_DIR/explain-ns.json")
-assert_eq "explain namespace workload names" "cache,host-net,web" "$NS_NAMES"
+assert_eq "explain namespace workload names" \
+  "cache,ebpf-app,fuse-app,gpu-app,host-ipc-app,host-net,host-pid-app,hostpath-app,iouring-app,kvm-app,perf-app,priv-app,raw-socket-app,web" \
+  "$NS_NAMES"
 
 # host-net is incompatible because of host-network; assert the rule fired
 # with the expected evidence in the structured output.
