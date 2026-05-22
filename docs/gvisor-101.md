@@ -55,3 +55,16 @@ syscall-heavy (redis, memcached) so operators can budget accordingly.
 - Platforms guide: https://gvisor.dev/docs/architecture_guide/platforms/
 - Performance guide: https://gvisor.dev/docs/architecture_guide/performance/
 - Compatibility matrix: https://gvisor.dev/docs/user_guide/compatibility/
+
+## Related agentmoat topics
+
+Each one is reachable from the CLI via `agentmoat explain <topic>`:
+
+- [RuntimeClass 101](runtimeclass-101.md): how Kubernetes routes a Pod
+  to `runsc` instead of `runc`.
+- [Threat model](threat-model.md): which CVE classes Sentry blocks that
+  the host kernel would not.
+- [Performance trade-offs](performance.md): when the syscall and network
+  cost is acceptable for your workload.
+- [Compatibility checklist](compatibility-checklist.md): which features
+  the sandbox declines to support.

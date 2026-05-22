@@ -51,3 +51,14 @@ accounting; see `deploy/runtimeclass.yaml`.
 - Upstream Kubernetes docs: https://kubernetes.io/docs/concepts/containers/runtime-class/
 - agentmoat-shipped manifest: [`deploy/runtimeclass.yaml`](../deploy/runtimeclass.yaml)
 - gVisor + containerd quick start: https://gvisor.dev/docs/user_guide/containerd/quick_start/
+
+## Related agentmoat topics
+
+These are reachable from the CLI via `agentmoat explain <topic>`:
+
+- [gVisor 101](gvisor-101.md): how the runtime that `runsc` invokes is
+  architected (Sentry, Gofer, platforms).
+- [Threat model](threat-model.md): why agentmoat steers workloads onto
+  this RuntimeClass in the first place.
+- [Compatibility checklist](compatibility-checklist.md): which workload
+  features force agentmoat to decline opting into the RuntimeClass.

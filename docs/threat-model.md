@@ -80,3 +80,10 @@ Out-of-bounds write via `PACKET_RX_RING`. Sentry does not implement
 - Microsoft: [Prompts become shells: RCE in AI agent frameworks](https://www.microsoft.com/en-us/security/blog/2026/05/07/prompts-become-shells-rce-vulnerabilities-ai-agent-frameworks/)
 - Sysdig: [New runc vulnerabilities](https://www.sysdig.com/blog/runc-container-escape-vulnerabilities)
 - gVisor blog: [Containing a real vulnerability (CVE-2020-14386)](https://gvisor.dev/blog/2020/09/18/containing-a-real-vulnerability/)
+
+## Related agentmoat topics
+
+- [gVisor 101](gvisor-101.md): how Sentry, Gofer, and the platforms make
+  the syscall-surface reduction possible.
+- [Compatibility checklist](compatibility-checklist.md): the workloads
+  whose threat-mitigation gains agentmoat declines to capture (and why).

@@ -3,31 +3,29 @@
 #
 # What this exercises
 #
-#   1. `agentmoat scan`    against the kind API server (exit 2 path, JSON
-#                          output, summary counts, per-workload kinds).
-#   2. `agentmoat plan`    over the stored ScanReport (deterministic
-#                          ordering, two steps, PlanHash present).
-#   3. `agentmoat apply`   in dry-run mode (default), then again with
-#                          --dry-run=false (real strategic-merge patch),
-#                          then a third time to prove idempotency.
-#   4. `agentmoat rollback` to clear the patches and restore the
-#                          pre-apply spec.
+#   1. `agentmoat scan`     against the kind API server (exit 2 path, JSON
+#                           output, summary counts, per-workload kinds).
+#   2. `agentmoat plan`     over the stored ScanReport (deterministic
+#                           ordering, two steps, PlanHash present).
+#   3. `agentmoat apply`    in dry-run mode (default), then again with
+#                           --dry-run=false (real strategic-merge patch),
+#                           then a third time to prove idempotency.
+#   4. `agentmoat verify --in-pod-probe`  confirms each patched workload
+#                           actually runs on runsc by exec-ing a probe
+#                           inside the pod and grepping dmesg / proc for
+#                           gVisor markers. Run three times: after real
+#                           apply, after idempotent re-apply (still all
+#                           ok), and after rollback (expect mismatch=2
+#                           and exit 4).
+#   5. `agentmoat rollback` to clear the patches and restore the
+#                           pre-apply spec.
+#   6. `agentmoat explain`  smoke: list mode, known topic, unknown topic
+#                           (exit non-zero, stderr lists topics).
 #
-# What this DOES exercise that earlier revisions did not
-#
-#   - Real gVisor execution (runsc). The kind worker is built from
-#     kind/Dockerfile.gvisor-node and ships runsc + the containerd v2
-#     shim. The RuntimeClass uses handler=gvisor. After apply we exec
-#     into a patched pod and assert dmesg / /proc/version show gVisor
-#     markers, confirming the workload really moved to runsc and not
-#     just to a runc that's renamed "gvisor".
-#
-# What this DOES NOT exercise
-#
-#   - `agentmoat verify` / `agentmoat explain`. Phase 3 work; pkg/verifier
-#     and pkg/explainer are not implemented yet. The e2e probes the
-#     runtime directly via `kubectl exec` instead of going through the
-#     not-yet-built verifier.
+# Real gVisor execution: the kind worker is built from
+# kind/Dockerfile.gvisor-node and ships runsc + the containerd v2 shim.
+# The RuntimeClass uses handler=gvisor so `verify --in-pod-probe` will
+# actually see the gVisor Sentry signature in the pod's dmesg/proc.
 #
 # Environment knobs
 #
@@ -277,73 +275,44 @@ assert_eq "namespace plan-hash annotation" "$PLAN_HASH" "$NS_HASH"
 "${KCTL[@]}" -n "$NAMESPACE" rollout status statefulset/cache --timeout=180s
 
 # -----------------------------------------------------------------------------
-# 4b. gVisor probe: confirm patched pods are really running under runsc.
+# 4b. verify (post-apply, with --in-pod-probe): expect ok=2, exit 0.
 # -----------------------------------------------------------------------------
 #
-# The verifier package (Phase 3) is not built yet, so we probe the
-# runtime directly. Two checks per workload:
+# Single source of truth for "did the migration land": the verifier reads
+# every plan step, fetches the live pods, checks .spec.runtimeClassName,
+# and (with --in-pod-probe) execs a small script to confirm gVisor's
+# Sentry markers are present (dmesg banner, /proc/version, uname). Two
+# steps in this plan, so summary.ok must be 2.
 #
-#   1. Scheduling: the pod's .spec.nodeName must be the kind worker, the
-#      only node labelled `runtime=gvisor`. If RuntimeClass admission or
-#      the nodeSelector silently broke, the pod would land on the
-#      control-plane (or stay Pending) and this catches that.
-#
-#   2. Runtime signature: gVisor's Sentry emulates a Linux kernel and
-#      announces itself in dmesg (and sometimes /proc/version, depending
-#      on the release). A real runc execution shows the host kernel
-#      banner there. We grep case-insensitively for "gvisor"; one hit
-#      in either source is enough.
-#
-# We probe both web (Deployment) and cache (StatefulSet) because they
-# took different patch paths (strategic-merge on .spec.template.spec vs
-# the StatefulSet equivalent) and we want to catch a regression in
-# either path.
+# We use --in-pod-probe here (vs the cheaper field-only path used in the
+# post-rollback case below) because the kind worker is gVisor-real and
+# we want the e2e to catch a regression where a future containerd patch
+# accidentally falls back to runc despite handler=gvisor surviving.
 
-probe_gvisor() {
-  local kind="$1" name="$2" pod_label="$3"
-  local pod
-  pod=$("${KCTL[@]}" -n "$NAMESPACE" get pod -l "$pod_label" \
-    --field-selector=status.phase=Running \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-  if [[ -z "$pod" ]]; then
-    fail "gVisor probe: no Running pod found for $kind/$name (selector $pod_label)"
-  fi
-
-  local node
-  node=$("${KCTL[@]}" -n "$NAMESPACE" get pod "$pod" \
-    -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
-  case "$node" in
-    *worker*) ;;
-    *) fail "gVisor probe: $kind/$name pod '$pod' landed on '$node', expected a *worker* node" ;;
-  esac
-
-  # Combine sources so a release that drops one marker still passes.
-  # `dmesg` may fail with EPERM if a future kindest base tightens caps;
-  # we tolerate that and let /proc/version carry the check.
-  local probe_out
-  probe_out=$("${KCTL[@]}" -n "$NAMESPACE" exec "$pod" -- sh -c '
-    echo "=== dmesg (head) ==="
-    dmesg 2>&1 | head -40 || true
-    echo "=== /proc/version ==="
-    cat /proc/version 2>&1 || true
-    echo "=== uname -a ==="
-    uname -a 2>&1 || true
-  ' 2>&1 || true)
-
-  printf '%s\n' "$probe_out"
-
-  if ! printf '%s' "$probe_out" | grep -qi 'gvisor'; then
-    fail "gVisor probe: $kind/$name pod '$pod' on node '$node' shows no gVisor markers (see output above)"
-  fi
-  printf 'gVisor probe: %s/%s on node %s confirmed running under runsc.\n' \
-    "$kind" "$name" "$node"
-}
-
-log "gVisor probe: confirm web pod is really running under runsc"
-probe_gvisor Deployment web "app=web"
-
-log "gVisor probe: confirm cache pod is really running under runsc"
-probe_gvisor StatefulSet cache "app=cache"
+log "verify (post-apply, --in-pod-probe): expect ok=2, exit 0"
+set +e
+"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --in-pod-probe \
+  --output json >"$WORK_DIR/verify-after-apply.json"
+VERIFY_EXIT=$?
+set -e
+assert_eq "verify exit code (post-apply)" 0 "$VERIFY_EXIT"
+assert_eq "verify summary.ok (post-apply)" 2 \
+  "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-after-apply.json")"
+assert_eq "verify summary.mismatch (post-apply)" 0 \
+  "$(jq -r '.spec.summary.mismatch' "$WORK_DIR/verify-after-apply.json")"
+assert_eq "verify summary.error (post-apply)" 0 \
+  "$(jq -r '.spec.summary.error' "$WORK_DIR/verify-after-apply.json")"
+STATUSES=$(jq -r '.spec.results | map(.status) | sort | unique | join(",")' \
+  "$WORK_DIR/verify-after-apply.json")
+assert_eq "verify result statuses (post-apply)" "ok" "$STATUSES"
+ACTUALS=$(jq -r '.spec.results | map(.actual) | sort | unique | join(",")' \
+  "$WORK_DIR/verify-after-apply.json")
+assert_eq "verify result actuals (post-apply)" "gvisor" "$ACTUALS"
+# The probe should have detected gVisor markers in every pod it visited.
+PROBE_DETECTED_COUNT=$(jq -r \
+  '[.spec.results[].probe | select(.!=null) | select(.detected==true)] | length' \
+  "$WORK_DIR/verify-after-apply.json")
+assert_eq "verify probe detected count (post-apply)" 2 "$PROBE_DETECTED_COUNT"
 
 # -----------------------------------------------------------------------------
 # 5. idempotent re-apply: every step already-applied.
@@ -361,6 +330,22 @@ assert_eq "re-apply summary.alreadyApplied" 2 "$RE_ALREADY"
 assert_eq "re-apply summary.failed" 0 "$RE_FAILED"
 
 # -----------------------------------------------------------------------------
+# 5b. verify (post-idempotent-apply): still all-ok.
+# -----------------------------------------------------------------------------
+#
+# Same cluster state as 4b, just re-running the probe to confirm the
+# verifier is stateless and reads live cluster state (not the applier's
+# in-memory result).
+
+log "verify (post-idempotent-apply): still all-ok"
+"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --in-pod-probe \
+  --output json >"$WORK_DIR/verify-after-reapply.json"
+assert_eq "verify summary.ok (post-reapply)" 2 \
+  "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-after-reapply.json")"
+assert_eq "verify summary.mismatch (post-reapply)" 0 \
+  "$(jq -r '.spec.summary.mismatch' "$WORK_DIR/verify-after-reapply.json")"
+
+# -----------------------------------------------------------------------------
 # 6. rollback: runtimeClassName cleared; namespace annotation removed.
 # -----------------------------------------------------------------------------
 
@@ -376,9 +361,80 @@ assert_eq "rollback summary.failed" 0 "$RB_FAILED"
 wait_runtime_class deployment web ""
 wait_runtime_class statefulset cache ""
 
+# Wait for the rollback to actually roll new pods. The applier patches the
+# template synchronously, but the controller still needs to terminate the
+# gVisor pods and start fresh runc pods. Without this wait the post-
+# rollback verify can see either zero alive pods (transient) or still see
+# the gVisor-tagged pods (DeletionTimestamp not yet set) and produce the
+# wrong verdict.
+"${KCTL[@]}" -n "$NAMESPACE" rollout status deployment/web --timeout=180s
+"${KCTL[@]}" -n "$NAMESPACE" rollout status statefulset/cache --timeout=180s
+
 NS_HASH_AFTER=$("${KCTL[@]}" get namespace "$NAMESPACE" \
   -o jsonpath='{.metadata.annotations.agentmoat\.io/plan-hash}')
 assert_eq "namespace plan-hash after rollback" "" "$NS_HASH_AFTER"
+
+# -----------------------------------------------------------------------------
+# 6b. verify (post-rollback): expect mismatch=2 and exit 4.
+# -----------------------------------------------------------------------------
+#
+# The same plan is now stale: the pods exist but no longer carry
+# runtimeClassName=gvisor. The verifier should report mismatch on every
+# step and exit 4 (per docs/exit-codes.md). We deliberately omit
+# --in-pod-probe here: the workloads are back on runc, so the field
+# check alone is enough to drive the mismatch, and skipping the exec
+# saves a few seconds in CI.
+
+log "verify (post-rollback): expect mismatch=2 and exit 4"
+set +e
+"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" \
+  --output json >"$WORK_DIR/verify-after-rollback.json"
+VERIFY_RB_EXIT=$?
+set -e
+assert_eq "verify exit code (post-rollback)" 4 "$VERIFY_RB_EXIT"
+assert_eq "verify summary.ok (post-rollback)" 0 \
+  "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-after-rollback.json")"
+assert_eq "verify summary.mismatch (post-rollback)" 2 \
+  "$(jq -r '.spec.summary.mismatch' "$WORK_DIR/verify-after-rollback.json")"
+STATUSES_RB=$(jq -r '.spec.results | map(.status) | sort | unique | join(",")' \
+  "$WORK_DIR/verify-after-rollback.json")
+assert_eq "verify result statuses (post-rollback)" "mismatch" "$STATUSES_RB"
+
+# -----------------------------------------------------------------------------
+# 7. explain smoke: list mode, valid topic, unknown topic.
+# -----------------------------------------------------------------------------
+#
+# Cluster-independent (the explainer reads embedded docs, never the API
+# server). Cheap, so we run it at the end alongside the cluster checks.
+
+log "explain (no topic): expect topic list on stdout"
+EXPLAIN_LIST=$("${AGENT[@]}" explain)
+if ! printf '%s' "$EXPLAIN_LIST" | grep -q 'runtimeclass'; then
+  fail "explain (list) stdout missing 'runtimeclass':\n$EXPLAIN_LIST"
+fi
+
+log "explain runtimeclass: expect markdown content"
+EXPLAIN_RTC=$("${AGENT[@]}" explain runtimeclass)
+if [[ "${EXPLAIN_RTC:0:2}" != "# " ]]; then
+  fail "explain runtimeclass should start with '# ': got '${EXPLAIN_RTC:0:40}'"
+fi
+if (( ${#EXPLAIN_RTC} <= 200 )); then
+  fail "explain runtimeclass content too short (${#EXPLAIN_RTC} bytes)"
+fi
+
+log "explain bogus-topic: expect non-zero exit, valid topics in stderr"
+set +e
+EXPLAIN_BOGUS=$("${AGENT[@]}" explain bogus-topic 2>&1)
+EXPLAIN_BOGUS_EXIT=$?
+set -e
+if (( EXPLAIN_BOGUS_EXIT == 0 )); then
+  fail "explain bogus-topic should exit non-zero (got 0); output: $EXPLAIN_BOGUS"
+fi
+for want in runtimeclass gvisor threat-model performance compatibility; do
+  if ! printf '%s' "$EXPLAIN_BOGUS" | grep -q "$want"; then
+    fail "explain bogus-topic stderr missing topic '$want':\n$EXPLAIN_BOGUS"
+  fi
+done
 
 # -----------------------------------------------------------------------------
 # Done. Cleanup runs from the EXIT trap.

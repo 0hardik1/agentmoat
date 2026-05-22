@@ -80,6 +80,10 @@ func renderTableAny(doc any, w io.Writer) error {
 		return renderApplyResultTable(d, w, "apply")
 	case *schema.RollbackResult:
 		return renderRollbackResultTable(d, w)
+	case *schema.VerifyReport:
+		return renderVerifyReportTable(d, w)
+	case *schema.ExplainDocument:
+		return renderExplainDocumentTable(d, w)
 	default:
 		return fmt.Errorf("output: no table renderer for %T", doc)
 	}

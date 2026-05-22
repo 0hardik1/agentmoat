@@ -177,6 +177,92 @@ func summarizeReasons(reasons []schema.Reason) string {
 	return s
 }
 
+// renderVerifyReportTable is the VerifyReport-specific view: per-step verdict
+// against the live cluster. One row per step; the Probe column tells the
+// operator at a glance whether the in-pod gVisor probe ran and what it found.
+func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer) error {
+	s := report.Spec.Summary
+	_, _ = fmt.Fprintf(w, "agentmoat verify: %d steps verified\n", s.Total)
+	_, _ = fmt.Fprintf(w, "  ok: %d   mismatch: %d   error: %d\n",
+		s.OK, s.Mismatch, s.Error)
+	_, _ = fmt.Fprintf(w, "  plan-hash: %s   in-pod-probe: %v\n\n",
+		report.Metadata.PlanHash, report.Metadata.InPodProbe)
+
+	if len(report.Spec.Results) == 0 {
+		_, _ = fmt.Fprintln(w, "(no results)")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	defer func() { _ = tw.Flush() }()
+	_, _ = fmt.Fprintln(tw, "#\tSTATUS\tKIND/NS/NAME\tEXPECTED\tACTUAL\tPROBE\tMESSAGE")
+	for _, r := range report.Spec.Results {
+		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s/%s/%s\t%s\t%s\t%s\t%s\n",
+			r.Order,
+			string(r.Status),
+			r.Target.Kind, r.Target.Namespace, r.Target.Name,
+			r.Expected,
+			displayActual(r.Actual),
+			summarizeProbe(r.Probe),
+			r.Message,
+		)
+	}
+	return nil
+}
+
+// displayActual returns "(empty)" for an unset Actual so the table row is
+// readable; e2e jq assertions still see the empty string in JSON.
+func displayActual(actual string) string {
+	if actual == "" {
+		return "(empty)"
+	}
+	return actual
+}
+
+// summarizeProbe condenses a ProbeResult into one table cell. "-" when the
+// probe was not run, "ok" when markers were detected, "no markers" when the
+// exec succeeded but nothing matched, "exec-err" when the call itself failed.
+func summarizeProbe(p *schema.ProbeResult) string {
+	if p == nil {
+		return "-"
+	}
+	if p.Error != "" {
+		return "exec-err"
+	}
+	if p.Detected {
+		return "ok"
+	}
+	return "no markers"
+}
+
+// renderExplainDocumentTable prints the topic content as raw markdown when
+// Spec.Content is set, or the topic list (one per line) when only Spec.Topics
+// is populated. Both shapes are produced by the agentmoat.Explain orchestrator.
+func renderExplainDocumentTable(doc *schema.ExplainDocument, w io.Writer) error {
+	if doc.Spec.Content != "" {
+		// Topic mode: print the raw markdown so terminal pagers (less, etc.)
+		// render headings naturally. Trailing newline ensures the shell
+		// prompt lands on its own line.
+		content := doc.Spec.Content
+		if !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		_, _ = fmt.Fprint(w, content)
+		return nil
+	}
+
+	// List mode: a short header plus one topic name per line. The header
+	// names the binary so an operator who pipes `agentmoat explain` into
+	// less/grep still has the context.
+	_, _ = fmt.Fprintln(w, "agentmoat explain: available topics")
+	for _, t := range doc.Spec.Topics {
+		_, _ = fmt.Fprintf(w, "  %s\n", t)
+	}
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "Run `agentmoat explain <topic>` to print the topic content.")
+	return nil
+}
+
 // compactPatchPreview returns a one-line, length-bounded preview of a
 // strategic-merge or JSON-merge patch body. We strip whitespace and
 // truncate so a long CronJob patch doesn't wreck table alignment.
