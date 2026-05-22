@@ -52,3 +52,12 @@ The canonical compatibility matrix is maintained by the gVisor team at
 https://gvisor.dev/docs/user_guide/compatibility/. If you discover a
 category not flagged by agentmoat, please file an issue with the rule
 proposal.
+
+## Related agentmoat topics
+
+- [gVisor 101](gvisor-101.md): why these particular features are hard
+  for a user-space kernel to support.
+- [RuntimeClass 101](runtimeclass-101.md): how a flagged workload is
+  excluded from the RuntimeClass opt-in.
+- [Performance trade-offs](performance.md): the cost agentmoat trades
+  away in exchange for the safety boundary.

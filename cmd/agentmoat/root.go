@@ -36,11 +36,11 @@ func newRootCmd() *cobra.Command {
 		Short: "Read-only assessment and one-shot migration toolkit: runc -> gVisor",
 		Long: `agentmoat scans a Kubernetes cluster, classifies workloads by
 gVisor compatibility, plans and applies a migration to RuntimeClass gvisor,
-and rolls it back on demand.
+verifies the result, and rolls back on demand. It also embeds the gVisor
+educational docs so operators can read them without leaving the terminal.
 
-Phase 2 ships 'scan', 'plan', 'apply', and 'rollback'. Future phases add
-'verify' and 'explain'. Every mutating command (apply, rollback) defaults
-to --dry-run=true.
+Subcommands ship: 'scan', 'plan', 'apply', 'rollback', 'verify', 'explain'.
+Every mutating command (apply, rollback) defaults to --dry-run=true.
 
 Documentation: see docs/ in the repo or run 'agentmoat explain <topic>'.`,
 		SilenceUsage:  true,
@@ -73,6 +73,8 @@ Documentation: see docs/ in the repo or run 'agentmoat explain <topic>'.`,
 	root.AddCommand(newPlanCmd())
 	root.AddCommand(newApplyCmd())
 	root.AddCommand(newRollbackCmd())
+	root.AddCommand(newVerifyCmd())
+	root.AddCommand(newExplainCmd())
 	root.AddCommand(newVersionCmd())
 
 	return root

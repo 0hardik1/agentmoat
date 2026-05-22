@@ -103,3 +103,35 @@ type ApplyOptions struct {
 // RollbackOptions is the rollback-side counterpart of ApplyOptions. Fields
 // kept identical so callers can copy-paste between commands.
 type RollbackOptions = ApplyOptions
+
+// VerifyOptions configures pkg/agentmoat.Verify. Verify is read-only: it
+// loads a previously-applied MigrationPlan from disk, contacts the cluster,
+// and reports per-step whether the live state matches the plan.
+type VerifyOptions struct {
+	// KubeconfigPath and Context are the same as ScanOptions.
+	KubeconfigPath string
+	Context        string
+
+	// PlanPath is the path to a MigrationPlan YAML/JSON file on disk.
+	// Required: verify needs to know which workloads to inspect.
+	PlanPath string
+
+	// InPodProbe, when true, opts into the gVisor in-pod probe: for each
+	// step the verifier picks a Running pod and execs a small script that
+	// inspects /proc/cmdline, dmesg, and uname for gVisor markers. Cheap
+	// to skip in CI; opt-in by default so the standard run is purely
+	// API-side.
+	InPodProbe bool
+
+	// Stderr is the writer for progress messages. Defaults to os.Stderr
+	// in cmd/. Set to io.Discard to silence.
+	Stderr io.Writer
+}
+
+// ExplainOptions configures pkg/agentmoat.Explain. Explain is offline: it
+// reads from an embedded copy of docs/*.md and never contacts the cluster.
+type ExplainOptions struct {
+	// Topic is the topic name. Empty means "list available topics".
+	// Lookups are case-insensitive (handled in pkg/explainer).
+	Topic string
+}

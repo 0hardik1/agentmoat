@@ -27,10 +27,12 @@ const APIVersion = "agentmoat.io/v1alpha1"
 // Kinds emitted by agentmoat. Keep these short and PascalCase so they read
 // naturally in JSON output.
 const (
-	KindScanReport     = "ScanReport"
-	KindMigrationPlan  = "MigrationPlan"
-	KindApplyResult    = "ApplyResult"
-	KindRollbackResult = "RollbackResult"
+	KindScanReport      = "ScanReport"
+	KindMigrationPlan   = "MigrationPlan"
+	KindApplyResult     = "ApplyResult"
+	KindRollbackResult  = "RollbackResult"
+	KindVerifyReport    = "VerifyReport"
+	KindExplainDocument = "ExplainDocument"
 )
 
 // DefaultRuntimeClassName is the RuntimeClass name that the applier writes
@@ -472,4 +474,189 @@ func NewRollbackResult() *RollbackResult {
 type RollbackSpec struct {
 	Summary ApplySummary `json:"summary" yaml:"summary"`
 	Steps   []StepResult `json:"steps"   yaml:"steps"`
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 types: VerifyReport, ExplainDocument.
+//
+// VerifyReport is the output of `agentmoat verify`: one VerifyResult per
+// PlanStep, plus a summary. The renderer dispatches on Kind exactly like the
+// Phase 2 types.
+//
+// ExplainDocument is the output of `agentmoat explain`. For `--output table`
+// (the default) the renderer prints Spec.Content verbatim so operators see
+// the raw markdown; JSON and YAML keep the full envelope.
+// ---------------------------------------------------------------------------
+
+// VerifyStatus is the per-step verdict from the verifier. Downstream tools
+// may switch on these string values; treat them as stable.
+type VerifyStatus string
+
+const (
+	// VerifyStatusOK: the live cluster state matches what the plan asked
+	// for. For controller steps every pod selected by the controller
+	// reports the expected runtimeClassName; for Pod steps the pod itself
+	// does. When --in-pod-probe is on, the probe also returned gVisor
+	// markers.
+	VerifyStatusOK VerifyStatus = "ok"
+
+	// VerifyStatusMismatch: the target exists but its (or its pods')
+	// runtimeClassName does not match Expected. Common after rollback or
+	// when the operator points verify at the wrong plan.
+	VerifyStatusMismatch VerifyStatus = "mismatch"
+
+	// VerifyStatusError: the verifier could not reach a verdict. The
+	// controller was missing, the selector returned zero pods, the API
+	// server errored, or (when --in-pod-probe is on) the exec call
+	// itself failed. The Message field explains which.
+	VerifyStatusError VerifyStatus = "error"
+)
+
+// VerifyReport is the top-level envelope of `agentmoat verify` output.
+type VerifyReport struct {
+	APIVersion string         `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string         `json:"kind"       yaml:"kind"`
+	Metadata   VerifyMetadata `json:"metadata"   yaml:"metadata"`
+	Spec       VerifySpec     `json:"spec"       yaml:"spec"`
+}
+
+// NewVerifyReport returns an empty VerifyReport with APIVersion and Kind
+// pre-filled, ready for the orchestrator to populate.
+func NewVerifyReport() *VerifyReport {
+	return &VerifyReport{
+		APIVersion: APIVersion,
+		Kind:       KindVerifyReport,
+	}
+}
+
+// VerifyMetadata records when, where, and against what plan the verify ran.
+// PlanHash is carried so the operator can correlate a verify report with the
+// MigrationPlan that produced the apply.
+type VerifyMetadata struct {
+	GeneratedAt      string `json:"generatedAt" yaml:"generatedAt"`
+	Cluster          string `json:"cluster,omitempty" yaml:"cluster,omitempty"`
+	AgentmoatVersion string `json:"agentmoatVersion" yaml:"agentmoatVersion"`
+
+	// PlanHash is the hash of the MigrationPlan this verify ran against.
+	// Same value the applier writes to the namespace annotation.
+	PlanHash string `json:"planHash,omitempty" yaml:"planHash,omitempty"`
+
+	// InPodProbe records whether the verifier ran the gVisor in-pod probe
+	// (kubectl exec into a pod and grep /proc/cmdline et al). When false,
+	// the verifier only checked the controller's runtimeClassName field.
+	InPodProbe bool `json:"inPodProbe" yaml:"inPodProbe"`
+}
+
+// VerifySpec is the payload of a VerifyReport: a summary plus the per-step
+// results in plan order.
+type VerifySpec struct {
+	Summary VerifySummary  `json:"summary" yaml:"summary"`
+	Results []VerifyResult `json:"results" yaml:"results"`
+}
+
+// VerifySummary is the bucketed count of per-step VerifyStatus values. The
+// CLI's exit code is shaped from this: any non-ok count triggers exit 4
+// (see docs/exit-codes.md).
+type VerifySummary struct {
+	Total    int `json:"total"    yaml:"total"`
+	OK       int `json:"ok"       yaml:"ok"`
+	Mismatch int `json:"mismatch" yaml:"mismatch"`
+	Error    int `json:"error"    yaml:"error"`
+}
+
+// VerifyResult is one row of a VerifyReport: what we expected, what we found,
+// and (optionally) the result of the in-pod probe.
+type VerifyResult struct {
+	// Order is the 1-based position in the source plan. Useful when the
+	// operator is staring at a screen of results and wants to cross-
+	// reference with `agentmoat plan --output table`.
+	Order int `json:"order" yaml:"order"`
+
+	// Target identifies the workload this result is about.
+	Target WorkloadRef `json:"target" yaml:"target"`
+
+	// Status is the verdict (ok | mismatch | error).
+	Status VerifyStatus `json:"status" yaml:"status"`
+
+	// Expected is the runtimeClassName the plan asked for ("gvisor" by
+	// default).
+	Expected string `json:"expected" yaml:"expected"`
+
+	// Actual is the runtimeClassName the verifier found on the live
+	// workload. Empty when the workload was missing or no pods matched
+	// the selector; in those cases Status is "error" and Message explains.
+	Actual string `json:"actual,omitempty" yaml:"actual,omitempty"`
+
+	// Message is a one-sentence human-readable explanation. Always
+	// populated for non-ok results; may also be set for ok results to
+	// note something useful (e.g. "probe confirmed gVisor markers").
+	Message string `json:"message,omitempty" yaml:"message,omitempty"`
+
+	// Probe holds the in-pod probe result when --in-pod-probe is on.
+	// Nil when the probe was skipped.
+	Probe *ProbeResult `json:"probe,omitempty" yaml:"probe,omitempty"`
+}
+
+// ProbeResult is the output of one in-pod gVisor probe. The verifier picks a
+// representative Running pod for the step's target and execs a small script
+// that prints distinctive gVisor markers (dmesg, /proc/cmdline, uname).
+type ProbeResult struct {
+	// Pod is the name of the pod the verifier execed into.
+	Pod string `json:"pod" yaml:"pod"`
+
+	// Detected is true when the probe stdout contained at least one
+	// gVisor marker (case-insensitive). False means the probe ran but did
+	// not see a marker; that demotes the result to mismatch.
+	Detected bool `json:"detected" yaml:"detected"`
+
+	// Markers is a short, comma-separated list of the marker strings the
+	// probe found (e.g. "gvisor"). Empty when Detected is false.
+	Markers string `json:"markers,omitempty" yaml:"markers,omitempty"`
+
+	// Error captures the exec error (or stderr summary) when the probe
+	// failed outright. Populated only when the probe itself errored.
+	Error string `json:"error,omitempty" yaml:"error,omitempty"`
+}
+
+// ExplainDocument is the output of `agentmoat explain`. For `--output table`
+// the renderer ignores the envelope and prints Spec.Content (or the topic
+// list, when Spec.Topic is empty). JSON and YAML output keeps the envelope so
+// the MCP server and CI scripts can consume explain output structurally.
+type ExplainDocument struct {
+	APIVersion string          `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string          `json:"kind"       yaml:"kind"`
+	Metadata   ExplainMetadata `json:"metadata"   yaml:"metadata"`
+	Spec       ExplainSpec     `json:"spec"       yaml:"spec"`
+}
+
+// NewExplainDocument returns an empty ExplainDocument with the envelope filled.
+func NewExplainDocument() *ExplainDocument {
+	return &ExplainDocument{
+		APIVersion: APIVersion,
+		Kind:       KindExplainDocument,
+	}
+}
+
+// ExplainMetadata captures the timestamp and binary version of an explain
+// invocation. There is no cluster field because explain is offline.
+type ExplainMetadata struct {
+	GeneratedAt      string `json:"generatedAt" yaml:"generatedAt"`
+	AgentmoatVersion string `json:"agentmoatVersion" yaml:"agentmoatVersion"`
+}
+
+// ExplainSpec carries either the requested topic (when the user asked for
+// one) or the available topic list (when they did not).
+type ExplainSpec struct {
+	// Topic is the topic name the user asked for, lowercased. Empty when
+	// the user invoked `agentmoat explain` with no positional argument.
+	Topic string `json:"topic,omitempty" yaml:"topic,omitempty"`
+
+	// Content is the raw markdown content of the requested topic, sourced
+	// from docs/<topic>.md via embed.FS. Empty when Topic is empty.
+	Content string `json:"content,omitempty" yaml:"content,omitempty"`
+
+	// Topics is the list of available topic names, sorted, always
+	// populated. Lets `explain --output json` enumerate without two
+	// invocations.
+	Topics []string `json:"topics,omitempty" yaml:"topics,omitempty"`
 }
