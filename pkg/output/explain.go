@@ -38,7 +38,17 @@ import (
 // the caller is sure the output writer is a styled TTY. In all other
 // contexts (--no-color, NO_COLOR, piped output) we emit raw markdown so
 // pagers, jq, and the existing e2e jq path stay happy.
+//
+// Deep-explain branch: when Spec.Namespace is populated, the orchestrator
+// has produced a per-workload explanation document (from `explain
+// namespace <ns>` or `explain workload <ns>/<name>`). That branch lives
+// in explain_namespace.go: a SUMMARY block plus a per-workload section
+// with evidence and prose. Topic mode (Spec.Content / Spec.Topics) is
+// untouched.
 func renderExplainDocumentTable(doc *schema.ExplainDocument, w io.Writer, useColor bool) error {
+	if doc.Spec.Namespace != nil {
+		return renderNamespaceExplanation(doc.Spec.Namespace, w, useColor)
+	}
 	if doc.Spec.Content != "" {
 		return writeTopicContent(doc.Spec.Content, w, useColor)
 	}

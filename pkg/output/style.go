@@ -110,11 +110,12 @@ func ColorEnabled(w io.Writer, noColor bool) bool {
 // grep for. These are plain Unicode (not emoji codepoints), so they
 // render in single-cell width on every common terminal.
 const (
-	symbolOK    = "✓" // ✓ U+2713 CHECK MARK
-	symbolFail  = "✗" // ✗ U+2717 BALLOT X
-	symbolWarn  = "⚠" // ⚠ U+26A0 WARNING SIGN
-	symbolDot   = "•" // • U+2022 BULLET
-	symbolArrow = "→" // → U+2192 RIGHTWARDS ARROW
+	symbolOK      = "✓" // ✓ U+2713 CHECK MARK
+	symbolFail    = "✗" // ✗ U+2717 BALLOT X
+	symbolWarn    = "⚠" // ⚠ U+26A0 WARNING SIGN
+	symbolDot     = "•" // • U+2022 BULLET
+	symbolArrow   = "→" // → U+2192 RIGHTWARDS ARROW
+	symbolFinding = "▸" // ▸ U+25B8 BLACK RIGHT-POINTING SMALL TRIANGLE
 )
 
 // StatusBadge returns a symbol+space+colored-text rendering of a status

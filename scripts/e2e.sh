@@ -437,6 +437,94 @@ for want in runtimeclass gvisor threat-model performance compatibility; do
 done
 
 # -----------------------------------------------------------------------------
+# 8. explain namespace / workload: deep per-workload explanation.
+# -----------------------------------------------------------------------------
+#
+# Like scan, these subcommands hit the live API server (read-only). We
+# run them post-rollback so the cluster state is back to the pre-apply
+# baseline (host-net still incompatible, web + cache compatible), and we
+# assert on structured JSON so the assertions are stable.
+
+log "explain namespace: expect exit 2 (host-net is incompatible) and structured findings"
+set +e
+"${AGENT[@]}" explain namespace "$NAMESPACE" --output json \
+  >"$WORK_DIR/explain-ns.json"
+EXPLAIN_NS_EXIT=$?
+set -e
+assert_eq "explain namespace exit code" 2 "$EXPLAIN_NS_EXIT"
+
+EXPLAIN_KIND=$(jq -r '.kind' "$WORK_DIR/explain-ns.json")
+assert_eq "explain namespace kind" "ExplainDocument" "$EXPLAIN_KIND"
+
+NS_NAME=$(jq -r '.spec.namespace.name' "$WORK_DIR/explain-ns.json")
+assert_eq "explain namespace name" "$NAMESPACE" "$NS_NAME"
+
+NS_TOTAL=$(jq -r '.spec.namespace.summary.total' "$WORK_DIR/explain-ns.json")
+NS_COMPAT=$(jq -r '.spec.namespace.summary.compatible' "$WORK_DIR/explain-ns.json")
+NS_INCOMPAT=$(jq -r '.spec.namespace.summary.incompatible' "$WORK_DIR/explain-ns.json")
+assert_eq "explain namespace summary.total" 3 "$NS_TOTAL"
+assert_eq "explain namespace summary.compatible" 2 "$NS_COMPAT"
+assert_eq "explain namespace summary.incompatible" 1 "$NS_INCOMPAT"
+
+# Every workload in the namespace must appear in the deep document.
+NS_NAMES=$(jq -r '.spec.namespace.workloads | map(.name) | sort | join(",")' \
+  "$WORK_DIR/explain-ns.json")
+assert_eq "explain namespace workload names" "cache,host-net,web" "$NS_NAMES"
+
+# host-net is incompatible because of host-network; assert the rule fired
+# with the expected evidence in the structured output.
+HN_RULES=$(jq -r '.spec.namespace.workloads[] | select(.name=="host-net") | .findings | map(.ruleId) | sort | join(",")' \
+  "$WORK_DIR/explain-ns.json")
+if ! printf '%s' "$HN_RULES" | grep -q 'host-network'; then
+  fail "explain namespace host-net findings missing 'host-network': got '$HN_RULES'"
+fi
+
+HN_EVIDENCE=$(jq -r '.spec.namespace.workloads[] | select(.name=="host-net") | .findings[] | select(.ruleId=="host-network") | .evidence.hostNamespaces | join(",")' \
+  "$WORK_DIR/explain-ns.json")
+assert_eq "explain namespace host-net evidence.hostNamespaces" "hostNetwork" "$HN_EVIDENCE"
+
+# Prose must be embedded (non-empty whyMarkdown for the firing rule).
+HN_PROSE_LEN=$(jq -r '.spec.namespace.workloads[] | select(.name=="host-net") | .findings[] | select(.ruleId=="host-network") | .whyMarkdown | length' \
+  "$WORK_DIR/explain-ns.json")
+if (( HN_PROSE_LEN < 100 )); then
+  fail "explain namespace host-net whyMarkdown too short ($HN_PROSE_LEN bytes; expected embedded prose)"
+fi
+
+# Compatible workloads must carry the full Checked roster so JSON
+# consumers can see what was inspected even when nothing fired.
+WEB_CHECKED=$(jq -r '.spec.namespace.workloads[] | select(.name=="web") | .checked | length' \
+  "$WORK_DIR/explain-ns.json")
+if (( WEB_CHECKED < 10 )); then
+  fail "explain namespace web checked too short ($WEB_CHECKED entries; expected the full rule sweep)"
+fi
+
+log "explain workload: drill into host-net specifically"
+set +e
+"${AGENT[@]}" explain workload "$NAMESPACE/host-net" --output json \
+  >"$WORK_DIR/explain-wl.json"
+EXPLAIN_WL_EXIT=$?
+set -e
+assert_eq "explain workload exit code" 2 "$EXPLAIN_WL_EXIT"
+
+WL_COUNT=$(jq -r '.spec.namespace.workloads | length' "$WORK_DIR/explain-wl.json")
+assert_eq "explain workload result count" 1 "$WL_COUNT"
+WL_NAME=$(jq -r '.spec.namespace.workloads[0].name' "$WORK_DIR/explain-wl.json")
+assert_eq "explain workload name" "host-net" "$WL_NAME"
+
+# Bad workload reference must fail with a clear error.
+log "explain workload (bad ref): expect non-zero exit, helpful error"
+set +e
+EXPLAIN_BAD=$("${AGENT[@]}" explain workload bogus-ref 2>&1)
+EXPLAIN_BAD_EXIT=$?
+set -e
+if (( EXPLAIN_BAD_EXIT == 0 )); then
+  fail "explain workload bogus-ref should exit non-zero (got 0); output: $EXPLAIN_BAD"
+fi
+if ! printf '%s' "$EXPLAIN_BAD" | grep -q '<namespace>/<name>'; then
+  fail "explain workload bogus-ref error missing format hint:\n$EXPLAIN_BAD"
+fi
+
+# -----------------------------------------------------------------------------
 # Done. Cleanup runs from the EXIT trap.
 # -----------------------------------------------------------------------------
 

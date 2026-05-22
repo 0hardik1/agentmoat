@@ -659,4 +659,114 @@ type ExplainSpec struct {
 	// populated. Lets `explain --output json` enumerate without two
 	// invocations.
 	Topics []string `json:"topics,omitempty" yaml:"topics,omitempty"`
+
+	// Namespace is populated when the document was produced by
+	// `explain namespace <ns>` or `explain workload <ns>/<name>`.
+	// Nil for static-topic mode.
+	Namespace *NamespaceExplanation `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+}
+
+// NamespaceExplanation is the deep per-namespace explanation produced by
+// `agentmoat explain namespace <ns>` or `agentmoat explain workload <ns>/<name>`.
+// It is attached to ExplainSpec.Namespace when present; nil for static-topic mode.
+type NamespaceExplanation struct {
+	Name      string                `json:"name"      yaml:"name"`
+	Summary   Summary               `json:"summary"   yaml:"summary"`
+	Workloads []WorkloadExplanation `json:"workloads" yaml:"workloads"`
+}
+
+// WorkloadExplanation is the deep explanation for one workload: the
+// verdict, the recommendation, the list of rules that fired (with
+// structured evidence and prose), and (for compatible workloads) the
+// list of rules that did not fire.
+type WorkloadExplanation struct {
+	Kind           string        `json:"kind"           yaml:"kind"`
+	Namespace      string        `json:"namespace"      yaml:"namespace"`
+	Name           string        `json:"name"           yaml:"name"`
+	Compatibility  Compatibility `json:"compatibility"  yaml:"compatibility"`
+	Recommendation string        `json:"recommendation,omitempty" yaml:"recommendation,omitempty"`
+	Overhead       string        `json:"overhead,omitempty"       yaml:"overhead,omitempty"`
+	Findings       []RuleFinding `json:"findings,omitempty" yaml:"findings,omitempty"`
+	Checked        []RuleCheck   `json:"checked,omitempty"  yaml:"checked,omitempty"`
+}
+
+// RuleFinding is one rule that fired against a workload, with
+// structured evidence and deep human prose.
+type RuleFinding struct {
+	RuleID         string   `json:"ruleId"               yaml:"ruleId"`
+	Severity       Severity `json:"severity"             yaml:"severity"`
+	Title          string   `json:"title"                yaml:"title"`
+	WhyMarkdown    string   `json:"whyMarkdown,omitempty" yaml:"whyMarkdown,omitempty"`
+	Evidence       Evidence `json:"evidence,omitempty"   yaml:"evidence,omitempty"`
+	RemediationURL string   `json:"remediationUrl,omitempty" yaml:"remediationUrl,omitempty"`
+}
+
+// RuleCheck records a rule that was evaluated but did not fire. Used to
+// show the operator what was checked in a compatible verdict.
+type RuleCheck struct {
+	RuleID  string `json:"ruleId"  yaml:"ruleId"`
+	Outcome string `json:"outcome" yaml:"outcome"` // currently always "did-not-fire"
+}
+
+// Evidence is a discriminated record of the concrete facts that
+// triggered (or could trigger) a rule. Only the fields relevant to the
+// firing rule are populated; the rest stay zero so JSON output stays
+// terse.
+type Evidence struct {
+	HostNamespaces       []string        `json:"hostNamespaces,omitempty"       yaml:"hostNamespaces,omitempty"`
+	Capabilities         []CapabilityHit `json:"capabilities,omitempty"         yaml:"capabilities,omitempty"`
+	HostPaths            []HostPathHit   `json:"hostPaths,omitempty"            yaml:"hostPaths,omitempty"`
+	ImageMatches         []ImageMatch    `json:"imageMatches,omitempty"         yaml:"imageMatches,omitempty"`
+	GPURequests          []GPURequest    `json:"gpuRequests,omitempty"          yaml:"gpuRequests,omitempty"`
+	EnvVars              []EnvVarHit     `json:"envVars,omitempty"              yaml:"envVars,omitempty"`
+	Annotations          []AnnotationHit `json:"annotations,omitempty"          yaml:"annotations,omitempty"`
+	PrivilegedContainers []string        `json:"privilegedContainers,omitempty" yaml:"privilegedContainers,omitempty"`
+	CSIDrivers           []CSIDriverHit  `json:"csiDrivers,omitempty"           yaml:"csiDrivers,omitempty"`
+}
+
+// CapabilityHit names a container/capability pair that triggered a rule.
+type CapabilityHit struct {
+	Container  string `json:"container"  yaml:"container"`
+	Capability string `json:"capability" yaml:"capability"`
+}
+
+// HostPathHit names a hostPath volume, its host filesystem path, and the
+// containers that mount it.
+type HostPathHit struct {
+	Volume     string   `json:"volume"     yaml:"volume"`
+	Path       string   `json:"path"       yaml:"path"`
+	Containers []string `json:"containers,omitempty" yaml:"containers,omitempty"`
+}
+
+// ImageMatch records an image-substring hint that fired a rule.
+type ImageMatch struct {
+	Container   string `json:"container"   yaml:"container"`
+	Image       string `json:"image"       yaml:"image"`
+	HintPattern string `json:"hintPattern" yaml:"hintPattern"`
+}
+
+// GPURequest records a GPU resource request on a container.
+type GPURequest struct {
+	Container string `json:"container" yaml:"container"`
+	Resource  string `json:"resource"  yaml:"resource"`
+	Quantity  string `json:"quantity"  yaml:"quantity"`
+}
+
+// EnvVarHit records an env var that signals a feature (e.g. FUSE opt-in).
+type EnvVarHit struct {
+	Container string `json:"container" yaml:"container"`
+	Name      string `json:"name"      yaml:"name"`
+	Value     string `json:"value"     yaml:"value"`
+}
+
+// AnnotationHit records a pod-template annotation that triggered a rule.
+type AnnotationHit struct {
+	Key   string `json:"key"   yaml:"key"`
+	Value string `json:"value" yaml:"value"`
+}
+
+// CSIDriverHit records a CSI driver name (e.g. fuse) that triggered a rule.
+type CSIDriverHit struct {
+	Volume string `json:"volume" yaml:"volume"`
+	Driver string `json:"driver" yaml:"driver"`
 }

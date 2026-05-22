@@ -128,10 +128,54 @@ type VerifyOptions struct {
 	Stderr io.Writer
 }
 
-// ExplainOptions configures pkg/agentmoat.Explain. Explain is offline: it
-// reads from an embedded copy of docs/*.md and never contacts the cluster.
+// ExplainOptions configures pkg/agentmoat.Explain. The orchestrator
+// supports three modes; the fields below describe which one the caller
+// has selected.
+//
+// Mode 1: static-topic (Topic != "", Namespace == ""). Offline; reads the
+// embedded docs/*.md content and returns a topic envelope. Backwards
+// compatible with the previous Explain shape.
+//
+// Mode 2: list (Topic == "", Namespace == ""). Offline; returns just the
+// list of available topics (Spec.Topics).
+//
+// Mode 3: deep (Namespace != ""). Connects to the cluster like Scan does,
+// classifies the workloads in the named namespace, and attaches a
+// NamespaceExplanation to the document. When Workload is non-nil the
+// document is further narrowed to the single matching workload, but the
+// envelope shape is identical (a NamespaceExplanation with one entry).
 type ExplainOptions struct {
-	// Topic is the topic name. Empty means "list available topics".
-	// Lookups are case-insensitive (handled in pkg/explainer).
+	// Topic is the static-topic name. Empty means "list" mode (or
+	// "deep" mode when Namespace is set). Lookups are case-insensitive
+	// (handled in pkg/explainer).
 	Topic string
+
+	// Namespace selects deep mode. When non-empty the orchestrator
+	// performs a real scan + classify against this namespace and the
+	// Workload filter, ignoring Topic.
+	Namespace string
+
+	// Workload, when non-nil, narrows a deep-mode document to a single
+	// workload in the named namespace. Requires Namespace to be set.
+	// Nil means "every workload in the namespace".
+	Workload *WorkloadFilter
+
+	// Scan carries the kube/classifier configuration used by deep mode
+	// (kubeconfig path, context, label selector, rules override, etc.).
+	// Ignored in static-topic and list modes.
+	Scan ScanOptions
+}
+
+// WorkloadFilter narrows a deep-mode explanation to a single workload by
+// name (and optionally by kind, to disambiguate when two controllers in
+// the same namespace happen to share a name).
+type WorkloadFilter struct {
+	// Kind is the optional disambiguator: "Deployment", "StatefulSet",
+	// "DaemonSet", "Job", "CronJob", or "Pod". Empty means "match any
+	// kind"; the caller takes responsibility if multiple workloads then
+	// share the Name.
+	Kind string
+
+	// Name is the workload name. Required when WorkloadFilter is set.
+	Name string
 }
