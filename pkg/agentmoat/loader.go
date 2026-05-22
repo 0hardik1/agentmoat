@@ -5,7 +5,7 @@
 // is read-only and should not be coupled to the mutating package.
 //
 // The on-disk format is whatever sigs.k8s.io/yaml accepts (YAML or JSON,
-// since YAML is a JSON superset). The Kind sniff is the first defence
+// since YAML is a JSON superset). The Kind sniff is the first defense
 // against the operator pointing at a ScanReport by mistake.
 package agentmoat
 

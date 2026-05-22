@@ -1,4 +1,4 @@
-// Unit tests for `agentmoat verify`. The deep behaviour (per-step status
+// Unit tests for `agentmoat verify`. The deep behavior (per-step status
 // matrix, in-pod-probe seam) is exercised by pkg/verifier; the CLI tests
 // here just confirm flag wiring, help text, and the exit-code-shaping
 // helper.
@@ -56,7 +56,7 @@ func TestHasVerifyFailures(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-					r := &schema.VerifyReport{Spec: schema.VerifySpec{Summary: tc.s}}
+			r := &schema.VerifyReport{Spec: schema.VerifySpec{Summary: tc.s}}
 			if got := hasVerifyFailures(r); got != tc.want {
 				t.Errorf("hasVerifyFailures(%+v) = %v, want %v", tc.s, got, tc.want)
 			}

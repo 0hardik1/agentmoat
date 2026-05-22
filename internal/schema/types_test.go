@@ -194,7 +194,7 @@ func TestExplainDocumentRoundTrip(t *testing.T) {
 }
 
 // TestNewVerifyReportEnvelope asserts the constructor pre-fills the envelope.
-// Trivial but pins behaviour the orchestrator depends on.
+// Trivial but pins behavior the orchestrator depends on.
 func TestNewVerifyReportEnvelope(t *testing.T) {
 	t.Parallel()
 	r := NewVerifyReport()

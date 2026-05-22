@@ -220,7 +220,7 @@ func TestRenderExplainDocumentJSON(t *testing.T) {
 }
 
 // TestRenderUnknownType asserts the dispatcher errors cleanly when given a
-// type it does not know how to render. Pins behaviour the CLI relies on.
+// type it does not know how to render. Pins behavior the CLI relies on.
 func TestRenderUnknownType(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
