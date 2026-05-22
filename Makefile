@@ -49,7 +49,7 @@ BIN_DIR := ./bin
 
 # Declare every target as phony. None of these targets produce a file at the
 # literal name of the target, so Make should always run the recipe.
-.PHONY: help build test lint tidy clean version kind-build kind-up kind-down e2e scan
+.PHONY: help build test lint tidy clean version kind-build kind-up kind-down e2e scan mcp-smoke
 
 help: ## Print this help message (default target).
 	@# The awk pattern below scans this Makefile for lines of the form
@@ -132,3 +132,12 @@ scan: build ## Run `agentmoat scan` against the current kubeconfig context.
 	@# call `./bin/agentmoat scan --foo` directly; this target is the
 	@# zero-flag convenience for local iteration.
 	@./bin/agentmoat scan
+
+mcp-smoke: build ## Drive a JSON-RPC session against agentmoat-mcp on the kind cluster.
+	@# Assumes the kind cluster is already up (run `make kind-up` first).
+	@# scripts/mcp-smoke.sh sends initialize + tools/call scan_cluster +
+	@# tools/call propose_plan and asserts the result bodies parse as
+	@# ScanReport and MigrationPlan respectively. Kept separate from
+	@# `make e2e` so a CLI regression cannot block MCP iteration and
+	@# vice versa.
+	@./scripts/mcp-smoke.sh
