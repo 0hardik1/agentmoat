@@ -15,6 +15,8 @@ package main
 
 import (
 	"context"
+	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -64,12 +66,21 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	renderOpts := output.RenderOptions{
+		NoColor: flagNoColor || os.Getenv("NO_COLOR") != "",
+	}
+
+	stderr := cmd.ErrOrStderr()
+	if flagQuiet {
+		stderr = io.Discard
+	}
+
 	opts := agentmoat.VerifyOptions{
 		KubeconfigPath: flagKubeconfig,
 		Context:        flagContext,
 		PlanPath:       flagVerifyPlanPath,
 		InPodProbe:     flagVerifyInPodProbe,
-		Stderr:         cmd.ErrOrStderr(),
+		Stderr:         stderr,
 	}
 
 	res, err := agentmoat.Verify(context.Background(), opts)
@@ -77,7 +88,7 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	if err := output.Render(res, format, cmd.OutOrStdout()); err != nil {
+	if err := output.Render(res, format, cmd.OutOrStdout(), renderOpts); err != nil {
 		return err
 	}
 

@@ -13,6 +13,10 @@
 // scripts can switch between them with no schema translation. Table output
 // is bespoke per Kind because each shape (scan summary, ordered plan steps,
 // apply result table) has its own most-useful columns.
+//
+// Color contract: only the table format ever emits ANSI escape codes. JSON
+// and YAML are byte-identical regardless of the RenderOptions argument, so
+// machine consumers (jq, scripts, MCP clients) can rely on stable bytes.
 package output
 
 import (
@@ -33,6 +37,18 @@ const (
 	// FormatYAML: sigs.k8s.io/yaml. Same field names as JSON.
 	FormatYAML Format = "yaml"
 )
+
+// RenderOptions captures the optional knobs that influence how a document is
+// rendered. Zero-value is meaningful: auto-detect color from the writer.
+//
+// Only the table format reads these options. JSON and YAML ignore them so
+// that machine-readable output stays byte-identical regardless of CLI flags.
+type RenderOptions struct {
+	// NoColor, when true, forces ANSI escapes off even on a TTY. The CLI
+	// sets this when --no-color is passed or NO_COLOR is in the env. See
+	// pkg/output/style.go: ColorEnabled.
+	NoColor bool
+}
 
 // Parse maps a CLI string to a Format. Returns an error for unknown
 // values; the CLI catches this at flag-parse time before the work runs.
@@ -55,14 +71,21 @@ func Parse(s string) (Format, error) {
 // per Kind because each shape needs a different column layout.
 //
 // Pass either a pointer or a value; the helper unwraps both.
-func Render(doc any, format Format, w io.Writer) error {
+func Render(doc any, format Format, w io.Writer, opts RenderOptions) error {
 	switch format {
 	case FormatJSON:
+		// JSON/YAML branches deliberately ignore opts: their output must be
+		// byte-identical so downstream tools (jq, yq, MCP, etc.) are stable.
 		return renderJSONAny(doc, w)
 	case FormatYAML:
 		return renderYAMLAny(doc, w)
 	case FormatTable:
-		return renderTableAny(doc, w)
+		// Compute the color decision once and pass it down. We OR opts.NoColor
+		// with ColorEnabled's full check (which also handles NO_COLOR env and
+		// non-TTY writer) so the renderers themselves never branch on env or
+		// writer type.
+		useColor := !opts.NoColor && ColorEnabled(w, opts.NoColor)
+		return renderTableAny(doc, w, useColor)
 	default:
 		return fmt.Errorf("unsupported format %q", format)
 	}
@@ -70,20 +93,20 @@ func Render(doc any, format Format, w io.Writer) error {
 
 // renderTableAny dispatches the document on Kind / concrete type to the
 // matching table renderer.
-func renderTableAny(doc any, w io.Writer) error {
+func renderTableAny(doc any, w io.Writer, useColor bool) error {
 	switch d := doc.(type) {
 	case *schema.ScanReport:
-		return renderScanReportTable(d, w)
+		return renderScanReportTable(d, w, useColor)
 	case *schema.MigrationPlan:
-		return renderMigrationPlanTable(d, w)
+		return renderMigrationPlanTable(d, w, useColor)
 	case *schema.ApplyResult:
-		return renderApplyResultTable(d, w, "apply")
+		return renderApplyResultTable(d, w, "apply", useColor)
 	case *schema.RollbackResult:
-		return renderRollbackResultTable(d, w)
+		return renderRollbackResultTable(d, w, useColor)
 	case *schema.VerifyReport:
-		return renderVerifyReportTable(d, w)
+		return renderVerifyReportTable(d, w, useColor)
 	case *schema.ExplainDocument:
-		return renderExplainDocumentTable(d, w)
+		return renderExplainDocumentTable(d, w, useColor)
 	default:
 		return fmt.Errorf("output: no table renderer for %T", doc)
 	}
