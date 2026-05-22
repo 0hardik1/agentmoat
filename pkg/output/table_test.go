@@ -82,10 +82,14 @@ func TestRenderScanReportTable(t *testing.T) {
 		"agentmoat scan",              // title
 		"cluster: kind-agentmoat-e2e", // subtitle chip
 		"SUMMARY",                     // summary label
-		"compatible 1",                // counts
-		"review 1",                    //
-		"incompatible 1",              //
-		"NAMESPACE", "KIND", "NAME",   // headers
+		"3 workloads",                 // total noun on the SUMMARY headline
+		// Bar chart trailing-label cells (count + percent). 1/3 ~= 33% each.
+		"   1 (33%)",
+		// Per-row fill runes (no-color mode picks the per-item NoColorFill).
+		"█",                         // compatible row
+		"▓",                         // review row
+		"▒",                         // incompatible row
+		"NAMESPACE", "KIND", "NAME", // headers
 		"VERDICT", "REASONS",
 		"web", // row data
 		"node-exporter",
@@ -135,6 +139,32 @@ func TestRenderScanReportTable_Empty(t *testing.T) {
 	}
 }
 
+// TestRenderScanReportTable_NoChartWhenEmpty pins the fall-through: when
+// every bucket is zero, the chart helper returns "" so the renderer
+// prints the SUMMARY headline + the empty-state placeholder, with no
+// bar runes between them.
+func TestRenderScanReportTable_NoChartWhenEmpty(t *testing.T) {
+	t.Parallel()
+	report := schema.NewScanReport()
+	report.Spec.Summary = schema.Summary{Total: 0}
+	out := renderToString(t, report)
+
+	// SUMMARY headline still prints with the total noun.
+	if !strings.Contains(out, "0 workloads") {
+		t.Errorf("expected SUMMARY headline '0 workloads', got:\n%s", out)
+	}
+	// No chart should be emitted: none of the four fill runes appear.
+	for _, r := range []rune{'█', '▓', '▒', '░'} {
+		if strings.ContainsRune(out, r) {
+			t.Errorf("expected no chart fill rune %q in empty output, got:\n%s", r, out)
+		}
+	}
+	// Empty-state placeholder still prints.
+	if !strings.Contains(out, "(no workloads found)") {
+		t.Errorf("empty scan missing placeholder\nfull output:\n%s", out)
+	}
+}
+
 func TestRenderMigrationPlanTable(t *testing.T) {
 	t.Parallel()
 
@@ -172,7 +202,11 @@ func TestRenderMigrationPlanTable(t *testing.T) {
 		"plan-hash: sha256:abc123",
 		"runtime-class: gvisor",
 		"SUMMARY",
-		"total 2", "included 1", "excluded 1",
+		"2 workloads", // total noun on the SUMMARY headline
+		// Bar chart trailing-label cells: 1 included + 1 excluded out of 2.
+		"   1 (50%)",
+		// Per-row fill runes: included uses '█', excluded uses '░'.
+		"█", "░",
 		// step table headers + data
 		"#", "RISK", "WAIT-FOR", "NOTES",
 		"web", "Ready", "fronted by LB",
@@ -246,7 +280,14 @@ func TestRenderApplyResultTable(t *testing.T) {
 		"plan-hash: sha256:abc",
 		"dry-run: true",
 		"SUMMARY",
-		"applied 2", "already-applied 1", "skipped 0", "failed 1",
+		"4 steps", // total noun on the SUMMARY headline
+		// Bar chart trailing-label cells. 2/4=50%, 1/4=25%, 0/4=0%, 1/4=25%.
+		"   2 (50%)",
+		"   1 (25%)",
+		"   0 ( 0%)",
+		// Per-row fill runes: applied=█, already-applied=▓, skipped omitted (count=0
+		// renders as all spaces in its bar slot), failed=▒.
+		"█", "▓", "▒",
 		"#", "STATUS", "NOTE",
 		"web", "queue", "nightly",
 		"API server rejected patch",
@@ -296,7 +337,9 @@ func TestRenderRollbackResultTable(t *testing.T) {
 		"agentmoat rollback", // title uses the action word
 		"plan-hash: sha256:abc",
 		"dry-run: false",
-		"applied 1",
+		"1 steps",     // total noun on the SUMMARY headline
+		"   1 (100%)", // single non-zero bucket = 100% of total
+		"█",           // applied fill rune
 		"web",
 		"✓ applied",
 	}
@@ -543,10 +586,13 @@ func TestRenderVerifyReportTable(t *testing.T) {
 		"plan-hash: hash-1",  // subtitle chip
 		"in-pod-probe: true", // subtitle chip
 		"SUMMARY",            // summary label
-		"ok 1",               // semantic-colored counts
-		"mismatch 1",         //
-		"error 0",            //
-		"#", "STATUS",        // headers
+		"2 results",          // total noun on the SUMMARY headline
+		// Bar chart trailing-label cells: 1/2 ok, 1/2 mismatch, 0/2 error.
+		"   1 (50%)",
+		"   0 ( 0%)",
+		// Per-row fill runes: ok=█, mismatch=▓; error row has count=0 so no fill.
+		"█", "▓",
+		"#", "STATUS", // headers
 		"KIND/NS/NAME",       //
 		"EXPECTED", "ACTUAL", //
 		"PROBE", "MESSAGE", //
