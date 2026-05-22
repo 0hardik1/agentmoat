@@ -61,7 +61,7 @@ func Apply(ctx context.Context, opts ApplyOptions) (*schema.ApplyResult, error) 
 		return nil, fmt.Errorf("apply: %w", err)
 	}
 
-	fmt.Fprintf(stderr, "apply: %d applied, %d already-applied, %d failed (dry-run=%v)\n",
+	_, _ = fmt.Fprintf(stderr, "apply: %d applied, %d already-applied, %d failed (dry-run=%v)\n",
 		res.Spec.Summary.Applied,
 		res.Spec.Summary.AlreadyApplied,
 		res.Spec.Summary.Failed,
@@ -102,7 +102,7 @@ func Rollback(ctx context.Context, opts RollbackOptions) (*schema.RollbackResult
 		return nil, fmt.Errorf("rollback: %w", err)
 	}
 
-	fmt.Fprintf(stderr, "rollback: %d rolled back, %d already-applied, %d failed (dry-run=%v)\n",
+	_, _ = fmt.Fprintf(stderr, "rollback: %d rolled back, %d already-applied, %d failed (dry-run=%v)\n",
 		res.Spec.Summary.Applied,
 		res.Spec.Summary.AlreadyApplied,
 		res.Spec.Summary.Failed,
@@ -121,6 +121,9 @@ func loadPlan(path string) (*schema.MigrationPlan, error) {
 	if path == "" {
 		return nil, fmt.Errorf("--plan is required")
 	}
+	// #nosec G304 -- path is a user-supplied CLI flag for a plan file the
+	// operator explicitly points us at; that is the entire purpose of
+	// `agentmoat apply --plan`.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", path, err)

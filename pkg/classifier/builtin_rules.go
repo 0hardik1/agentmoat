@@ -38,199 +38,111 @@ import (
 
 // RegisterBuiltins adds the 14 standard rules to the given Registry. Call
 // it once after NewRegistry() during CLI startup, before loading any YAML
-// overrides.
+// overrides. The rules are split into three group functions (one per
+// severity) so each stays under the project's cyclomatic-complexity budget.
 func RegisterBuiltins(r *Registry) {
+	registerErrorRules(r)
+	registerWarnRules(r)
+	registerInfoRules(r)
+}
+
+// registerErrorRules adds the 7 blocking-class rules (any of which makes a
+// workload `incompatible`).
+func registerErrorRules(r *Registry) {
 	r.Register(Rule{
 		ID:             "raw-socket",
 		Severity:       SeverityError,
 		Description:    "Container requests CAP_NET_RAW; gVisor disables raw sockets unless `--net-raw` is enabled at the runsc level.",
 		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/#networking",
-		Match: func(w scanner.Workload) bool {
-			// Operator-declared override: an explicit annotation that
-			// says "yes, this workload genuinely needs raw sockets".
-			// Useful for workloads whose image we cannot inspect.
-			if w.Annotations["agentmoat.io/needs-raw-socket"] == "true" {
-				return true
-			}
-			return anyContainerHasCapability(w.PodSpec, "NET_RAW")
-		},
+		Match:          matchRawSocket,
 	})
-
 	r.Register(Rule{
 		ID:             "host-network",
 		Severity:       SeverityError,
 		Description:    "Pod uses hostNetwork: true; gVisor cannot bridge to the host network namespace.",
 		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/#networking",
-		Match: func(w scanner.Workload) bool {
-			return w.PodSpec.HostNetwork
-		},
+		Match:          func(w scanner.Workload) bool { return w.PodSpec.HostNetwork },
 	})
-
 	r.Register(Rule{
 		ID:             "host-pid",
 		Severity:       SeverityError,
 		Description:    "Pod uses hostPID: true; gVisor isolates the PID namespace and cannot share the host's.",
 		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/",
-		Match: func(w scanner.Workload) bool {
-			return w.PodSpec.HostPID
-		},
+		Match:          func(w scanner.Workload) bool { return w.PodSpec.HostPID },
 	})
-
 	r.Register(Rule{
 		ID:             "host-ipc",
 		Severity:       SeverityError,
 		Description:    "Pod uses hostIPC: true; gVisor isolates the IPC namespace and cannot share the host's.",
 		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/",
-		Match: func(w scanner.Workload) bool {
-			return w.PodSpec.HostIPC
-		},
+		Match:          func(w scanner.Workload) bool { return w.PodSpec.HostIPC },
 	})
-
 	r.Register(Rule{
 		ID:             "privileged",
 		Severity:       SeverityError,
 		Description:    "Container runs in privileged mode; the gVisor sandbox boundary makes this meaningless and several capabilities are unsupported.",
 		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/",
-		Match: func(w scanner.Workload) bool {
-			for _, c := range allContainers(w.PodSpec) {
-				if c.SecurityContext != nil &&
-					c.SecurityContext.Privileged != nil &&
-					*c.SecurityContext.Privileged {
-					return true
-				}
-			}
-			return false
-		},
+		Match:          matchPrivileged,
 	})
-
-	r.Register(Rule{
-		ID:             "host-path-mount",
-		Severity:       SeverityWarn,
-		Description:    "Pod mounts a hostPath volume; the Gofer must proxy these reads/writes and some host-managed mount semantics are not preserved.",
-		RemediationURL: "https://gvisor.dev/docs/user_guide/filesystem/",
-		Match: func(w scanner.Workload) bool {
-			for _, v := range w.PodSpec.Volumes {
-				if v.HostPath != nil {
-					return true
-				}
-			}
-			return false
-		},
-	})
-
 	r.Register(Rule{
 		ID:             "ebpf",
 		Severity:       SeverityError,
 		Description:    "Workload appears to load eBPF programs (Cilium agent, Tetragon, Falco eBPF driver); gVisor does not expose the eBPF syscall surface.",
 		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/",
-		Match: func(w scanner.Workload) bool {
-			// Two-pronged match: a well-known image is a strong signal,
-			// but a capability-only match (BPF or SYS_ADMIN combined
-			// with a known image hint) catches custom-built loaders.
-			imageHint := imageContainsAny(w.ImageRefs,
-				"cilium/cilium",
-				"ghcr.io/cilium",
-				"quay.io/cilium",
-				"tetragon",
-				"falco",
-			)
-			if imageHint {
-				return true
-			}
-			// Capability-only path: BPF alone, or SYS_ADMIN paired with
-			// an eBPF-loader image hint. Pure SYS_ADMIN is too noisy to
-			// fire on by itself.
-			if anyContainerHasCapability(w.PodSpec, "BPF") {
-				return true
-			}
-			return false
-		},
+		Match:          matchEBPF,
 	})
-
-	r.Register(Rule{
-		ID:             "gpu-passthrough",
-		Severity:       SeverityWarn,
-		Description:    "Container requests an NVIDIA GPU resource (`nvidia.com/gpu`); gVisor's `nvproxy` only supports a subset of CUDA versions.",
-		RemediationURL: "https://gvisor.dev/docs/user_guide/gpu/",
-		Match: func(w scanner.Workload) bool {
-			for _, c := range allContainers(w.PodSpec) {
-				for name := range c.Resources.Limits {
-					if strings.HasPrefix(string(name), "nvidia.com/gpu") {
-						return true
-					}
-				}
-				for name := range c.Resources.Requests {
-					if strings.HasPrefix(string(name), "nvidia.com/gpu") {
-						return true
-					}
-				}
-			}
-			return false
-		},
-	})
-
-	r.Register(Rule{
-		ID:             "fuse-mount",
-		Severity:       SeverityWarn,
-		Description:    "FUSE filesystem in use; gVisor supports a subset of FUSE behavior, validate against the user guide.",
-		RemediationURL: "https://gvisor.dev/docs/user_guide/filesystem/",
-		Match: func(w scanner.Workload) bool {
-			for _, v := range w.PodSpec.Volumes {
-				if v.CSI != nil &&
-					strings.Contains(strings.ToLower(v.CSI.Driver), "fuse") {
-					return true
-				}
-			}
-			// Env var escape hatch: lets operators self-declare for
-			// workloads we cannot inspect (e.g. FUSE called from a
-			// sidecar started by an unrelated process).
-			for _, c := range allContainers(w.PodSpec) {
-				for _, env := range c.Env {
-					if env.Name == "AGENTMOAT_USES_FUSE" && env.Value == "true" {
-						return true
-					}
-				}
-			}
-			return false
-		},
-	})
-
-	r.Register(Rule{
-		ID:             "io-uring",
-		Severity:       SeverityWarn,
-		Description:    "Workload may use io_uring (annotation `agentmoat.io/uses-iouring=true` set); gVisor does not implement io_uring.",
-		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/",
-		Match: func(w scanner.Workload) bool {
-			return w.Annotations["agentmoat.io/uses-iouring"] == "true"
-		},
-	})
-
-	r.Register(Rule{
-		ID:             "perf-events",
-		Severity:       SeverityWarn,
-		Description:    "Workload requests CAP_PERFMON or CAP_SYS_ADMIN typically used for perf_event_open; gVisor does not expose perf events.",
-		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/",
-		Match: func(w scanner.Workload) bool {
-			return anyContainerHasCapability(w.PodSpec, "PERFMON") ||
-				anyContainerHasCapability(w.PodSpec, "SYS_ADMIN")
-		},
-	})
-
 	r.Register(Rule{
 		ID:             "kvm-nested",
 		Severity:       SeverityError,
 		Description:    "Workload uses /dev/kvm (nested virtualization); gVisor sandbox cannot pass through KVM, and on EKS nested virt is unavailable anyway.",
 		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/",
-		Match: func(w scanner.Workload) bool {
-			for _, v := range w.PodSpec.Volumes {
-				if v.HostPath != nil && v.HostPath.Path == "/dev/kvm" {
-					return true
-				}
-			}
-			return false
-		},
+		Match:          matchKVMNested,
 	})
+}
 
+// registerWarnRules adds the 5 review-class rules (any of which makes a
+// workload `review` unless the operator opts in via --include-review).
+func registerWarnRules(r *Registry) {
+	r.Register(Rule{
+		ID:             "host-path-mount",
+		Severity:       SeverityWarn,
+		Description:    "Pod mounts a hostPath volume; the Gofer must proxy these reads/writes and some host-managed mount semantics are not preserved.",
+		RemediationURL: "https://gvisor.dev/docs/user_guide/filesystem/",
+		Match:          matchHostPathMount,
+	})
+	r.Register(Rule{
+		ID:             "gpu-passthrough",
+		Severity:       SeverityWarn,
+		Description:    "Container requests an NVIDIA GPU resource (`nvidia.com/gpu`); gVisor's `nvproxy` only supports a subset of CUDA versions.",
+		RemediationURL: "https://gvisor.dev/docs/user_guide/gpu/",
+		Match:          matchGPUPassthrough,
+	})
+	r.Register(Rule{
+		ID:             "fuse-mount",
+		Severity:       SeverityWarn,
+		Description:    "FUSE filesystem in use; gVisor supports a subset of FUSE behavior, validate against the user guide.",
+		RemediationURL: "https://gvisor.dev/docs/user_guide/filesystem/",
+		Match:          matchFUSEMount,
+	})
+	r.Register(Rule{
+		ID:             "io-uring",
+		Severity:       SeverityWarn,
+		Description:    "Workload may use io_uring (annotation `agentmoat.io/uses-iouring=true` set); gVisor does not implement io_uring.",
+		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/",
+		Match:          func(w scanner.Workload) bool { return w.Annotations["agentmoat.io/uses-iouring"] == "true" },
+	})
+	r.Register(Rule{
+		ID:             "perf-events",
+		Severity:       SeverityWarn,
+		Description:    "Workload requests CAP_PERFMON or CAP_SYS_ADMIN typically used for perf_event_open; gVisor does not expose perf events.",
+		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/",
+		Match:          matchPerfEvents,
+	})
+}
+
+// registerInfoRules adds the 2 advisory-class rules (overhead hints; never
+// block migration).
+func registerInfoRules(r *Registry) {
 	r.Register(Rule{
 		ID:             "network-throughput",
 		Severity:       SeverityInfo,
@@ -240,7 +152,6 @@ func RegisterBuiltins(r *Registry) {
 			return imageContainsAny(w.ImageRefs, "nginx", "envoy", "haproxy", "traefik")
 		},
 	})
-
 	r.Register(Rule{
 		ID:             "syscall-heavy",
 		Severity:       SeverityInfo,
@@ -250,6 +161,116 @@ func RegisterBuiltins(r *Registry) {
 			return imageContainsAny(w.ImageRefs, "redis", "memcached")
 		},
 	})
+}
+
+// matchRawSocket detects CAP_NET_RAW or an operator-declared override.
+func matchRawSocket(w scanner.Workload) bool {
+	// Operator-declared override: an explicit annotation that says "yes,
+	// this workload genuinely needs raw sockets". Useful for workloads
+	// whose image we cannot inspect.
+	if w.Annotations["agentmoat.io/needs-raw-socket"] == "true" {
+		return true
+	}
+	return anyContainerHasCapability(w.PodSpec, "NET_RAW")
+}
+
+// matchPrivileged detects any container running in privileged mode.
+func matchPrivileged(w scanner.Workload) bool {
+	for _, c := range allContainers(w.PodSpec) {
+		if c.SecurityContext != nil &&
+			c.SecurityContext.Privileged != nil &&
+			*c.SecurityContext.Privileged {
+			return true
+		}
+	}
+	return false
+}
+
+// matchEBPF detects workloads that look like eBPF loaders: a well-known
+// image hint OR the CAP_BPF capability (added in Linux 5.8 specifically for
+// eBPF).
+func matchEBPF(w scanner.Workload) bool {
+	if imageContainsAny(w.ImageRefs,
+		"cilium/cilium",
+		"ghcr.io/cilium",
+		"quay.io/cilium",
+		"tetragon",
+		"falco",
+	) {
+		return true
+	}
+	return anyContainerHasCapability(w.PodSpec, "BPF")
+}
+
+// matchKVMNested detects a hostPath mount of /dev/kvm.
+func matchKVMNested(w scanner.Workload) bool {
+	for _, v := range w.PodSpec.Volumes {
+		if v.HostPath != nil && v.HostPath.Path == "/dev/kvm" {
+			return true
+		}
+	}
+	return false
+}
+
+// matchHostPathMount detects any hostPath volume.
+func matchHostPathMount(w scanner.Workload) bool {
+	for _, v := range w.PodSpec.Volumes {
+		if v.HostPath != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// matchGPUPassthrough detects an `nvidia.com/gpu` resource request or limit
+// on any container.
+func matchGPUPassthrough(w scanner.Workload) bool {
+	for _, c := range allContainers(w.PodSpec) {
+		if resourceListHasNvidia(c.Resources.Limits) || resourceListHasNvidia(c.Resources.Requests) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchFUSEMount detects either a CSI driver name containing "fuse" or the
+// env-var escape hatch operators use to self-declare FUSE-using workloads.
+func matchFUSEMount(w scanner.Workload) bool {
+	for _, v := range w.PodSpec.Volumes {
+		if v.CSI != nil && strings.Contains(strings.ToLower(v.CSI.Driver), "fuse") {
+			return true
+		}
+	}
+	// Env var escape hatch: lets operators self-declare for workloads we
+	// cannot inspect (e.g. FUSE called from a sidecar started by an
+	// unrelated process).
+	for _, c := range allContainers(w.PodSpec) {
+		for _, env := range c.Env {
+			if env.Name == "AGENTMOAT_USES_FUSE" && env.Value == "true" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchPerfEvents detects CAP_PERFMON or CAP_SYS_ADMIN, both of which are
+// commonly granted to use perf_event_open. gVisor's Sentry does not
+// implement the perf events syscall.
+func matchPerfEvents(w scanner.Workload) bool {
+	return anyContainerHasCapability(w.PodSpec, "PERFMON") ||
+		anyContainerHasCapability(w.PodSpec, "SYS_ADMIN")
+}
+
+// resourceListHasNvidia returns true if the resource list has any entry
+// whose name starts with `nvidia.com/gpu`.
+func resourceListHasNvidia(list corev1.ResourceList) bool {
+	for name := range list {
+		if strings.HasPrefix(string(name), "nvidia.com/gpu") {
+			return true
+		}
+	}
+	return false
 }
 
 // allContainers returns init + main containers as a single flat slice. The

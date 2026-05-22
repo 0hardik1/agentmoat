@@ -29,12 +29,3 @@ import (
 // schema package just to construct a PlannerOptions value. Both names refer
 // to the same struct.
 type Options = schema.PlannerOptions
-
-// defaultPlannerOptions returns the zero-value PlannerOptions tuned with
-// the runtime-class default that makes the planner usable without the
-// caller supplying explicit options.
-func defaultPlannerOptions() Options {
-	return Options{
-		RuntimeClassName: schema.DefaultRuntimeClassName,
-	}
-}

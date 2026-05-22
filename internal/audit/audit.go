@@ -119,11 +119,13 @@ func Append(entry Entry) (path string, err error) {
 	fileMu.Lock()
 	defer fileMu.Unlock()
 
+	// #nosec G304 -- path is computed from EnvPathOverride or HOME inside
+	// ResolvePath(); the audit file is intentionally user-configurable.
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return path, fmt.Errorf("opening audit file %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := f.Write(line); err != nil {
 		return path, fmt.Errorf("writing audit line: %w", err)

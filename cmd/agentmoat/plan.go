@@ -109,6 +109,9 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 // loadScanReport reads and parses a ScanReport from disk. The file may be
 // JSON or YAML; sigs.k8s.io/yaml normalises both internally.
 func loadScanReport(path string) (*schema.ScanReport, error) {
+	// #nosec G304 -- path is a user-supplied CLI flag for a scan file the
+	// operator explicitly points us at; that is the entire purpose of
+	// `agentmoat plan --scan`.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

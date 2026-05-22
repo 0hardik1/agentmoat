@@ -63,7 +63,7 @@ func Plan(ctx context.Context, opts PlanOptions) (*schema.MigrationPlan, error) 
 		plan.Metadata.AgentmoatVersion = Version
 	}
 
-	fmt.Fprintf(stderr, "planned %d steps (%d included, %d excluded)\n",
+	_, _ = fmt.Fprintf(stderr, "planned %d steps (%d included, %d excluded)\n",
 		plan.Spec.Summary.Total,
 		plan.Spec.Summary.Included,
 		plan.Spec.Summary.Excluded,
