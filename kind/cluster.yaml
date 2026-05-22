@@ -1,0 +1,53 @@
+# agentmoat: kind cluster config for `make e2e`.
+#
+# Two nodes:
+#
+#   control-plane   stock kindest/node, default runc runtime. Hosts the
+#                   API server, etcd, kindnetd, kube-proxy. Tainted
+#                   NoSchedule for user workloads by kind's defaults.
+#
+#   worker          custom image (kind/Dockerfile.gvisor-node) that
+#                   bakes in /usr/local/bin/runsc and
+#                   /usr/local/bin/containerd-shim-runsc-v1. Labelled
+#                   `runtime=gvisor` so the RuntimeClass's scheduling
+#                   nodeSelector pins gVisor pods here. Not tainted, so
+#                   the initial (pre-apply) workloads still schedule
+#                   without a toleration: the e2e creates them first and
+#                   then patches `runtimeClassName: gvisor` onto them.
+#
+# The "new node with gVisor runtime" wording from the goal maps directly
+# to the worker here: stock kind = the existing cluster, and the gVisor
+# image = the new node added for migrated workloads.
+#
+# `containerdConfigPatches` are concatenated into every node's
+# /etc/containerd/config.toml before containerd starts. We use this to
+# register a runtime named `gvisor` (matching the K8s RuntimeClass
+# handler) that resolves to the `io.containerd.runsc.v1` shim. The shim
+# reads /etc/containerd/runsc.toml for sandbox config (platform,
+# network), which the gVisor node image ships at that path. The
+# registration is benign on the control-plane node (no pod ever requests
+# the gvisor handler there because of the RuntimeClass nodeSelector).
+#
+# To build the worker image: `make kind-build` or
+# `scripts/build-gvisor-node.sh`. Both honor IMG_TAG and GVISOR_VERSION.
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor]
+      runtime_type = "io.containerd.runsc.v1"
+      pod_annotations = ["dev.gvisor.*"]
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor.options]
+      TypeUrl    = "io.containerd.runsc.v1.options"
+      ConfigPath = "/etc/containerd/runsc.toml"
+
+nodes:
+  - role: control-plane
+  - role: worker
+    # Keep this tag in sync with scripts/build-gvisor-node.sh
+    # (IMG_TAG default) and Makefile (kind-build).
+    image: agentmoat-kind-gvisor:dev
+    labels:
+      runtime: gvisor

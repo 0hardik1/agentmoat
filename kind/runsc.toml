@@ -1,0 +1,36 @@
+# agentmoat: runsc (gVisor) configuration consumed by the containerd shim.
+#
+# Baked into the kind node image at /etc/containerd/runsc.toml by
+# kind/Dockerfile.gvisor-node, and referenced from kind/cluster.yaml via
+# the containerdConfigPatches block:
+#
+#   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor.options]
+#     ConfigPath = "/etc/containerd/runsc.toml"
+#
+# This is intentionally a near-duplicate of packer/files/runsc.toml so the
+# two deployment surfaces (kind-on-laptop and EKS AMI) share the same
+# sandbox config. If you change the platform / network here, change the
+# Packer copy too (and vice versa).
+#
+# Why platform = "systrap":
+#   kind runs each node inside Docker. On macOS that's Docker Desktop's
+#   Linux VM (no nested KVM); on Linux laptops nested KVM is sometimes
+#   available but routinely blocked. systrap (a seccomp SIGSYS based
+#   platform) works in all of those environments and is the gVisor
+#   default since 2023.
+#
+# Why network = "sandbox":
+#   Use gVisor's userspace network stack (Netstack) rather than passing
+#   through to the host. Stronger isolation; ~20-40% throughput cost vs
+#   host networking. The e2e doesn't measure throughput; this is the
+#   conservative default.
+#
+# References:
+#   - https://gvisor.dev/docs/architecture_guide/platforms/
+#   - https://gvisor.dev/docs/user_guide/networking/
+#   - https://gvisor.dev/docs/user_guide/containerd/quick_start/
+
+[runsc_config]
+  platform = "systrap"
+  network  = "sandbox"
+  debug    = "false"

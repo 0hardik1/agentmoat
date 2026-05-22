@@ -1,0 +1,42 @@
+# agentmoat: e2e RuntimeClass.
+#
+# This is intentionally NOT deploy/runtimeclass.yaml.
+#
+#   - metadata.name is "gvisor" so it matches what `agentmoat plan` emits
+#     by default (schema.DefaultRuntimeClassName) and what the applier
+#     patches onto pod templates.
+#
+#   - handler is "gvisor" (the real one). The kind worker built from
+#     kind/Dockerfile.gvisor-node ships /usr/local/bin/runsc and the
+#     containerd v2 shim. kind/cluster.yaml's containerdConfigPatches
+#     register a containerd runtime named `gvisor` that points at the
+#     shim and reads /etc/containerd/runsc.toml for sandbox config.
+#     Pods carrying `runtimeClassName: gvisor` therefore actually run
+#     under runsc on the worker. The pre-Phase-5 version of this file
+#     pointed handler at runc as a kludge; that workaround is gone now
+#     that we have a real gVisor node.
+#
+#   - scheduling.nodeSelector pins gVisor pods to nodes labelled
+#     `runtime=gvisor`. In the kind cluster only the worker carries that
+#     label (see kind/cluster.yaml), so admission injects the selector
+#     on every pod that asks for this RuntimeClass and the pod is forced
+#     onto the gVisor-capable node. The control-plane has the runtime
+#     handler registered (because containerdConfigPatches apply to every
+#     node) but does NOT have the runsc binary; the nodeSelector keeps
+#     gVisor workloads off it.
+#
+#     We do NOT add a matching `runtime=gvisor:NoSchedule` taint on the
+#     worker. Without a taint the pre-apply workloads (which carry no
+#     RuntimeClass yet) can still schedule onto the worker (the
+#     control-plane is tainted by kind's defaults). After apply, those
+#     same pods get the gVisor RuntimeClass and continue running on the
+#     same node; rolling restarts pick up the new pod template cleanly.
+
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: gvisor
+scheduling:
+  nodeSelector:
+    runtime: gvisor
