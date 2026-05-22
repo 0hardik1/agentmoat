@@ -25,8 +25,10 @@ func registerExplain(srv *server.MCPServer, deps Deps) {
 	)
 
 	srv.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		_ = ctx // Explain is synchronous and does not honor ctx today.
-		doc, err := agentmoat.Explain(agentmoat.ExplainOptions{
+		// Static-topic mode (Namespace == "") ignores ctx, but the deep
+		// mode added in the explain-deep PR honors it. Pass ctx through
+		// so the signature stays consistent across both modes.
+		doc, err := agentmoat.Explain(ctx, agentmoat.ExplainOptions{
 			Topic: req.GetString("topic", ""),
 		})
 		if err != nil {

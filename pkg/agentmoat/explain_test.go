@@ -1,8 +1,17 @@
 // Tests for the Explain orchestrator. Verify orchestrator tests live in
 // verify_test.go.
+//
+// Coverage notes:
+//   - Static-topic and list modes are unit-tested in this file: they are
+//     offline so we exercise them directly with context.Background().
+//   - Deep mode (Namespace != "") needs a live kube client and is
+//     covered by the e2e harness (see scripts/e2e.sh). Unit-testing it
+//     here would mean mocking client-go, which the rest of the package
+//     intentionally avoids.
 package agentmoat
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -14,7 +23,7 @@ import (
 // the canonical envelope with Spec.Topics populated and Spec.Content empty.
 func TestExplainListMode(t *testing.T) {
 	t.Parallel()
-	doc, err := Explain(ExplainOptions{})
+	doc, err := Explain(context.Background(), ExplainOptions{})
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -30,6 +39,9 @@ func TestExplainListMode(t *testing.T) {
 	if len(doc.Spec.Topics) == 0 {
 		t.Errorf("Topics list should be non-empty")
 	}
+	if doc.Spec.Namespace != nil {
+		t.Errorf("Spec.Namespace should be nil in list mode, got %+v", doc.Spec.Namespace)
+	}
 }
 
 // TestExplainTopicMode asserts every valid topic round-trips through the
@@ -41,7 +53,7 @@ func TestExplainTopicMode(t *testing.T) {
 		topic := topic
 		t.Run(topic, func(t *testing.T) {
 			t.Parallel()
-			doc, err := Explain(ExplainOptions{Topic: topic})
+			doc, err := Explain(context.Background(), ExplainOptions{Topic: topic})
 			if err != nil {
 				t.Fatalf("Explain(%q): %v", topic, err)
 			}
@@ -55,6 +67,9 @@ func TestExplainTopicMode(t *testing.T) {
 			if doc.Spec.Topic != topic {
 				t.Errorf("Spec.Topic: got %q, want %q", doc.Spec.Topic, topic)
 			}
+			if doc.Spec.Namespace != nil {
+				t.Errorf("Spec.Namespace should be nil in topic mode, got %+v", doc.Spec.Namespace)
+			}
 		})
 	}
 }
@@ -63,7 +78,7 @@ func TestExplainTopicMode(t *testing.T) {
 // error message verbatim (which lists every valid topic for self-correction).
 func TestExplainUnknownTopic(t *testing.T) {
 	t.Parallel()
-	_, err := Explain(ExplainOptions{Topic: "bogus-topic"})
+	_, err := Explain(context.Background(), ExplainOptions{Topic: "bogus-topic"})
 	if err == nil {
 		t.Fatalf("expected error for unknown topic")
 	}
@@ -71,5 +86,32 @@ func TestExplainUnknownTopic(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error should list valid topic %q: %v", want, err)
 		}
+	}
+}
+
+// TestExplainMetadataFilled asserts both list and topic mode populate
+// the Metadata envelope (timestamp + version). The deep-mode path uses
+// the same helper, so this single check guards the shared envelope.
+func TestExplainMetadataFilled(t *testing.T) {
+	t.Parallel()
+	cases := []ExplainOptions{
+		{},                      // list mode
+		{Topic: "runtimeclass"}, // topic mode
+	}
+	for _, opts := range cases {
+		opts := opts
+		t.Run(opts.Topic, func(t *testing.T) {
+			t.Parallel()
+			doc, err := Explain(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("Explain(%+v): %v", opts, err)
+			}
+			if doc.Metadata.GeneratedAt == "" {
+				t.Errorf("Metadata.GeneratedAt should be filled")
+			}
+			if doc.Metadata.AgentmoatVersion == "" {
+				t.Errorf("Metadata.AgentmoatVersion should be filled")
+			}
+		})
 	}
 }

@@ -78,15 +78,20 @@ func renderScanReportTable(report *schema.ScanReport, w io.Writer, useColor bool
 		}
 	}
 
-	// SUMMARY line: each count colored by its semantic class.
-	summary := strings.Join([]string{
-		s.Bold.Render("SUMMARY"),
-		"compatible " + s.Success.Render(strconv.Itoa(sum.Compatible)),
-		"review " + s.Warn.Render(strconv.Itoa(sum.NeedsReview)),
-		"incompatible " + s.Danger.Render(strconv.Itoa(sum.Incompatible)),
-	}, "   ")
-	if _, err := fmt.Fprintln(w, summary); err != nil {
+	// SUMMARY block: total headline followed by a horizontal bar chart so the
+	// operator sees the compatible/review/incompatible ratios at a glance.
+	if _, err := fmt.Fprintf(w, "%s  %d workloads\n", s.Bold.Render("SUMMARY"), sum.Total); err != nil {
 		return err
+	}
+	items := []barItem{
+		{Symbol: symbolOK, Label: "compatible", Count: sum.Compatible, Style: s.Success, NoColorFill: '█'},
+		{Symbol: symbolWarn, Label: "review", Count: sum.NeedsReview, Style: s.Warn, NoColorFill: '▓'},
+		{Symbol: symbolFail, Label: "incompatible", Count: sum.Incompatible, Style: s.Danger, NoColorFill: '▒'},
+	}
+	if chart := renderSummaryBar(items, summaryBarWidth(w), useColor); chart != "" {
+		if _, err := fmt.Fprintln(w, chart); err != nil {
+			return err
+		}
 	}
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
@@ -144,17 +149,7 @@ func renderMigrationPlanTable(plan *schema.MigrationPlan, w io.Writer, useColor 
 		return err
 	}
 
-	// SUMMARY: total/included/excluded with semantic colors.
-	summary := strings.Join([]string{
-		s.Bold.Render("SUMMARY"),
-		"total " + s.Info.Render(strconv.Itoa(sum.Total)),
-		"included " + s.Success.Render(strconv.Itoa(sum.Included)),
-		"excluded " + s.Muted.Render(strconv.Itoa(sum.Excluded)),
-	}, "   ")
-	if _, err := fmt.Fprintln(w, summary); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(w); err != nil {
+	if err := renderPlanSummary(s, sum, w, useColor); err != nil {
 		return err
 	}
 
@@ -216,6 +211,27 @@ func renderMigrationPlanTable(plan *schema.MigrationPlan, w io.Writer, useColor 
 	return maybePrintTruncationHint(s, w, tr, "notes and reasons")
 }
 
+// renderPlanSummary prints the SUMMARY headline + horizontal bar chart
+// for a MigrationPlan: included vs excluded counts. Extracted from
+// renderMigrationPlanTable so the parent function reads as a top-level
+// section walker.
+func renderPlanSummary(s *Styles, sum schema.PlanSummary, w io.Writer, useColor bool) error {
+	if _, err := fmt.Fprintf(w, "%s  %d workloads\n", s.Bold.Render("SUMMARY"), sum.Total); err != nil {
+		return err
+	}
+	items := []barItem{
+		{Symbol: symbolOK, Label: "included", Count: sum.Included, Style: s.Success, NoColorFill: '█'},
+		{Symbol: symbolDot, Label: "excluded", Count: sum.Excluded, Style: s.Muted, NoColorFill: '░'},
+	}
+	if chart := renderSummaryBar(items, summaryBarWidth(w), useColor); chart != "" {
+		if _, err := fmt.Fprintln(w, chart); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(w)
+	return err
+}
+
 // renderApplyResultTable is the ApplyResult-specific view: per-step
 // outcome with status and optional error.
 //
@@ -237,16 +253,21 @@ func renderApplyResultTable(res *schema.ApplyResult, w io.Writer, action string,
 		return err
 	}
 
-	// SUMMARY: applied/already-applied/skipped/failed with semantic colors.
-	summary := strings.Join([]string{
-		s.Bold.Render("SUMMARY"),
-		"applied " + s.Success.Render(strconv.Itoa(sum.Applied)),
-		"already-applied " + s.Info.Render(strconv.Itoa(sum.AlreadyApplied)),
-		"skipped " + s.Muted.Render(strconv.Itoa(sum.Skipped)),
-		"failed " + s.Danger.Render(strconv.Itoa(sum.Failed)),
-	}, "   ")
-	if _, err := fmt.Fprintln(w, summary); err != nil {
+	// SUMMARY block: total headline followed by a horizontal bar chart over
+	// the four step outcomes.
+	if _, err := fmt.Fprintf(w, "%s  %d steps\n", s.Bold.Render("SUMMARY"), sum.Total); err != nil {
 		return err
+	}
+	items := []barItem{
+		{Symbol: symbolOK, Label: "applied", Count: sum.Applied, Style: s.Success, NoColorFill: '█'},
+		{Symbol: symbolArrow, Label: "already-applied", Count: sum.AlreadyApplied, Style: s.Info, NoColorFill: '▓'},
+		{Symbol: symbolDot, Label: "skipped", Count: sum.Skipped, Style: s.Muted, NoColorFill: '░'},
+		{Symbol: symbolFail, Label: "failed", Count: sum.Failed, Style: s.Danger, NoColorFill: '▒'},
+	}
+	if chart := renderSummaryBar(items, summaryBarWidth(w), useColor); chart != "" {
+		if _, err := fmt.Fprintln(w, chart); err != nil {
+			return err
+		}
 	}
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
@@ -380,15 +401,20 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 		return err
 	}
 
-	// SUMMARY: ok/mismatch/error with semantic colors.
-	summary := strings.Join([]string{
-		s.Bold.Render("SUMMARY"),
-		"ok " + s.Success.Render(strconv.Itoa(sum.OK)),
-		"mismatch " + s.Warn.Render(strconv.Itoa(sum.Mismatch)),
-		"error " + s.Danger.Render(strconv.Itoa(sum.Error)),
-	}, "   ")
-	if _, err := fmt.Fprintln(w, summary); err != nil {
+	// SUMMARY block: total headline followed by a horizontal bar chart over
+	// the per-result verdict buckets.
+	if _, err := fmt.Fprintf(w, "%s  %d results\n", s.Bold.Render("SUMMARY"), sum.Total); err != nil {
 		return err
+	}
+	items := []barItem{
+		{Symbol: symbolOK, Label: "ok", Count: sum.OK, Style: s.Success, NoColorFill: '█'},
+		{Symbol: symbolWarn, Label: "mismatch", Count: sum.Mismatch, Style: s.Warn, NoColorFill: '▓'},
+		{Symbol: symbolFail, Label: "error", Count: sum.Error, Style: s.Danger, NoColorFill: '▒'},
+	}
+	if chart := renderSummaryBar(items, summaryBarWidth(w), useColor); chart != "" {
+		if _, err := fmt.Fprintln(w, chart); err != nil {
+			return err
+		}
 	}
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
