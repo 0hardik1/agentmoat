@@ -1,0 +1,105 @@
+# ---------------------------------------------------------------------------
+# agentmoat: continuous integration workflow
+# ---------------------------------------------------------------------------
+#
+# Triggers:
+#   * push to `main`: post-merge verification. Catches issues that slip past
+#     branch protection (e.g. a fast-forward merge of stacked PRs).
+#   * pull_request: every PR runs lint and tests before review. This is the
+#     main gate for contributor changes.
+#
+# Jobs (both run in parallel; they have no inter-job dependencies):
+#   * `lint`: runs golangci-lint against the whole module. Uses the official
+#     `golangci/golangci-lint-action@v6`, which understands the .golangci.yml
+#     at the repo root.
+#   * `test`: runs `go test -race -cover ./...` on a matrix. The matrix has
+#     a single dimension today (go-version: 1.23 on ubuntu-latest) but is
+#     written as a matrix so we can add more Go versions or OSes later
+#     without restructuring the workflow.
+#
+# Caching:
+#   * actions/setup-go@v5 transparently caches the module cache (~/go/pkg/mod)
+#     and the build cache (~/.cache/go-build). We rely on that rather than
+#     hand-rolling actions/cache: setup-go is already aware of go.sum.
+# ---------------------------------------------------------------------------
+
+name: CI
+
+# `on` controls when the workflow runs. The two triggers below cover the two
+# moments we care about: pre-merge (pull_request) and post-merge (push).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# `permissions` is set to the most restrictive default (`contents: read`) at
+# the workflow level so jobs cannot accidentally mutate the repo. Individual
+# jobs that need more (release.yml does) declare it explicitly.
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------- lint ------------------------------------
+  # Runs golangci-lint against the whole module. Fast (~30s in CI with a warm
+  # cache) so it is the first signal contributors see on a PR.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      # checkout@v4 is the current major; pinned to a major rather than a sha
+      # for readability. CI is not security-critical enough to warrant sha
+      # pins, and we re-evaluate when the major bumps.
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # setup-go@v5 installs the requested Go version and enables the module
+      # and build caches keyed by go.sum. No separate actions/cache step
+      # needed.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          # `cache: true` is the default but stated explicitly so the
+          # behaviour is obvious to readers of this file.
+          cache: true
+
+      # golangci-lint-action@v6 wraps the golangci-lint binary, handles its
+      # own caching for the analyzer state, and respects .golangci.yml.
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          # Pin to a known-good golangci-lint release. Bumping this is a
+          # deliberate decision (new lints can break builds), so we update it
+          # in its own PR.
+          version: v1.62.2
+
+  # ----------------------------- test ------------------------------------
+  # Runs the unit-test suite. The matrix is single-cell today (Go 1.23 on
+  # ubuntu-latest); structured as a matrix so adding cells (Go 1.24,
+  # macos-latest, etc.) later is a one-line change.
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # `fail-fast: false` means a failure in one cell does not cancel the
+      # others. With only one cell today this is a no-op, but it sets the
+      # right default for when the matrix grows.
+      fail-fast: false
+      matrix:
+        go-version: ['1.23']
+        os: [ubuntu-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      # Match the local `make test` invocation exactly. -race catches data
+      # races; -cover prints per-package coverage so we can spot uncovered
+      # packages early. Coverage uploading is added in a later phase.
+      - name: Run unit tests
+        run: go test -race -cover ./...

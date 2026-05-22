@@ -1,0 +1,194 @@
+# ---------------------------------------------------------------------------
+# agentmoat: GoReleaser configuration
+# ---------------------------------------------------------------------------
+#
+# GoReleaser builds, packages, and publishes release artifacts when a git tag
+# of the form vX.Y.Z is pushed. The release workflow under
+# .github/workflows/release.yml invokes goreleaser via the official action.
+#
+# Key choices, with reasoning:
+#   * `version: 2` selects the GoReleaser v2 config schema. v1 syntax is
+#     deprecated; pinning the version explicitly avoids surprise migrations.
+#   * Two binaries are produced from this single config: `agentmoat` (the
+#     human-facing CLI) and `agentmoat-mcp` (the MCP stdio server). They are
+#     built from the same module so they always ship at the same version.
+#   * Targets are linux and darwin on amd64 and arm64. Windows is excluded
+#     because the project is Linux-first (see plan.md Section 3 non-goals).
+#     macOS is included so contributors on Apple Silicon and Intel Macs can
+#     download a prebuilt CLI without building from source.
+#   * Archives are tar.gz on Unix-likes (industry standard for Go releases).
+#     A zip override is provided for windows, even though we do not currently
+#     build for windows; if the matrix ever changes, the format is right.
+#   * Checksums use sha256, matching the algorithm GitHub Releases and most
+#     downstream verifiers (Homebrew, Scoop) expect.
+#   * The changelog groups commits by conventional-commit prefix (feat, fix,
+#     perf, refactor) and lumps everything else under "Other". This keeps
+#     release notes readable without forcing every commit to be conventional.
+#   * SBOM generation is stubbed (commented) and will be enabled in Phase 5
+#     once the release path is exercised end-to-end. Generating SBOMs on
+#     every dev tag adds friction we do not need yet.
+# ---------------------------------------------------------------------------
+
+version: 2
+
+# `before` runs once before any build. `go mod tidy` ensures the release is
+# built from a tidy module graph; `go mod download` warms the module cache so
+# parallel build matrix shards do not race on it.
+before:
+  hooks:
+    - go mod tidy
+    - go mod download
+
+# `builds` declares one entry per binary. We ship two binaries from this
+# module: the CLI and the MCP server. Both embed Version and GitSHA via
+# ldflags using the same variable names the local Makefile uses, so behaviour
+# is identical whether you `make build` or `goreleaser release`.
+builds:
+  # ----------------------- agentmoat (cobra CLI) -----------------------
+  - id: agentmoat
+    # `binary` is the basename of the produced executable inside each archive.
+    binary: agentmoat
+    # `main` points at the package main directory. Matches the repo layout
+    # documented in plan.md Section 13.
+    main: ./cmd/agentmoat
+    # Disable CGO. We have no native dependencies and a static binary is the
+    # right default for distributing to containers and minimal hosts.
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # `-s -w` strips the symbol table and DWARF debug info, shrinking the
+    # binary by 20-30%. Version and GitSHA use the same -X targets as the
+    # Makefile so `agentmoat version` reports identical values across paths.
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.GitSHA={{.ShortCommit}}
+
+  # ---------------------- agentmoat-mcp (MCP server) -------------------
+  - id: agentmoat-mcp
+    binary: agentmoat-mcp
+    main: ./cmd/agentmoat-mcp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.GitSHA={{.ShortCommit}}
+
+# `archives` controls how binaries are bundled for download. Each archive
+# contains a single binary plus the LICENSE and README so consumers can
+# verify provenance without visiting the repo.
+archives:
+  - id: default
+    # `formats` defaults to tar.gz. We list it explicitly for clarity.
+    formats:
+      - tar.gz
+    # `format_overrides` switches to zip on windows. We do not currently build
+    # for windows, but keeping this here means the day we do, the archive
+    # format is already correct (zip is the de facto Windows convention).
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    # `name_template` produces archive filenames like
+    # `agentmoat_0.1.0_linux_amd64.tar.gz`. The template substitutes the
+    # binary id, version (without leading v), OS, and arch.
+    name_template: >-
+      {{ .Binary }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    files:
+      # Include source-of-truth metadata in every archive so consumers always
+      # have license and high-level docs on hand without round-tripping to
+      # the repo. These globs match files at the module root.
+      - LICENSE*
+      - README*
+
+# `checksum` produces a single text file listing the sha256 of every artifact
+# produced in this release. GitHub Releases displays it alongside the binaries
+# so users can verify downloads with `sha256sum -c`.
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+# `snapshot` controls the version string used when running goreleaser without
+# a tag (e.g. local `goreleaser release --snapshot`). The `{{ incpatch }}`
+# helper produces a synthetic "next patch" version so dev snapshots sort
+# correctly relative to the most recent real release.
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+# `changelog` shapes the auto-generated release notes. We sort by commit type
+# (conventional-commit style) and exclude housekeeping commits that add no
+# value to release notes.
+changelog:
+  sort: asc
+  use: github
+  filters:
+    # Exclude commits that are pure repo hygiene from the changelog. They are
+    # still in `git log`, just not in user-facing release notes.
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - 'Merge pull request'
+      - 'Merge branch'
+  groups:
+    # Each group surfaces commits whose subject starts with the matching
+    # prefix. `order` controls the display order: features before fixes
+    # before performance before refactors before everything-else ("Other").
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: 'Bug fixes'
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: 'Performance improvements'
+      regexp: '^.*?perf(\(.+\))??!?:.+$'
+      order: 2
+    - title: Refactors
+      regexp: '^.*?refactor(\(.+\))??!?:.+$'
+      order: 3
+    - title: Other
+      order: 999
+
+# `release` controls the GitHub Release object goreleaser creates. We use
+# defaults: GoReleaser uploads each archive, the checksum file, and the
+# generated changelog to a release whose tag matches the git tag that
+# triggered the workflow.
+release:
+  github:
+    owner: 0hardik1
+    name: agentmoat
+  # Mark release as draft=false (publish immediately) and prerelease=auto
+  # (treat tags with -rc, -beta, -alpha suffixes as prereleases).
+  draft: false
+  prerelease: auto
+
+# ---------------------------------------------------------------------------
+# SBOM (Software Bill of Materials) stub.
+#
+# Enabling SBOMs requires syft (or an equivalent) on the runner. We will
+# enable in Phase 5 release prep, once the rest of the release pipeline is
+# stable and we have decided on the consumer story (Sigstore attestation,
+# in-toto, or just an archive sidecar). Until then, leaving this commented
+# is the safest default: no surprise CI failures when goreleaser cannot find
+# a SBOM tool, and a single place to flip the switch when we are ready.
+# ---------------------------------------------------------------------------
+# sboms:
+#   - artifacts: archive
+#     documents:
+#       - "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.sbom.json"

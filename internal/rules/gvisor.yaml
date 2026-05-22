@@ -1,0 +1,95 @@
+# agentmoat: classifier rule overrides.
+#
+# Each entry has `id`, `severity`, `description`, `remediationUrl`, and a
+# `source` field citing the upstream gVisor doc URL or plan.md section.
+#
+# This file is loaded by `Registry.LoadYAML()` at CLI startup so operators
+# can dial a rule's severity (e.g. demote `host-path-mount` from warn to
+# info for their environment) without recompiling.
+#
+# Fields here OVERRIDE the matching built-in registration in
+# pkg/classifier/builtin_rules.go. Unknown IDs are reported as warnings.
+overrides:
+  - id: raw-socket
+    severity: error
+    description: "Container requests CAP_NET_RAW; gVisor disables raw sockets unless `--net-raw` is enabled at the runsc level."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/#networking"
+    source: "https://gvisor.dev/docs/user_guide/compatibility/#networking"
+
+  - id: host-network
+    severity: error
+    description: "Pod uses hostNetwork: true; gVisor cannot bridge to the host network namespace."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/#networking"
+    source: "https://gvisor.dev/docs/user_guide/compatibility/#networking"
+
+  - id: host-pid
+    severity: error
+    description: "Pod uses hostPID: true; gVisor isolates the PID namespace and cannot share the host's."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
+    source: "https://gvisor.dev/docs/user_guide/compatibility/"
+
+  - id: host-ipc
+    severity: error
+    description: "Pod uses hostIPC: true; gVisor isolates the IPC namespace and cannot share the host's."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
+    source: "https://gvisor.dev/docs/user_guide/compatibility/"
+
+  - id: privileged
+    severity: error
+    description: "Container runs in privileged mode; the gVisor sandbox boundary makes this meaningless and several capabilities are unsupported."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
+    source: "https://gvisor.dev/docs/user_guide/compatibility/"
+
+  - id: host-path-mount
+    severity: warn
+    description: "Pod mounts a hostPath volume; the Gofer must proxy these reads/writes and some host-managed mount semantics are not preserved."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/filesystem/"
+    source: "https://gvisor.dev/docs/user_guide/filesystem/"
+
+  - id: ebpf
+    severity: error
+    description: "Workload appears to load eBPF programs (Cilium agent, Tetragon, Falco eBPF driver); gVisor does not expose the eBPF syscall surface."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
+    source: "plan.md section 5.4"
+
+  - id: gpu-passthrough
+    severity: warn
+    description: "Container requests an NVIDIA GPU resource (`nvidia.com/gpu`); gVisor's `nvproxy` only supports a subset of CUDA versions."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/gpu/"
+    source: "https://gvisor.dev/docs/user_guide/gpu/"
+
+  - id: fuse-mount
+    severity: warn
+    description: "FUSE filesystem in use; gVisor supports a subset of FUSE behavior, validate against the user guide."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/filesystem/"
+    source: "https://gvisor.dev/docs/user_guide/filesystem/"
+
+  - id: io-uring
+    severity: warn
+    description: "Workload may use io_uring (annotation `agentmoat.io/uses-iouring=true` set); gVisor does not implement io_uring."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
+    source: "plan.md section 5.4"
+
+  - id: perf-events
+    severity: warn
+    description: "Workload requests CAP_PERFMON or CAP_SYS_ADMIN typically used for perf_event_open; gVisor does not expose perf events."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
+    source: "plan.md section 5.4"
+
+  - id: kvm-nested
+    severity: error
+    description: "Workload uses /dev/kvm (nested virtualization); gVisor sandbox cannot pass through KVM, and on EKS nested virt is unavailable anyway."
+    remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
+    source: "plan.md section 5.4"
+
+  - id: network-throughput
+    severity: info
+    description: "Workload appears network-throughput-bound (image hint: nginx, envoy, haproxy, traefik); expect ~20-40% throughput overhead under gVisor's sandbox network stack."
+    remediationUrl: "https://gvisor.dev/docs/architecture_guide/performance/"
+    source: "plan.md section 5.5"
+
+  - id: syscall-heavy
+    severity: info
+    description: "Workload appears syscall-heavy (image hint: redis, memcached); expect higher latency under Sentry; benchmark before migration."
+    remediationUrl: "https://gvisor.dev/docs/architecture_guide/performance/"
+    source: "plan.md section 5.5"

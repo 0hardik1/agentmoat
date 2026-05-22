@@ -1,0 +1,20 @@
+# agentmoat: expected verdict = review (host-path-mount)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: log-reader
+  namespace: default
+spec:
+  containers:
+    - name: reader
+      image: busybox:1.36
+      command: ["tail", "-F", "/host-logs/messages"]
+      volumeMounts:
+        - name: varlog
+          mountPath: /host-logs
+          readOnly: true
+  volumes:
+    - name: varlog
+      hostPath:
+        path: /var/log
+        type: Directory

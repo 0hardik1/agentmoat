@@ -1,0 +1,12 @@
+# agentmoat: expected verdict = incompatible (ebpf)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cilium-agent
+  namespace: kube-system
+spec:
+  hostNetwork: false
+  containers:
+    - name: cilium-agent
+      image: cilium/cilium:v1.14.4
+      command: ["cilium-agent"]

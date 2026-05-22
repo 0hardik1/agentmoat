@@ -1,0 +1,40 @@
+# agentmoat: RuntimeClass that opts Pods into the gVisor handler registered
+# by the containerd drop-in baked into the agentmoat Packer AMI.
+#
+# Apply once per cluster:
+#   kubectl apply -f deploy/runtimeclass.yaml
+#
+# Then opt a workload in by setting:
+#   spec.runtimeClassName: gvisor
+#
+# The `handler: gvisor` value below must match the containerd handler name in
+# packer/files/gvisor-runtime.toml.
+#
+# References:
+#   - https://kubernetes.io/docs/concepts/containers/runtime-class/
+#   - https://gvisor.dev/docs/user_guide/quick_start/kubernetes/
+
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: gvisor
+scheduling:
+  # Pin gVisor pods to nodes the agentmoat AMI built (and that the operator
+  # labeled). Karpenter NodePools / self-managed node groups should set this
+  # label on the agentmoat-built nodes.
+  nodeSelector:
+    runtime: gvisor
+  # The matching taint keeps non-gVisor workloads off these nodes; the
+  # toleration lets gVisor pods schedule onto them.
+  tolerations:
+    - key: runtime
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+# Account for Sentry's fixed memory/CPU overhead when the scheduler considers
+# placing the pod. Tune via load testing; these are conservative defaults.
+overhead:
+  podFixed:
+    memory: "140Mi"
+    cpu: "250m"

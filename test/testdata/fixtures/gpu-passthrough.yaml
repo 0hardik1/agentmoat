@@ -1,0 +1,14 @@
+# agentmoat: expected verdict = review (gpu-passthrough)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-worker
+  namespace: default
+spec:
+  containers:
+    - name: cuda
+      image: nvidia/cuda:12.3.1-base-ubuntu22.04
+      command: ["sleep", "3600"]
+      resources:
+        limits:
+          nvidia.com/gpu: 1

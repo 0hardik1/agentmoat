@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# agentmoat: release workflow
+# ---------------------------------------------------------------------------
+#
+# Trigger:
+#   * Pushed tags matching the semver pattern `v*.*.*` (e.g. v0.1.0, v1.2.3).
+#     We deliberately only fire on three-segment semver tags so unrelated tags
+#     (e.g. a future `nightly-2026-05-22`) do not accidentally cut a release.
+#
+# Job:
+#   * `release`: runs GoReleaser on ubuntu-latest. GoReleaser reads
+#     .goreleaser.yaml at the repo root, builds the two binaries
+#     (agentmoat, agentmoat-mcp) for the configured OS / arch matrix,
+#     produces tar.gz archives, a sha256 checksums file, and an auto-
+#     generated changelog, then uploads everything to a GitHub Release
+#     keyed off the pushed tag.
+#
+# Tokens:
+#   * `GITHUB_TOKEN` (provided automatically by Actions) is sufficient for
+#     uploading release assets to the same repo.
+#   * If we later push container images to GHCR or to a third-party registry
+#     such as Docker Hub, we will need a Personal Access Token with
+#     `write:packages` (commonly called `CR_PAT`). Add it as a repo secret
+#     and expose it to the release step as `GITHUB_TOKEN`-equivalent env
+#     variable for that step.
+#
+# Checkout depth:
+#   * `fetch-depth: 0` clones the full git history. GoReleaser needs every
+#     reachable commit to build the changelog between the current tag and
+#     the previous one; the default shallow clone would produce an empty or
+#     incorrect changelog.
+# ---------------------------------------------------------------------------
+
+name: Release
+
+# Fire only on three-part semver tags. Tags like `v0.1.0-rc.1` still match
+# the glob because the `*` allows additional characters; goreleaser will
+# treat them as prereleases per `prerelease: auto` in .goreleaser.yaml.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+# `contents: write` is required so GoReleaser can create the GitHub Release
+# and upload assets. Other scopes stay at their default (read or none).
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      # Full history clone: GoReleaser's changelog generator walks `git log`
+      # from the previous tag to HEAD. A shallow clone would silently produce
+      # an empty changelog. This is the #1 GoReleaser footgun.
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      # goreleaser-action@v6 wraps the official goreleaser binary. `args` is
+      # the literal command-line; `release --clean` is the standard release
+      # invocation (build, archive, publish, and clean the dist/ dir first).
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          # Pin to a major. Minor / patch GoReleaser updates are usually
+          # safe; majors can break config schema.
+          version: '~> v2'
+          args: release --clean
+        env:
+          # GITHUB_TOKEN is provisioned per-job by Actions and is scoped to
+          # this repo. It is sufficient for creating a Release and uploading
+          # assets. If we later push container images to a registry, swap to
+          # a PAT with package:write (e.g. secrets.CR_PAT) for that step.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

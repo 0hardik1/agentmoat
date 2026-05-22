@@ -1,0 +1,25 @@
+# agentmoat: containerd drop-in that registers gVisor as a runtime handler.
+#
+# Installed by the Packer build to:
+#   /etc/containerd/config.d/gvisor.toml
+#
+# Loaded via this line in /etc/containerd/config.toml:
+#   imports = ["/etc/containerd/config.d/*.toml"]
+#
+# The handler name "gvisor" here must match:
+#   - the `handler:` field of the Kubernetes RuntimeClass
+#     (see deploy/runtimeclass.yaml)
+#
+# References:
+#   - https://gvisor.dev/docs/user_guide/containerd/quick_start/
+#   - https://github.com/containerd/containerd/blob/main/docs/man/containerd-config.toml.5.md
+#   - https://gardener.cloud/docs/gardener/advanced/custom-containerd-config/
+
+version = 2
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor]
+  runtime_type = "io.containerd.runsc.v1"
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor.options]
+  TypeUrl    = "io.containerd.runsc.v1.options"
+  ConfigPath = "/etc/containerd/runsc.toml"

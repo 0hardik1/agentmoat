@@ -1,0 +1,27 @@
+# agentmoat: runsc (gVisor) configuration consumed via the containerd shim.
+#
+# Installed by the Packer build to:
+#   /etc/containerd/runsc.toml
+#
+# Referenced from the containerd drop-in (files/gvisor-runtime.toml) by
+#   ConfigPath = "/etc/containerd/runsc.toml"
+#
+# Why `platform = "systrap"`:
+#   On AWS EKS, nested virtualization is disabled, so the KVM platform is
+#   unavailable. systrap (seccomp SIGSYS based) is the right choice on
+#   virtualized infrastructure and is gVisor's default since 2023.
+#
+# Why `network = "sandbox"`:
+#   Use Sentry's network stack rather than passing through to the host.
+#   Stronger isolation; cost is ~20-40% throughput vs host networking
+#   (see https://gvisor.dev/docs/architecture_guide/performance/).
+#
+# References:
+#   - https://gvisor.dev/docs/architecture_guide/platforms/
+#   - https://gvisor.dev/docs/user_guide/networking/
+#   - https://www.verygoodsecurity.com/blog/posts/secure-compute-part-2
+
+[runsc_config]
+  platform = "systrap"
+  network  = "sandbox"
+  debug    = "false"

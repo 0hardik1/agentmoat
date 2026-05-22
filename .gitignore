@@ -1,0 +1,44 @@
+# agentmoat: .gitignore
+#
+# Patterns to keep out of git. Grouped into:
+#   1. Go-standard build/test artifacts.
+#   2. Editor and OS clutter.
+#   3. agentmoat-specific working files (build manifests, local audit logs).
+#   4. Planning files that live alongside the repo but stay local-only.
+
+# 1. Go build + test outputs
+bin/
+dist/
+*.exe
+*.test
+*.out
+*.prof
+coverage.txt
+vendor/
+
+# Go modules cache stays in $GOPATH; nothing to ignore at the repo level.
+
+# 2. Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 3. agentmoat working files
+# Packer manifest output (post-processor "manifest" target).
+build-manifest.json
+# Per-user audit log written by `agentmoat apply` (see plan.md section 12.5).
+.agentmoat/
+# Packer scratch and validation artifacts.
+packer/.packer.d/
+packer/*.log
+
+# 4. Planning files (user requested these stay local-only)
+# plan.md is the design document; plan-checklist.md is the running tracker.
+# handoff-*.md are handoff prompts for the next AI agent.
+# All useful while building but should not be committed.
+plan.md
+plan-checklist.md
+handoff-*.md
