@@ -44,10 +44,10 @@ import (
 // (network-throughput, syscall-heavy), else empty.
 func Classify(w scanner.Workload, registry *Registry) Verdict {
 	var (
-		reasons       []Reason
-		hasError      bool
-		hasWarn       bool
-		overheadHint  string
+		reasons      []Reason
+		hasError     bool
+		hasWarn      bool
+		overheadHint string
 	)
 
 	// Iterate over Registry.Rules() (already sorted by ID) so the order

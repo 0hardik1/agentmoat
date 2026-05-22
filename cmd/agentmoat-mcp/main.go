@@ -6,7 +6,7 @@
 // stub message and exits non-zero so anyone who runs it sees a clear
 // "not yet implemented" signal rather than a silent no-op.
 //
-// When implemented, agentmoat-mcp will speak MCP over stdio, modelled on
+// When implemented, agentmoat-mcp will speak MCP over stdio, modeled on
 // github.com/containers/kubernetes-mcp-server. It will share the same
 // pkg/agentmoat library that powers the CLI, so the two surfaces cannot
 // drift. See plan.md section 8 for the full tool/resource surface.

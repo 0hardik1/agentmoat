@@ -2,21 +2,21 @@
 //
 // Both functions follow the same shape:
 //
-//   1. Validate options.
-//   2. For every namespace the plan touches, read the existing
-//      `agentmoat.io/plan-hash` annotation.
-//   3. Walk the plan's steps in order. For each step:
-//        a. Decide if the step is needed (idempotency: if the namespace
-//           annotation already equals plan.Metadata.PlanHash, the step
-//           is `already-applied`).
-//        b. Build the patch bytes for the step.
-//        c. In dry-run mode, surface the patch in the StepResult and
-//           continue.
-//        d. Otherwise, send the patch to the API server, emit an
-//           Event, and append an audit line.
-//   4. If all steps in a namespace succeeded, write the namespace
-//      annotation (for Apply) or clear it (for Rollback).
-//   5. Return the assembled ApplyResult / RollbackResult.
+//  1. Validate options.
+//  2. For every namespace the plan touches, read the existing
+//     `agentmoat.io/plan-hash` annotation.
+//  3. Walk the plan's steps in order. For each step:
+//     a. Decide if the step is needed (idempotency: if the namespace
+//     annotation already equals plan.Metadata.PlanHash, the step
+//     is `already-applied`).
+//     b. Build the patch bytes for the step.
+//     c. In dry-run mode, surface the patch in the StepResult and
+//     continue.
+//     d. Otherwise, send the patch to the API server, emit an
+//     Event, and append an audit line.
+//  4. If all steps in a namespace succeeded, write the namespace
+//     annotation (for Apply) or clear it (for Rollback).
+//  5. Return the assembled ApplyResult / RollbackResult.
 //
 // The applier is NOT concurrent. PlannerOptions.MaxParallel is honored as
 // an envelope value (echoed back so the operator knows what the plan asked
@@ -202,7 +202,7 @@ func Rollback(ctx context.Context, opts Options) (*schema.RollbackResult, error)
 	}
 
 	// Walk in reverse order so the highest-risk (last-applied) workloads
-	// roll back first: this minimises the time the cluster spends in a
+	// roll back first: this minimizes the time the cluster spends in a
 	// partially-rolled-back state if one of the patches fails.
 	for i := len(opts.Plan.Spec.Steps) - 1; i >= 0; i-- {
 		step := opts.Plan.Spec.Steps[i]

@@ -63,7 +63,7 @@ func writeNamespaceAnnotation(ctx context.Context, client kubernetes.Interface, 
 	}
 	body, err := json.Marshal(patch)
 	if err != nil {
-		return nil, fmt.Errorf("marshalling namespace annotation patch: %w", err)
+		return nil, fmt.Errorf("marshaling namespace annotation patch: %w", err)
 	}
 	if dryRun {
 		return body, nil

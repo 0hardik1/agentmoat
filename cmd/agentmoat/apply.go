@@ -22,10 +22,10 @@ import (
 
 // Apply-specific flag values.
 var (
-	flagApplyPlanPath     string
-	flagApplyDryRun       bool
-	flagApplyNoEvents     bool
-	flagApplyNoAudit      bool
+	flagApplyPlanPath string
+	flagApplyDryRun   bool
+	flagApplyNoEvents bool
+	flagApplyNoAudit  bool
 )
 
 func newApplyCmd() *cobra.Command {

@@ -18,11 +18,11 @@
 //
 // File format
 //
-//   One JSON object per line (JSONL). Each object has a `ts` (RFC3339Nano),
-//   `action` ("apply" | "rollback"), `dryRun` bool, `planHash` string,
-//   `workload` ({kind, namespace, name}), `status` ("applied" | "failed" |
-//   ...), and optional `error` string. We add fields over time but never
-//   remove them: downstream parsers should ignore unknown keys.
+//	One JSON object per line (JSONL). Each object has a `ts` (RFC3339Nano),
+//	`action` ("apply" | "rollback"), `dryRun` bool, `planHash` string,
+//	`workload` ({kind, namespace, name}), `status` ("applied" | "failed" |
+//	...), and optional `error` string. We add fields over time but never
+//	remove them: downstream parsers should ignore unknown keys.
 package audit
 
 import (
@@ -45,7 +45,7 @@ const EnvPathOverride = "AGENTMOAT_AUDIT_PATH"
 // section 12.5 ("~/.agentmoat/audit.jsonl").
 const defaultRelativePath = ".agentmoat/audit.jsonl"
 
-// fileMu serialises writes to the audit file inside this process. The file
+// fileMu serializes writes to the audit file inside this process. The file
 // itself is opened with O_APPEND so the kernel guarantees atomic line writes
 // across processes; the mutex is just here to avoid interleaved JSON when
 // two goroutines call Append concurrently from the same binary.
@@ -112,7 +112,7 @@ func Append(entry Entry) (path string, err error) {
 	// line in the file.
 	line, err := json.Marshal(entry)
 	if err != nil {
-		return path, fmt.Errorf("marshalling audit entry: %w", err)
+		return path, fmt.Errorf("marshaling audit entry: %w", err)
 	}
 	line = append(line, '\n')
 

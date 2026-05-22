@@ -4,32 +4,33 @@
 //
 //   - Producing the patch bytes the applier sends to the K8s API for a given
 //     PlanStep + controller kind.
+//
 //   - Knowing the kind-specific JSON path for the pod template:
 //
-//       Pod                                          spec.runtimeClassName
-//       Deployment, StatefulSet, DaemonSet, Job      spec.template.spec.runtimeClassName
-//       CronJob                                      spec.jobTemplate.spec.template.spec.runtimeClassName
+//     Pod                                          spec.runtimeClassName
+//     Deployment, StatefulSet, DaemonSet, Job      spec.template.spec.runtimeClassName
+//     CronJob                                      spec.jobTemplate.spec.template.spec.runtimeClassName
 //
 //   - Choosing a patch type per direction:
 //
-//       Apply    -> Strategic Merge Patch. Tolerations merge by key (the
-//                   strategic-merge-key for v1.Toleration is "key"), so we
-//                   can add ours without duplicating an existing entry.
-//       Rollback -> JSON Merge Patch (RFC 7396). Setting
-//                   `runtimeClassName: null` deletes the field. We do not
-//                   remove the toleration on rollback: an untainted node
-//                   does not select on it, so it is harmless. Removing
-//                   the *specific* toleration via JSON Patch indices is
-//                   fragile because the list may have been re-ordered by
-//                   other admission controllers since apply.
+//     Apply    -> Strategic Merge Patch. Tolerations merge by key (the
+//     strategic-merge-key for v1.Toleration is "key"), so we
+//     can add ours without duplicating an existing entry.
+//     Rollback -> JSON Merge Patch (RFC 7396). Setting
+//     `runtimeClassName: null` deletes the field. We do not
+//     remove the toleration on rollback: an untainted node
+//     does not select on it, so it is harmless. Removing
+//     the *specific* toleration via JSON Patch indices is
+//     fragile because the list may have been re-ordered by
+//     other admission controllers since apply.
 //
 // Why patches and not full-object updates
 //
-//   Patches are O(small) on the wire and avoid optimistic-concurrency
-//   conflicts on unrelated fields. A controller-owner mutating a pod
-//   template via .Update() racing with HPA, the deployment controller, or
-//   another admission webhook is a recipe for a 409. A targeted patch is
-//   the kubectl-style way and what every other migration tool does.
+//	Patches are O(small) on the wire and avoid optimistic-concurrency
+//	conflicts on unrelated fields. A controller-owner mutating a pod
+//	template via .Update() racing with HPA, the deployment controller, or
+//	another admission webhook is a recipe for a 409. A targeted patch is
+//	the kubectl-style way and what every other migration tool does.
 package applier
 
 import (
@@ -95,7 +96,7 @@ func applyPatchBytes(step schema.PlanStep) ([]byte, types.PatchType, error) {
 
 	out, err := json.Marshal(patch)
 	if err != nil {
-		return nil, "", fmt.Errorf("applier: marshalling apply patch: %w", err)
+		return nil, "", fmt.Errorf("applier: marshaling apply patch: %w", err)
 	}
 	return out, types.StrategicMergePatchType, nil
 }
@@ -116,7 +117,7 @@ func rollbackPatchBytes(step schema.PlanStep) ([]byte, types.PatchType, error) {
 
 	out, err := json.Marshal(patch)
 	if err != nil {
-		return nil, "", fmt.Errorf("applier: marshalling rollback patch: %w", err)
+		return nil, "", fmt.Errorf("applier: marshaling rollback patch: %w", err)
 	}
 	return out, types.MergePatchType, nil
 }

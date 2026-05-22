@@ -9,20 +9,20 @@
 //
 // Rule index (alphabetical by ID):
 //
-//   1.  ebpf                 (error) eBPF programs (Cilium, Tetragon, Falco).
-//   2.  fuse-mount           (warn)  FUSE filesystem in use.
-//   3.  gpu-passthrough      (warn)  nvidia.com/gpu resource requested.
-//   4.  host-ipc             (error) hostIPC: true.
-//   5.  host-network         (error) hostNetwork: true.
-//   6.  host-path-mount      (warn)  hostPath volume.
-//   7.  host-pid             (error) hostPID: true.
-//   8.  io-uring             (warn)  io_uring usage declared via annotation.
-//   9.  kvm-nested           (error) /dev/kvm hostPath (nested virt).
-//   10. network-throughput   (info)  network-bound image (nginx, envoy, ...).
-//   11. perf-events          (warn)  CAP_PERFMON / CAP_SYS_ADMIN usage.
-//   12. privileged           (error) container in privileged mode.
-//   13. raw-socket           (error) CAP_NET_RAW or operator-declared usage.
-//   14. syscall-heavy        (info)  syscall-bound image (redis, memcached).
+//  1. ebpf                 (error) eBPF programs (Cilium, Tetragon, Falco).
+//  2. fuse-mount           (warn)  FUSE filesystem in use.
+//  3. gpu-passthrough      (warn)  nvidia.com/gpu resource requested.
+//  4. host-ipc             (error) hostIPC: true.
+//  5. host-network         (error) hostNetwork: true.
+//  6. host-path-mount      (warn)  hostPath volume.
+//  7. host-pid             (error) hostPID: true.
+//  8. io-uring             (warn)  io_uring usage declared via annotation.
+//  9. kvm-nested           (error) /dev/kvm hostPath (nested virt).
+//  10. network-throughput   (info)  network-bound image (nginx, envoy, ...).
+//  11. perf-events          (warn)  CAP_PERFMON / CAP_SYS_ADMIN usage.
+//  12. privileged           (error) container in privileged mode.
+//  13. raw-socket           (error) CAP_NET_RAW or operator-declared usage.
+//  14. syscall-heavy        (info)  syscall-bound image (redis, memcached).
 //
 // Each rule's Match closure is intentionally small and reads only the
 // fields it needs from the PodSpec. Rules are pure functions of the
@@ -110,7 +110,7 @@ func RegisterBuiltins(r *Registry) {
 		RemediationURL: "https://gvisor.dev/docs/user_guide/filesystem/",
 		Match: func(w scanner.Workload) bool {
 			for _, v := range w.PodSpec.Volumes {
-				if v.VolumeSource.HostPath != nil {
+				if v.HostPath != nil {
 					return true
 				}
 			}
@@ -176,8 +176,8 @@ func RegisterBuiltins(r *Registry) {
 		RemediationURL: "https://gvisor.dev/docs/user_guide/filesystem/",
 		Match: func(w scanner.Workload) bool {
 			for _, v := range w.PodSpec.Volumes {
-				if v.VolumeSource.CSI != nil &&
-					strings.Contains(strings.ToLower(v.VolumeSource.CSI.Driver), "fuse") {
+				if v.CSI != nil &&
+					strings.Contains(strings.ToLower(v.CSI.Driver), "fuse") {
 					return true
 				}
 			}
@@ -223,7 +223,7 @@ func RegisterBuiltins(r *Registry) {
 		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/",
 		Match: func(w scanner.Workload) bool {
 			for _, v := range w.PodSpec.Volumes {
-				if v.VolumeSource.HostPath != nil && v.VolumeSource.HostPath.Path == "/dev/kvm" {
+				if v.HostPath != nil && v.HostPath.Path == "/dev/kvm" {
 					return true
 				}
 			}

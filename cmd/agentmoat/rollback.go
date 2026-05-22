@@ -24,10 +24,10 @@ import (
 
 // Rollback flag values. Re-uses the same set as apply for symmetry.
 var (
-	flagRollbackPlanPath  string
-	flagRollbackDryRun    bool
-	flagRollbackNoEvents  bool
-	flagRollbackNoAudit   bool
+	flagRollbackPlanPath string
+	flagRollbackDryRun   bool
+	flagRollbackNoEvents bool
+	flagRollbackNoAudit  bool
 )
 
 func newRollbackCmd() *cobra.Command {
