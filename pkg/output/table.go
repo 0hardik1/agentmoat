@@ -28,6 +28,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
@@ -39,6 +40,18 @@ import (
 // fire, the table appends "(+N more)" so the operator knows to re-run
 // with --output json for the full picture.
 const maxReasonsInline = 3
+
+// Width caps for free-form table cells. Without them a single long
+// workload name or operator note can blow the table wider than the
+// terminal and force lipgloss/table to wrap continuation lines that
+// visually collide with the next row. The values are tuned by eye: wide
+// enough that typical real-world values pass through untouched, narrow
+// enough that pathological cases (auto-generated controller pod names,
+// multi-sentence notes) get trimmed to "..." with a JSON-hint footer.
+const (
+	maxNameWidth     = 60
+	maxFreeformWidth = 40
+)
 
 // renderScanReportTable is the ScanReport-specific table view.
 func renderScanReportTable(report *schema.ScanReport, w io.Writer, useColor bool) error {
@@ -84,22 +97,31 @@ func renderScanReportTable(report *schema.ScanReport, w io.Writer, useColor bool
 		return err
 	}
 
-	// Body table. Columns: NAMESPACE, KIND, NAME, VERDICT, REASONS,
-	// RECOMMENDATION. VERDICT is a pre-baked StatusBadge so column widths
-	// stay correct (lipgloss/table measures display width, ANSI-aware).
-	headers := []string{"NAMESPACE", "KIND", "NAME", "VERDICT", "REASONS", "RECOMMENDATION"}
+	// Body table. Columns: NAMESPACE, KIND, NAME, VERDICT, REASONS.
+	// VERDICT is a pre-baked StatusBadge so column widths stay correct
+	// (lipgloss/table measures display width, ANSI-aware).
+	//
+	// The per-workload Recommendation field is deliberately omitted from
+	// the table. For "compatible" rows it is a canned line that repeats on
+	// every row (see pkg/classifier: recommendationFor) and dominates table
+	// width on large clusters; for review/incompatible rows the actionable
+	// signal is in REASONS. Recommendation is still emitted in the JSON
+	// and YAML payloads, the muted footer below points operators there.
+	headers := []string{"NAMESPACE", "KIND", "NAME", "VERDICT", "REASONS"}
 	t := newBaseTable(s, headers, nil /* numericCols: none here */)
 	for _, wl := range report.Spec.Workloads {
 		t.Row(
 			wl.Namespace,
 			wl.Kind,
-			wl.Name,
+			truncateCell(wl.Name, maxNameWidth),
 			StatusBadge(s, string(wl.Compatibility)),
 			summarizeReasons(wl.Reasons),
-			wl.Recommendation,
 		)
 	}
-	_, err := fmt.Fprintln(w, t.Render())
+	if _, err := fmt.Fprintln(w, t.Render()); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintln(w, s.Muted.Render("(use --output json for full per-workload recommendations and reason details)"))
 	return err
 }
 
@@ -136,6 +158,12 @@ func renderMigrationPlanTable(plan *schema.MigrationPlan, w io.Writer, useColor 
 		return err
 	}
 
+	// tr tracks whether any free-form cell (NOTES, REASON) got trimmed by
+	// truncateCell. We only print the JSON-hint footer when something
+	// actually got shortened, so short fixtures don't get a misleading
+	// "look in the JSON" pointer.
+	var tr trackingTruncator
+
 	if len(plan.Spec.Steps) == 0 {
 		if _, err := fmt.Fprintln(w, s.Muted.Render("(no included steps)")); err != nil {
 			return err
@@ -149,10 +177,10 @@ func renderMigrationPlanTable(plan *schema.MigrationPlan, w io.Writer, useColor 
 				strconv.Itoa(st.Order),
 				st.Target.Namespace,
 				st.Target.Kind,
-				st.Target.Name,
+				tr.cell(st.Target.Name, maxNameWidth),
 				strconv.Itoa(st.RiskScore),
 				st.WaitFor,
-				st.Notes,
+				tr.cell(st.Notes, maxFreeformWidth),
 			)
 		}
 		if _, err := fmt.Fprintln(w, t.Render()); err != nil {
@@ -175,16 +203,17 @@ func renderMigrationPlanTable(plan *schema.MigrationPlan, w io.Writer, useColor 
 			t.Row(
 				e.Target.Namespace,
 				e.Target.Kind,
-				e.Target.Name,
+				tr.cell(e.Target.Name, maxNameWidth),
 				StatusBadge(s, string(e.Compatibility)),
-				e.Reason,
+				tr.cell(e.Reason, maxFreeformWidth),
 			)
 		}
 		if _, err := fmt.Fprintln(w, t.Render()); err != nil {
 			return err
 		}
 	}
-	return nil
+
+	return maybePrintTruncationHint(s, w, tr, "notes and reasons")
 }
 
 // renderApplyResultTable is the ApplyResult-specific view: per-step
@@ -370,6 +399,8 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 		return err
 	}
 
+	var tr trackingTruncator
+
 	// "#" right-aligned.
 	headers := []string{"#", "STATUS", "KIND/NS/NAME", "EXPECTED", "ACTUAL", "PROBE", "MESSAGE"}
 	t := newBaseTable(s, headers, map[int]bool{0: true})
@@ -377,15 +408,17 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 		t.Row(
 			strconv.Itoa(r.Order),
 			StatusBadge(s, string(r.Status)),
-			fmt.Sprintf("%s/%s/%s", r.Target.Kind, r.Target.Namespace, r.Target.Name),
+			tr.cell(fmt.Sprintf("%s/%s/%s", r.Target.Kind, r.Target.Namespace, r.Target.Name), maxNameWidth),
 			r.Expected,
 			displayActual(r.Actual),
 			summarizeProbe(r.Probe),
-			r.Message,
+			tr.cell(r.Message, maxFreeformWidth),
 		)
 	}
-	_, err := fmt.Fprintln(w, t.Render())
-	return err
+	if _, err := fmt.Fprintln(w, t.Render()); err != nil {
+		return err
+	}
+	return maybePrintTruncationHint(s, w, tr, "messages")
 }
 
 // displayActual returns "(empty)" for an unset Actual so the table row is
@@ -411,6 +444,47 @@ func summarizeProbe(p *schema.ProbeResult) string {
 		return "ok"
 	}
 	return "no markers"
+}
+
+// truncateCell shortens s to at most max runes, appending "..." when it
+// has to trim. Rune-correct (not byte-truncating) so multi-byte
+// characters survive. The empty string passes through unchanged, and a
+// max smaller than 4 leaves s alone since the ellipsis would not fit.
+func truncateCell(s string, max int) string {
+	if max < 4 || utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:max-3]) + "..."
+}
+
+// trackingTruncator wraps truncateCell and remembers whether any call
+// actually trimmed a cell. Renderers consult `.truncated` to decide
+// whether to print the muted "use --output json for full ..." footer,
+// so short fixtures don't get a misleading pointer.
+type trackingTruncator struct {
+	truncated bool
+}
+
+func (tr *trackingTruncator) cell(s string, max int) string {
+	out := truncateCell(s, max)
+	if out != s {
+		tr.truncated = true
+	}
+	return out
+}
+
+// maybePrintTruncationHint prints a muted "(use --output json for full
+// <suffix>)" footer when at least one cell was actually trimmed. Renderers
+// that bound free-form cells call this once at the end so the operator
+// knows where to look for the untrimmed text; renderers whose fixtures fit
+// untouched stay silent.
+func maybePrintTruncationHint(s *Styles, w io.Writer, tr trackingTruncator, suffix string) error {
+	if !tr.truncated {
+		return nil
+	}
+	_, err := fmt.Fprintln(w, s.Muted.Render("(use --output json for full "+suffix+")"))
+	return err
 }
 
 // compactPatchPreview returns a one-line, length-bounded preview of a

@@ -86,19 +86,35 @@ func TestRenderScanReportTable(t *testing.T) {
 		"review 1",                    //
 		"incompatible 1",              //
 		"NAMESPACE", "KIND", "NAME",   // headers
-		"VERDICT", "REASONS", "RECOMMENDATION",
+		"VERDICT", "REASONS",
 		"web", // row data
 		"node-exporter",
-		"set runtimeClassName: gvisor",
 		"host-network",
 		// Badge symbols (plain text in NoColor mode is just symbol+space+status)
 		"✓ compatible",
 		"⚠ review",
 		"✗ incompatible",
+		// Footer hint points operators at JSON for the per-row
+		// Recommendation field that no longer appears as a column.
+		"use --output json",
 	}
 	for _, s := range wantSubs {
 		if !strings.Contains(out, s) {
 			t.Errorf("scan output missing %q\nfull output:\n%s", s, out)
+		}
+	}
+	// Negative checks: the RECOMMENDATION column was removed because its
+	// canned text dominated table width on large clusters. The field is
+	// still in the JSON/YAML payload; the table just no longer prints it.
+	notWant := []string{
+		"RECOMMENDATION",
+		"set runtimeClassName: gvisor",
+		"review network throughput",
+		"do not migrate",
+	}
+	for _, s := range notWant {
+		if strings.Contains(out, s) {
+			t.Errorf("scan output should not contain %q (RECOMMENDATION column was removed)\nfull output:\n%s", s, out)
 		}
 	}
 }
@@ -384,6 +400,55 @@ func TestSummarizeReasons(t *testing.T) {
 				t.Errorf("summarizeReasons(%v) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestTruncateCell exercises the rune-correct cell truncator that bounds
+// free-form table cells (workload names, notes, messages) so a single
+// pathological value cannot wrap the table past the terminal edge.
+func TestTruncateCell(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"empty", "", 10, ""},
+		{"under max", "abc", 10, "abc"},
+		{"exactly max", "abcdefghij", 10, "abcdefghij"},
+		{"over max trims with ellipsis", "abcdefghijkl", 10, "abcdefg..."},
+		// Multi-byte: each glyph counts as 1 rune, not as its byte length.
+		// "héllo" is 5 runes (one is 2 bytes) so it passes through at max=5.
+		{"multibyte under max", "héllo", 5, "héllo"},
+		// Beyond max, runes are counted not bytes; with max=4 we keep 1
+		// rune then append "..." for a 4-rune output.
+		{"multibyte trimmed", "héllo", 4, "h..."},
+		// max < 4 cannot hold the ellipsis so we return s unchanged
+		// rather than producing a misleading "..." prefix.
+		{"max too small", "abcdef", 3, "abcdef"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateCell(tc.in, tc.max)
+			if got != tc.want {
+				t.Errorf("truncateCell(%q, %d) = %q, want %q", tc.in, tc.max, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTrackingTruncator pins the bookkeeping side of the truncator:
+// .truncated must flip only when a cell actually got shortened, since
+// renderers gate the JSON-hint footer on that flag.
+func TestTrackingTruncator(t *testing.T) {
+	t.Parallel()
+	var tr trackingTruncator
+	if got := tr.cell("short", 10); got != "short" || tr.truncated {
+		t.Errorf("under-max cell tripped truncated flag: out=%q, truncated=%v", got, tr.truncated)
+	}
+	if got := tr.cell("this is way over the limit", 10); got != "this is..." || !tr.truncated {
+		t.Errorf("over-max cell should set truncated and shorten: out=%q, truncated=%v", got, tr.truncated)
 	}
 }
 
