@@ -46,9 +46,16 @@ func Scan(ctx context.Context, opts ScanOptions) (*schema.ScanReport, error) {
 
 	// 1. Build the Kubernetes client. We pass --kubeconfig / --context
 	// through to the loader; everything else falls back to env / defaults.
-	client, _, err := kube.NewClient(opts.KubeconfigPath, opts.Context)
-	if err != nil {
-		return nil, fmt.Errorf("building kubernetes client: %w", err)
+	// Tests (currently only the MCP server's unit tests) can preempt this
+	// step by setting opts.KubeClient to a fake; production callers leave
+	// it nil so the standard three-tier loader runs.
+	client := opts.KubeClient
+	if client == nil {
+		cs, _, err := kube.NewClient(opts.KubeconfigPath, opts.Context)
+		if err != nil {
+			return nil, fmt.Errorf("building kubernetes client: %w", err)
+		}
+		client = cs
 	}
 
 	// 2. Build the rule registry. Always register the built-ins, then

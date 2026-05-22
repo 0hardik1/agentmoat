@@ -174,22 +174,34 @@ SCAN_EXIT=$?
 set -e
 assert_eq "scan exit code" 2 "$SCAN_EXIT"
 
-# The classifier groups by controller, so the host-net Pod is reported
-# as a Pod (no owner). Deployment and StatefulSet show as their
-# controller kinds.
+# The classifier groups by controller, so bare Pods (host-net plus the
+# rule-coverage pods in workloads.yaml) report as Pod; the Deployment and
+# StatefulSet report as their controller kinds. The expected workloads
+# are: web (Deployment, compatible), cache (StatefulSet, compatible),
+# host-net + 6 rule-coverage pods (Pod, incompatible), and 5 rule-coverage
+# pods (Pod, review). Total = 14.
 SCAN_TOTAL=$(jq -r '.spec.summary.total' "$WORK_DIR/scan.json")
 SCAN_COMPAT=$(jq -r '.spec.summary.compatible' "$WORK_DIR/scan.json")
+SCAN_REVIEW=$(jq -r '.spec.summary.needsReview' "$WORK_DIR/scan.json")
 SCAN_INCOMPAT=$(jq -r '.spec.summary.incompatible' "$WORK_DIR/scan.json")
-assert_eq "scan summary.total" 3 "$SCAN_TOTAL"
+assert_eq "scan summary.total" 14 "$SCAN_TOTAL"
 assert_eq "scan summary.compatible" 2 "$SCAN_COMPAT"
-assert_eq "scan summary.incompatible" 1 "$SCAN_INCOMPAT"
+assert_eq "scan summary.needsReview" 5 "$SCAN_REVIEW"
+assert_eq "scan summary.incompatible" 7 "$SCAN_INCOMPAT"
 
-# Cross-check that the right workloads landed in the right buckets.
-KINDS=$(jq -r '.spec.workloads | map(.kind) | sort | join(",")' "$WORK_DIR/scan.json")
+# Cross-check that the right workloads landed in the right buckets. `unique`
+# collapses the 12 Pod kinds so the assertion stays readable.
+KINDS=$(jq -r '.spec.workloads | map(.kind) | unique | sort | join(",")' "$WORK_DIR/scan.json")
 assert_eq "scan workload kinds" "Deployment,Pod,StatefulSet" "$KINDS"
 
-INCOMPAT_NAME=$(jq -r '.spec.workloads[] | select(.compatibility=="incompatible") | .name' "$WORK_DIR/scan.json")
-assert_eq "scan incompatible workload" "host-net" "$INCOMPAT_NAME"
+INCOMPAT_NAMES=$(jq -r '.spec.workloads | map(select(.compatibility=="incompatible") | .name) | sort | join(",")' "$WORK_DIR/scan.json")
+assert_eq "scan incompatible workloads" \
+  "ebpf-app,host-ipc-app,host-net,host-pid-app,kvm-app,priv-app,raw-socket-app" \
+  "$INCOMPAT_NAMES"
+REVIEW_NAMES=$(jq -r '.spec.workloads | map(select(.compatibility=="review") | .name) | sort | join(",")' "$WORK_DIR/scan.json")
+assert_eq "scan review workloads" \
+  "fuse-app,gpu-app,hostpath-app,iouring-app,perf-app" \
+  "$REVIEW_NAMES"
 
 # -----------------------------------------------------------------------------
 # 2. plan: deterministic, 2 steps (compatible only), non-empty PlanHash.
@@ -211,9 +223,9 @@ PLAN_INCLUDED=$(jq -r '.spec.summary.included' "$WORK_DIR/plan.json")
 PLAN_EXCLUDED=$(jq -r '.spec.summary.excluded' "$WORK_DIR/plan.json")
 PLAN_STEP_COUNT=$(jq -r '.spec.steps | length' "$WORK_DIR/plan.json")
 PLAN_HASH=$(jq -r '.metadata.planHash' "$WORK_DIR/plan.json")
-assert_eq "plan summary.total" 3 "$PLAN_TOTAL"
+assert_eq "plan summary.total" 14 "$PLAN_TOTAL"
 assert_eq "plan summary.included" 2 "$PLAN_INCLUDED"
-assert_eq "plan summary.excluded" 1 "$PLAN_EXCLUDED"
+assert_eq "plan summary.excluded" 12 "$PLAN_EXCLUDED"
 assert_eq "plan spec.steps length" 2 "$PLAN_STEP_COUNT"
 [[ -n "$PLAN_HASH" && "$PLAN_HASH" != "null" ]] || fail "plan metadata.planHash is empty"
 

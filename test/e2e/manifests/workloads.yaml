@@ -1,21 +1,49 @@
 # agentmoat: e2e workloads.
 #
-# Mix chosen to exercise both the happy path (a compatible Deployment that
-# the planner includes and the applier patches) and the exit-code-2 path
-# (an incompatible Pod that the scanner flags but the planner excludes).
+# Mix chosen to exercise one workload per (non-info) classifier rule, plus
+# two compatible workloads on the happy path. The planner includes only the
+# compatible workloads as steps; incompatible and review verdicts are
+# excluded by default.
 #
-# Workloads:
+# Workloads (alphabetical within each bucket):
 #
-#   web        Deployment, compatible. Should appear in the plan with
-#              action=set-runtime-class. The applier patches
-#              spec.template.spec.runtimeClassName=gvisor.
+#   Compatible (planner includes; applier patches runtimeClassName=gvisor):
 #
-#   cache      StatefulSet, compatible. Same as `web`, second plan step.
-#              Two steps prove the per-step renderer/idempotency loops.
+#     cache            StatefulSet, redis image (info: syscall-heavy).
+#                      Plan step. Two steps prove the per-step renderer
+#                      and idempotency loops.
+#     web              Deployment, nginx image (info: network-throughput).
+#                      Plan step.
 #
-#   host-net   Pod, hostNetwork=true. Classifier flags this incompatible.
-#              The planner excludes it from steps; the scanner's exit
-#              code becomes 2.
+#   Incompatible (planner excludes; scanner exit code becomes 2):
+#
+#     ebpf-app         Image hint cilium/cilium (rule: ebpf). Tag is
+#                      intentionally non-pullable; the pod stays in
+#                      ImagePullBackOff and the scanner reads the spec.
+#     host-ipc-app     hostIPC=true (rule: host-ipc).
+#     host-net         hostNetwork=true (rule: host-network).
+#     host-pid-app     hostPID=true (rule: host-pid).
+#     kvm-app          hostPath /dev/kvm (rule: kvm-nested). The kind node
+#                      typically lacks /dev/kvm; the pod fails to mount but
+#                      the scanner reads the spec.
+#     priv-app         privileged=true (rule: privileged).
+#     raw-socket-app   CAP_NET_RAW (rule: raw-socket).
+#
+#   Review (planner excludes unless --include-review; e2e does not pass it):
+#
+#     fuse-app         Env AGENTMOAT_USES_FUSE=true escape hatch (rule:
+#                      fuse-mount).
+#     gpu-app          nvidia.com/gpu resource request (rule:
+#                      gpu-passthrough). Stays Pending on kind; fine.
+#     hostpath-app     hostPath /var/log mount (rule: host-path-mount).
+#     iouring-app      Annotation agentmoat.io/uses-iouring=true (rule:
+#                      io-uring).
+#     perf-app         CAP_SYS_ADMIN (rule: perf-events).
+#
+# Only `web` and `cache` need to reach Ready; the rest only need to be
+# recorded by the API server for the scanner to see them. They may sit in
+# Pending / ImagePullBackOff / ContainerCreating depending on the kind
+# node, and the e2e tolerates that.
 #
 # All workloads land in whatever namespace `kubectl apply -n ...` puts
 # them in (scripts/e2e.sh uses `agentmoat-e2e`). They are deliberately
@@ -97,6 +125,257 @@ spec:
     - name: app
       image: busybox:1.36
       command: ["sleep", "3600"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: priv-app
+  labels:
+    app: priv-app
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        privileged: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: host-pid-app
+  labels:
+    app: host-pid-app
+spec:
+  hostPID: true
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: host-ipc-app
+  labels:
+    app: host-ipc-app
+spec:
+  hostIPC: true
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: raw-socket-app
+  labels:
+    app: raw-socket-app
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        capabilities:
+          add: ["NET_RAW"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ebpf-app
+  labels:
+    app: ebpf-app
+spec:
+  containers:
+    - name: app
+      # Image substring "cilium/cilium" triggers the ebpf rule
+      # (pkg/classifier/builtin_rules.go matchEBPF). The tag is
+      # intentionally non-pullable; pod stays in ImagePullBackOff but the
+      # API server records the spec, which is all the scanner needs.
+      image: cilium/cilium:e2e-placeholder
+      command: ["sleep", "3600"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kvm-app
+  labels:
+    app: kvm-app
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - name: kvm
+          mountPath: /host/dev/kvm
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+  volumes:
+    - name: kvm
+      hostPath:
+        # /dev/kvm typically does not exist on the kind worker. With the
+        # default (empty) type, kubelet attempts to mount and fails;
+        # admission still accepts the spec, so the scanner sees it.
+        path: /dev/kvm
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hostpath-app
+  labels:
+    app: hostpath-app
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - name: hostlogs
+          mountPath: /host/var/log
+          readOnly: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+  volumes:
+    - name: hostlogs
+      hostPath:
+        path: /var/log
+        type: Directory
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-app
+  labels:
+    app: gpu-app
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: 50m
+          memory: 32Mi
+          nvidia.com/gpu: "1"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fuse-app
+  labels:
+    app: fuse-app
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      env:
+        # Env-var escape hatch picked up by matchFUSEMount; simpler than
+        # building out a real FUSE CSI volume just for the spec match.
+        - name: AGENTMOAT_USES_FUSE
+          value: "true"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iouring-app
+  annotations:
+    agentmoat.io/uses-iouring: "true"
+  labels:
+    app: iouring-app
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: perf-app
+  labels:
+    app: perf-app
+spec:
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sleep", "3600"]
+      securityContext:
+        capabilities:
+          add: ["SYS_ADMIN"]
       resources:
         requests:
           cpu: 10m
