@@ -31,6 +31,8 @@ vendor/
 build-manifest.json
 # Per-user audit log written by `agentmoat apply` (see plan.md section 12.5).
 .agentmoat/
+# JSON artifacts copied from `make e2e` for manual replay.
+.agentmoat-e2e/
 # Packer scratch and validation artifacts.
 packer/.packer.d/
 packer/*.log
