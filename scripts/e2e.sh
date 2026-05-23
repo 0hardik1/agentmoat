@@ -6,7 +6,7 @@
 #   1. `agentmoat scan`     against the kind API server (exit 2 path, JSON
 #                           output, summary counts, per-workload kinds).
 #   2. `agentmoat plan`     over the stored ScanReport (deterministic
-#                           ordering, two steps, PlanHash present).
+#                           ordering, eight compatible steps, PlanHash present).
 #   3. `agentmoat apply`    in dry-run mode (default), then again with
 #                           --dry-run=false (real strategic-merge patch),
 #                           then a third time to prove idempotency.
@@ -15,7 +15,7 @@
 #                           inside the pod and grepping dmesg / proc for
 #                           gVisor markers. Run three times: after real
 #                           apply, after idempotent re-apply (still all
-#                           ok), and after rollback (expect mismatch=2
+#                           ok), and after rollback (expect mismatch=8
 #                           and exit 4).
 #   5. `agentmoat rollback` to clear the patches and restore the
 #                           pre-apply spec.
@@ -62,6 +62,8 @@ source "$REPO_ROOT/scripts/lib/output.sh"
 AGENTMOAT_BIN="${AGENTMOAT_BIN:-$REPO_ROOT/bin/agentmoat}"
 MANIFEST_DIR="$REPO_ROOT/test/e2e/manifests"
 WORK_DIR="$(mktemp -d -t agentmoat-e2e.XXXX)"
+E2E_ARTIFACT_DIR="$REPO_ROOT/.agentmoat-e2e"
+E2E_ARTIFACT_REL=".agentmoat-e2e"
 
 # kubectl talks to the kind context kind has created. We pin the context
 # explicitly on every kubectl call so a stray KUBECONFIG never targets
@@ -69,6 +71,31 @@ WORK_DIR="$(mktemp -d -t agentmoat-e2e.XXXX)"
 CTX="kind-$CLUSTER_NAME"
 KCTL=(kubectl --context "$CTX")
 AGENT=("$AGENTMOAT_BIN" --context "$CTX")
+
+# Expected scan/plan totals from test/e2e/manifests/workloads.yaml.
+E2E_TOTAL=14
+E2E_COMPAT=8
+E2E_REVIEW=3
+E2E_INCOMPAT=3
+E2E_COMPAT_DEPLOYMENTS=(analytics api auth billing notifications web worker)
+E2E_COMPAT_STATEFULSETS=(cache)
+
+# Copy-paste replay commands printed in the final SUMMARY table. Paths are
+# relative to the repo root; artifacts land in .agentmoat-e2e/ on exit.
+# Preflight stays multiline (several kubectl steps); the rest are one line
+# so the summary table stays compact.
+E2E_REPLAY_AGENT="bin/agentmoat"
+E2E_REPLAY_PREFLIGHT=$'make kind-up\nkubectl apply -f test/e2e/manifests/runtimeclass.yaml\nkubectl create namespace '"$NAMESPACE"$' \\\n  --dry-run=client -o yaml | kubectl apply -f -\nkubectl -n '"$NAMESPACE"$' apply -f test/e2e/manifests/workloads.yaml'
+E2E_REPLAY_SCAN="$E2E_REPLAY_AGENT scan --namespace $NAMESPACE"
+E2E_REPLAY_PLAN="$E2E_REPLAY_AGENT plan --scan $E2E_ARTIFACT_REL/scan.json"
+E2E_REPLAY_APPLY_DRY="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --no-audit"
+E2E_REPLAY_APPLY="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
+E2E_REPLAY_VERIFY_PROBE="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json --in-pod-probe"
+E2E_REPLAY_VERIFY="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json"
+E2E_REPLAY_ROLLBACK="$E2E_REPLAY_AGENT rollback --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
+E2E_REPLAY_EXPLAIN="bin/agentmoat explain"
+E2E_REPLAY_EXPLAIN_NS="$E2E_REPLAY_AGENT explain namespace $NAMESPACE"
+E2E_REPLAY_EXPLAIN_WL="$E2E_REPLAY_AGENT explain workload ${NAMESPACE}/host-net"
 
 # Toggled by the assertion helpers below; lets cleanup print a summary.
 FAIL_COUNT=0
@@ -116,6 +143,11 @@ wait_runtime_class() {
 
 cleanup() {
   local code=$?
+  if [[ -d "$WORK_DIR" ]] && compgen -G "$WORK_DIR/"'*' >/dev/null; then
+    mkdir -p "$E2E_ARTIFACT_DIR"
+    cp -f "$WORK_DIR/"* "$E2E_ARTIFACT_DIR/" 2>/dev/null || true
+    export E2E_ARTIFACT_HINT=$'Artifacts: .agentmoat-e2e/\nReplay from repo root.\nFull run: make e2e\nKeep cluster: KEEP_CLUSTER=1 make e2e'
+  fi
   if [[ "$KEEP_CLUSTER" != "1" ]]; then
     e2e_infra "tearing down kind cluster '$CLUSTER_NAME'..."
     "$REPO_ROOT/scripts/kind-down.sh" >/dev/null 2>&1 || true
@@ -155,13 +187,17 @@ e2e_infra "creating namespace '$NAMESPACE' and applying RuntimeClass + workloads
 "${KCTL[@]}" -n "$NAMESPACE" apply -f "$MANIFEST_DIR/workloads.yaml"
 
 e2e_infra "waiting for workloads to be Ready..."
-"${KCTL[@]}" -n "$NAMESPACE" wait --for=condition=Available deployment/web --timeout=180s
-"${KCTL[@]}" -n "$NAMESPACE" rollout status statefulset/cache --timeout=180s
+for dep in "${E2E_COMPAT_DEPLOYMENTS[@]}"; do
+  "${KCTL[@]}" -n "$NAMESPACE" wait --for=condition=Available "deployment/$dep" --timeout=180s
+done
+for sts in "${E2E_COMPAT_STATEFULSETS[@]}"; do
+  "${KCTL[@]}" -n "$NAMESPACE" rollout status "statefulset/$sts" --timeout=180s
+done
 # host-net's Pod may stay Pending on some kind setups; we tolerate that
 # (the scanner only needs to see the spec). A 30s grace gives the pod
 # a chance to register before we scan.
 "${KCTL[@]}" -n "$NAMESPACE" wait --for=condition=PodScheduled pod/host-net --timeout=30s || true
-e2e_step_pass "preflight"
+e2e_step_pass "preflight" "$E2E_REPLAY_PREFLIGHT"
 
 # -----------------------------------------------------------------------------
 # 1. scan: expect exit 2 (host-net is incompatible) and the right counts.
@@ -174,37 +210,39 @@ SCAN_EXIT=$AGENT_EXIT
 assert_eq "scan exit code" 2 "$SCAN_EXIT"
 
 # The classifier groups by controller, so bare Pods (host-net plus the
-# rule-coverage pods in workloads.yaml) report as Pod; the Deployment and
-# StatefulSet report as their controller kinds. The expected workloads
-# are: web (Deployment, compatible), cache (StatefulSet, compatible),
-# host-net + 6 rule-coverage pods (Pod, incompatible), and 5 rule-coverage
-# pods (Pod, review). Total = 14.
+# rule-coverage pods in workloads.yaml) report as Pod; compatible
+# Deployments and StatefulSets report as their controller kinds. The
+# fixture is intentionally skewed toward compatible workloads.
 SCAN_TOTAL=$(jq -r '.spec.summary.total' "$WORK_DIR/scan.json")
 SCAN_COMPAT=$(jq -r '.spec.summary.compatible' "$WORK_DIR/scan.json")
 SCAN_REVIEW=$(jq -r '.spec.summary.needsReview' "$WORK_DIR/scan.json")
 SCAN_INCOMPAT=$(jq -r '.spec.summary.incompatible' "$WORK_DIR/scan.json")
-assert_eq "scan summary.total" 14 "$SCAN_TOTAL"
-assert_eq "scan summary.compatible" 2 "$SCAN_COMPAT"
-assert_eq "scan summary.needsReview" 5 "$SCAN_REVIEW"
-assert_eq "scan summary.incompatible" 7 "$SCAN_INCOMPAT"
+assert_eq "scan summary.total" "$E2E_TOTAL" "$SCAN_TOTAL"
+assert_eq "scan summary.compatible" "$E2E_COMPAT" "$SCAN_COMPAT"
+assert_eq "scan summary.needsReview" "$E2E_REVIEW" "$SCAN_REVIEW"
+assert_eq "scan summary.incompatible" "$E2E_INCOMPAT" "$SCAN_INCOMPAT"
 
 # Cross-check that the right workloads landed in the right buckets. `unique`
-# collapses the 12 Pod kinds so the assertion stays readable.
+# collapses the Pod kinds so the assertion stays readable.
 KINDS=$(jq -r '.spec.workloads | map(.kind) | unique | sort | join(",")' "$WORK_DIR/scan.json")
 assert_eq "scan workload kinds" "Deployment,Pod,StatefulSet" "$KINDS"
 
+COMPAT_NAMES=$(jq -r '.spec.workloads | map(select(.compatibility=="compatible") | .name) | sort | join(",")' "$WORK_DIR/scan.json")
+assert_eq "scan compatible workloads" \
+  "analytics,api,auth,billing,cache,notifications,web,worker" \
+  "$COMPAT_NAMES"
 INCOMPAT_NAMES=$(jq -r '.spec.workloads | map(select(.compatibility=="incompatible") | .name) | sort | join(",")' "$WORK_DIR/scan.json")
 assert_eq "scan incompatible workloads" \
-  "ebpf-app,host-ipc-app,host-net,host-pid-app,kvm-app,priv-app,raw-socket-app" \
+  "ebpf-app,host-net,priv-app" \
   "$INCOMPAT_NAMES"
 REVIEW_NAMES=$(jq -r '.spec.workloads | map(select(.compatibility=="review") | .name) | sort | join(",")' "$WORK_DIR/scan.json")
 assert_eq "scan review workloads" \
-  "fuse-app,gpu-app,hostpath-app,iouring-app,perf-app" \
+  "fuse-app,gpu-app,hostpath-app" \
   "$REVIEW_NAMES"
-e2e_step_pass "scan"
+e2e_step_pass "scan" "$E2E_REPLAY_SCAN"
 
 # -----------------------------------------------------------------------------
-# 2. plan: deterministic, 2 steps (compatible only), non-empty PlanHash.
+# 2. plan: deterministic, compatible-only steps, non-empty PlanHash.
 # -----------------------------------------------------------------------------
 #
 # The applier accepts JSON or YAML plans (kind sniff on read), and using
@@ -224,10 +262,10 @@ PLAN_INCLUDED=$(jq -r '.spec.summary.included' "$WORK_DIR/plan.json")
 PLAN_EXCLUDED=$(jq -r '.spec.summary.excluded' "$WORK_DIR/plan.json")
 PLAN_STEP_COUNT=$(jq -r '.spec.steps | length' "$WORK_DIR/plan.json")
 PLAN_HASH=$(jq -r '.metadata.planHash' "$WORK_DIR/plan.json")
-assert_eq "plan summary.total" 14 "$PLAN_TOTAL"
-assert_eq "plan summary.included" 2 "$PLAN_INCLUDED"
-assert_eq "plan summary.excluded" 12 "$PLAN_EXCLUDED"
-assert_eq "plan spec.steps length" 2 "$PLAN_STEP_COUNT"
+assert_eq "plan summary.total" "$E2E_TOTAL" "$PLAN_TOTAL"
+assert_eq "plan summary.included" "$E2E_COMPAT" "$PLAN_INCLUDED"
+assert_eq "plan summary.excluded" "$((E2E_REVIEW + E2E_INCOMPAT))" "$PLAN_EXCLUDED"
+assert_eq "plan spec.steps length" "$E2E_COMPAT" "$PLAN_STEP_COUNT"
 [[ -n "$PLAN_HASH" && "$PLAN_HASH" != "null" ]] || fail "plan metadata.planHash is empty"
 
 # Plan determinism: re-running the planner on the same scan must produce
@@ -236,7 +274,7 @@ assert_eq "plan spec.steps length" 2 "$PLAN_STEP_COUNT"
 "${AGENT[@]}" plan --scan "$WORK_DIR/scan.json" --output json >"$WORK_DIR/plan2.json"
 PLAN_HASH_2=$(jq -r '.metadata.planHash' "$WORK_DIR/plan2.json")
 assert_eq "plan determinism (re-run hash)" "$PLAN_HASH" "$PLAN_HASH_2"
-e2e_step_pass "plan"
+e2e_step_pass "plan" "$E2E_REPLAY_PLAN"
 
 # -----------------------------------------------------------------------------
 # 3. apply --dry-run: no mutation; Deployment template runtimeClassName empty.
@@ -250,7 +288,7 @@ DRY_RUN_FLAG=$(jq -r '.metadata.dryRun' "$WORK_DIR/apply-dry.json")
 DRY_APPLIED=$(jq -r '.spec.summary.applied' "$WORK_DIR/apply-dry.json")
 DRY_FAILED=$(jq -r '.spec.summary.failed' "$WORK_DIR/apply-dry.json")
 assert_eq "apply dry-run metadata.dryRun" "true" "$DRY_RUN_FLAG"
-assert_eq "apply dry-run summary.applied" 2 "$DRY_APPLIED"
+assert_eq "apply dry-run summary.applied" "$E2E_COMPAT" "$DRY_APPLIED"
 assert_eq "apply dry-run summary.failed" 0 "$DRY_FAILED"
 
 # Spec must still be unmutated.
@@ -258,7 +296,7 @@ WEB_RT=$("${KCTL[@]}" -n "$NAMESPACE" get deployment web -o jsonpath='{.spec.tem
 CACHE_RT=$("${KCTL[@]}" -n "$NAMESPACE" get statefulset cache -o jsonpath='{.spec.template.spec.runtimeClassName}')
 assert_eq "Deployment/web runtimeClassName after dry-run" "" "$WEB_RT"
 assert_eq "StatefulSet/cache runtimeClassName after dry-run" "" "$CACHE_RT"
-e2e_step_pass "apply (dry-run)"
+e2e_step_pass "apply (dry-run)" "$E2E_REPLAY_APPLY_DRY"
 
 # -----------------------------------------------------------------------------
 # 4. apply (real): patches land; pods carry runtimeClassName=gvisor.
@@ -273,7 +311,7 @@ REAL_APPLIED=$(jq -r '.spec.summary.applied' "$WORK_DIR/apply.json")
 REAL_ALREADY=$(jq -r '.spec.summary.alreadyApplied' "$WORK_DIR/apply.json")
 REAL_FAILED=$(jq -r '.spec.summary.failed' "$WORK_DIR/apply.json")
 assert_eq "apply metadata.dryRun" "false" "$REAL_DRY_RUN"
-assert_eq "apply summary.applied" 2 "$REAL_APPLIED"
+assert_eq "apply summary.applied" "$E2E_COMPAT" "$REAL_APPLIED"
 assert_eq "apply summary.alreadyApplied" 0 "$REAL_ALREADY"
 assert_eq "apply summary.failed" 0 "$REAL_FAILED"
 
@@ -285,33 +323,37 @@ NS_HASH=$("${KCTL[@]}" get namespace "$NAMESPACE" \
   -o jsonpath='{.metadata.annotations.agentmoat\.io/plan-hash}')
 assert_eq "namespace plan-hash annotation" "$PLAN_HASH" "$NS_HASH"
 
-# Wait for the rolled deployment to be Ready again so the next apply runs
+# Wait for the rolled workloads to be Ready again so the next apply runs
 # against a steady-state spec.
-"${KCTL[@]}" -n "$NAMESPACE" rollout status deployment/web --timeout=180s
-"${KCTL[@]}" -n "$NAMESPACE" rollout status statefulset/cache --timeout=180s
-e2e_step_pass "apply"
+for dep in "${E2E_COMPAT_DEPLOYMENTS[@]}"; do
+  "${KCTL[@]}" -n "$NAMESPACE" rollout status "deployment/$dep" --timeout=180s
+done
+for sts in "${E2E_COMPAT_STATEFULSETS[@]}"; do
+  "${KCTL[@]}" -n "$NAMESPACE" rollout status "statefulset/$sts" --timeout=180s
+done
+e2e_step_pass "apply" "$E2E_REPLAY_APPLY"
 
 # -----------------------------------------------------------------------------
-# 4b. verify (post-apply, with --in-pod-probe): expect ok=2, exit 0.
+# 4b. verify (post-apply, with --in-pod-probe): expect all-ok, exit 0.
 # -----------------------------------------------------------------------------
 #
 # Single source of truth for "did the migration land": the verifier reads
 # every plan step, fetches the live pods, checks .spec.runtimeClassName,
 # and (with --in-pod-probe) execs a small script to confirm gVisor's
-# Sentry markers are present (dmesg banner, /proc/version, uname). Two
-# steps in this plan, so summary.ok must be 2.
+# Sentry markers are present (dmesg banner, /proc/version, uname). Every
+# compatible workload in this plan must report ok.
 #
 # We use --in-pod-probe here (vs the cheaper field-only path used in the
 # post-rollback case below) because the kind worker is gVisor-real and
 # we want the e2e to catch a regression where a future containerd patch
 # accidentally falls back to runc despite handler=gvisor surviving.
 
-e2e_step "verify (post-apply, --in-pod-probe): expect ok=2, exit 0"
+e2e_step "verify (post-apply, --in-pod-probe): expect ok=$E2E_COMPAT, exit 0"
 agentmoat_table_and_json "$WORK_DIR/verify-after-apply.json" \
   "${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --in-pod-probe
 VERIFY_EXIT=$AGENT_EXIT
 assert_eq "verify exit code (post-apply)" 0 "$VERIFY_EXIT"
-assert_eq "verify summary.ok (post-apply)" 2 \
+assert_eq "verify summary.ok (post-apply)" "$E2E_COMPAT" \
   "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-after-apply.json")"
 assert_eq "verify summary.mismatch (post-apply)" 0 \
   "$(jq -r '.spec.summary.mismatch' "$WORK_DIR/verify-after-apply.json")"
@@ -327,8 +369,8 @@ assert_eq "verify result actuals (post-apply)" "gvisor" "$ACTUALS"
 PROBE_DETECTED_COUNT=$(jq -r \
   '[.spec.results[].probe | select(.!=null) | select(.detected==true)] | length' \
   "$WORK_DIR/verify-after-apply.json")
-assert_eq "verify probe detected count (post-apply)" 2 "$PROBE_DETECTED_COUNT"
-e2e_step_pass "verify (post-apply)"
+assert_eq "verify probe detected count (post-apply)" "$E2E_COMPAT" "$PROBE_DETECTED_COUNT"
+e2e_step_pass "verify (post-apply)" "$E2E_REPLAY_VERIFY_PROBE"
 
 # -----------------------------------------------------------------------------
 # 5. idempotent re-apply: every step already-applied.
@@ -342,9 +384,9 @@ RE_APPLIED=$(jq -r '.spec.summary.applied' "$WORK_DIR/apply2.json")
 RE_ALREADY=$(jq -r '.spec.summary.alreadyApplied' "$WORK_DIR/apply2.json")
 RE_FAILED=$(jq -r '.spec.summary.failed' "$WORK_DIR/apply2.json")
 assert_eq "re-apply summary.applied" 0 "$RE_APPLIED"
-assert_eq "re-apply summary.alreadyApplied" 2 "$RE_ALREADY"
+assert_eq "re-apply summary.alreadyApplied" "$E2E_COMPAT" "$RE_ALREADY"
 assert_eq "re-apply summary.failed" 0 "$RE_FAILED"
-e2e_step_pass "apply (re-run)"
+e2e_step_pass "apply (re-run)" "$E2E_REPLAY_APPLY"
 
 # -----------------------------------------------------------------------------
 # 5b. verify (post-idempotent-apply): still all-ok.
@@ -357,11 +399,11 @@ e2e_step_pass "apply (re-run)"
 e2e_step "verify (post-idempotent-apply): still all-ok"
 agentmoat_table_and_json "$WORK_DIR/verify-after-reapply.json" \
   "${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --in-pod-probe
-assert_eq "verify summary.ok (post-reapply)" 2 \
+assert_eq "verify summary.ok (post-reapply)" "$E2E_COMPAT" \
   "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-after-reapply.json")"
 assert_eq "verify summary.mismatch (post-reapply)" 0 \
   "$(jq -r '.spec.summary.mismatch' "$WORK_DIR/verify-after-reapply.json")"
-e2e_step_pass "verify (post-idempotent-apply)"
+e2e_step_pass "verify (post-idempotent-apply)" "$E2E_REPLAY_VERIFY_PROBE"
 
 # -----------------------------------------------------------------------------
 # 6. rollback: runtimeClassName cleared; namespace annotation removed.
@@ -373,7 +415,7 @@ e2e_step "rollback: clear runtimeClassName + plan-hash"
 
 RB_APPLIED=$(jq -r '.spec.summary.applied' "$WORK_DIR/rollback.json")
 RB_FAILED=$(jq -r '.spec.summary.failed' "$WORK_DIR/rollback.json")
-assert_eq "rollback summary.applied" 2 "$RB_APPLIED"
+assert_eq "rollback summary.applied" "$E2E_COMPAT" "$RB_APPLIED"
 assert_eq "rollback summary.failed" 0 "$RB_FAILED"
 
 wait_runtime_class deployment web ""
@@ -385,16 +427,20 @@ wait_runtime_class statefulset cache ""
 # rollback verify can see either zero alive pods (transient) or still see
 # the gVisor-tagged pods (DeletionTimestamp not yet set) and produce the
 # wrong verdict.
-"${KCTL[@]}" -n "$NAMESPACE" rollout status deployment/web --timeout=180s
-"${KCTL[@]}" -n "$NAMESPACE" rollout status statefulset/cache --timeout=180s
+for dep in "${E2E_COMPAT_DEPLOYMENTS[@]}"; do
+  "${KCTL[@]}" -n "$NAMESPACE" rollout status "deployment/$dep" --timeout=180s
+done
+for sts in "${E2E_COMPAT_STATEFULSETS[@]}"; do
+  "${KCTL[@]}" -n "$NAMESPACE" rollout status "statefulset/$sts" --timeout=180s
+done
 
 NS_HASH_AFTER=$("${KCTL[@]}" get namespace "$NAMESPACE" \
   -o jsonpath='{.metadata.annotations.agentmoat\.io/plan-hash}')
 assert_eq "namespace plan-hash after rollback" "" "$NS_HASH_AFTER"
-e2e_step_pass "rollback"
+e2e_step_pass "rollback" "$E2E_REPLAY_ROLLBACK"
 
 # -----------------------------------------------------------------------------
-# 6b. verify (post-rollback): expect mismatch=2 and exit 4.
+# 6b. verify (post-rollback): expect mismatch on every step and exit 4.
 # -----------------------------------------------------------------------------
 #
 # The same plan is now stale: the pods exist but no longer carry
@@ -404,19 +450,19 @@ e2e_step_pass "rollback"
 # check alone is enough to drive the mismatch, and skipping the exec
 # saves a few seconds in CI.
 
-e2e_step "verify (post-rollback): expect mismatch=2 and exit 4"
+e2e_step "verify (post-rollback): expect mismatch=$E2E_COMPAT and exit 4"
 agentmoat_table_and_json "$WORK_DIR/verify-after-rollback.json" \
   "${AGENT[@]}" verify --plan "$WORK_DIR/plan.json"
 VERIFY_RB_EXIT=$AGENT_EXIT
 assert_eq "verify exit code (post-rollback)" 4 "$VERIFY_RB_EXIT"
 assert_eq "verify summary.ok (post-rollback)" 0 \
   "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-after-rollback.json")"
-assert_eq "verify summary.mismatch (post-rollback)" 2 \
+assert_eq "verify summary.mismatch (post-rollback)" "$E2E_COMPAT" \
   "$(jq -r '.spec.summary.mismatch' "$WORK_DIR/verify-after-rollback.json")"
 STATUSES_RB=$(jq -r '.spec.results | map(.status) | sort | unique | join(",")' \
   "$WORK_DIR/verify-after-rollback.json")
 assert_eq "verify result statuses (post-rollback)" "mismatch" "$STATUSES_RB"
-e2e_step_pass "verify (post-rollback)"
+e2e_step_pass "verify (post-rollback)" "$E2E_REPLAY_VERIFY"
 
 # -----------------------------------------------------------------------------
 # 7. explain smoke: list mode, valid topic, unknown topic.
@@ -458,7 +504,7 @@ for want in runtimeclass gvisor threat-model performance compatibility; do
     fail "explain bogus-topic stderr missing topic '$want':\n$EXPLAIN_BOGUS"
   fi
 done
-e2e_step_pass "explain (topics)"
+e2e_step_pass "explain (topics)" "$E2E_REPLAY_EXPLAIN"
 
 # -----------------------------------------------------------------------------
 # 8. explain namespace / workload: deep per-workload explanation.
@@ -485,20 +531,19 @@ NS_TOTAL=$(jq -r '.spec.namespace.summary.total' "$WORK_DIR/explain-ns.json")
 NS_COMPAT=$(jq -r '.spec.namespace.summary.compatible' "$WORK_DIR/explain-ns.json")
 NS_REVIEW=$(jq -r '.spec.namespace.summary.needsReview' "$WORK_DIR/explain-ns.json")
 NS_INCOMPAT=$(jq -r '.spec.namespace.summary.incompatible' "$WORK_DIR/explain-ns.json")
-# The namespace carries one workload per classifier rule plus the original
-# web / cache / host-net trio (see test/e2e/manifests/workloads.yaml). Keep
-# the bucket counts in sync with that fixture: 2 compatible (web, cache),
-# 5 review-required, 7 incompatible.
-assert_eq "explain namespace summary.total" 14 "$NS_TOTAL"
-assert_eq "explain namespace summary.compatible" 2 "$NS_COMPAT"
-assert_eq "explain namespace summary.needsReview" 5 "$NS_REVIEW"
-assert_eq "explain namespace summary.incompatible" 7 "$NS_INCOMPAT"
+# The namespace carries a realistic mix of compatible workloads plus a
+# small set of review/incompatible edge cases (see workloads.yaml). Keep
+# the bucket counts in sync with that fixture.
+assert_eq "explain namespace summary.total" "$E2E_TOTAL" "$NS_TOTAL"
+assert_eq "explain namespace summary.compatible" "$E2E_COMPAT" "$NS_COMPAT"
+assert_eq "explain namespace summary.needsReview" "$E2E_REVIEW" "$NS_REVIEW"
+assert_eq "explain namespace summary.incompatible" "$E2E_INCOMPAT" "$NS_INCOMPAT"
 
 # Every workload in the namespace must appear in the deep document.
 NS_NAMES=$(jq -r '.spec.namespace.workloads | map(.name) | sort | join(",")' \
   "$WORK_DIR/explain-ns.json")
 assert_eq "explain namespace workload names" \
-  "cache,ebpf-app,fuse-app,gpu-app,host-ipc-app,host-net,host-pid-app,hostpath-app,iouring-app,kvm-app,perf-app,priv-app,raw-socket-app,web" \
+  "analytics,api,auth,billing,cache,ebpf-app,fuse-app,gpu-app,host-net,hostpath-app,notifications,priv-app,web,worker" \
   "$NS_NAMES"
 
 # host-net is incompatible because of host-network; assert the rule fired
@@ -527,7 +572,7 @@ WEB_CHECKED=$(jq -r '.spec.namespace.workloads[] | select(.name=="web") | .check
 if (( WEB_CHECKED < 10 )); then
   fail "explain namespace web checked too short ($WEB_CHECKED entries; expected the full rule sweep)"
 fi
-e2e_step_pass "explain namespace"
+e2e_step_pass "explain namespace" "$E2E_REPLAY_EXPLAIN_NS"
 
 e2e_step "explain workload: drill into host-net specifically"
 agentmoat_explain_json "$WORK_DIR/explain-wl.json" \
@@ -552,7 +597,7 @@ fi
 if ! printf '%s' "$EXPLAIN_BAD" | grep -q '<namespace>/<name>'; then
   fail "explain workload bogus-ref error missing format hint:\n$EXPLAIN_BAD"
 fi
-e2e_step_pass "explain workload"
+e2e_step_pass "explain workload" "$E2E_REPLAY_EXPLAIN_WL"
 
 # -----------------------------------------------------------------------------
 # Done. Cleanup runs from the EXIT trap.

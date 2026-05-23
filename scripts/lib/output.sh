@@ -52,6 +52,10 @@ _am_danger() {
 
 # Populated by e2e_step_pass for the final SUMMARY block.
 E2E_PASSED_STEPS=()
+E2E_REPLAY_COMMANDS=()
+
+# Optional footer line (artifact path, KEEP_CLUSTER hint) set by e2e.sh cleanup.
+E2E_ARTIFACT_HINT="${E2E_ARTIFACT_HINT:-}"
 
 # AGENT_EXIT holds the exit code from the JSON capture run in
 # agentmoat_table_and_json and agentmoat_explain_json.
@@ -103,10 +107,14 @@ e2e_pass() {
   fi
 }
 
-# e2e_step_pass records a passed phase and prints e2e_pass.
+# e2e_step_pass records a passed phase and prints e2e_pass. An optional
+# second argument is the shell command to replay that step manually.
 e2e_step_pass() {
-  E2E_PASSED_STEPS+=("$1")
-  e2e_pass "$1"
+  local step="$1"
+  local replay="${2:-}"
+  E2E_PASSED_STEPS+=("$step")
+  E2E_REPLAY_COMMANDS+=("$replay")
+  e2e_pass "$step"
 }
 
 # e2e_collapsed prints a muted one-liner when lengthy output is hidden.
@@ -173,26 +181,109 @@ agentmoat_table_and_json() {
   set -e
 }
 
-# e2e_finish prints the final SUMMARY block and pass/fail banner.
+# e2e_finish prints the final SUMMARY table and pass/fail banner.
+_e2e_replay_pad() {
+  local step_col="$1"
+  echo $((2 + 6 + 2 + step_col + 2))
+}
+
+_e2e_print_replay_row() {
+  local status="$1"
+  local step="$2"
+  local replay="$3"
+  local step_col="$4"
+  local first=1
+  local line pad
+
+  pad=$(_e2e_replay_pad "$step_col")
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if (( first )); then
+      if _am_use_color; then
+        printf '  '
+        _am_success "$(printf '%-6s  %-*s  %s' "$status" "$step_col" "$step" "$line")"
+        printf '\n'
+      else
+        printf '  %-6s  %-*s  %s\n' "$status" "$step_col" "$step" "$line"
+      fi
+      first=0
+    elif _am_use_color; then
+      printf '%*s' "$pad" ''
+      _am_success "$line"
+      printf '\n'
+    else
+      printf '%*s%s\n' "$pad" '' "$line"
+    fi
+  done <<< "$replay"
+}
+
+_e2e_print_muted_block() {
+  local text="$1"
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    _am_muted "$line"
+    printf '\n'
+  done <<< "$text"
+}
+
 e2e_finish() {
   local code="${1:-0}"
   local total="${#E2E_PASSED_STEPS[@]}"
-  local step
+  local i step replay step_width=4
+  local step_col=32
+  local replay_col=40
 
   printf '\n'
   _am_bold "SUMMARY"
+  printf '\n'
+
   if (( total > 0 )); then
-    printf '  %d steps\n' "$total"
     for step in "${E2E_PASSED_STEPS[@]}"; do
-      if _am_use_color; then
-        printf '  %s ' "$AM_SYMBOL_OK"
-        _am_success "$step"
-        printf '\n'
-      else
-        printf '  %s %s\n' "$AM_SYMBOL_OK" "$step"
+      if (( ${#step} > step_width )); then
+        step_width=${#step}
       fi
     done
+    if (( step_width < 4 )); then
+      step_width=4
+    fi
+    if (( step_width > step_col )); then
+      step_col=$step_width
+    fi
+
+    printf '\n'
+    if _am_use_color; then
+      printf '  '
+      _am_bold "$(printf '%-6s  %-*s  %s' 'STATUS' "$step_col" 'STEP' 'REPLAY')"
+      printf '\n'
+    else
+      printf '  %-6s  %-*s  %s\n' 'STATUS' "$step_col" 'STEP' 'REPLAY'
+    fi
+
+    printf '  '
+    for ((i = 0; i < 6; i++)); do printf '─'; done
+    printf '  '
+    for ((i = 0; i < step_col; i++)); do printf '─'; done
+    printf '  '
+    for ((i = 0; i < replay_col; i++)); do printf '─'; done
+    printf '\n'
+
+    for i in "${!E2E_PASSED_STEPS[@]}"; do
+      step="${E2E_PASSED_STEPS[$i]}"
+      replay="${E2E_REPLAY_COMMANDS[$i]:-}"
+      _e2e_print_replay_row "$AM_SYMBOL_OK" "$step" "$replay" "$step_col"
+    done
+
+    printf '\n'
+    if _am_use_color; then
+      _am_success "$(printf '%d steps passed' "$total")"
+      printf '\n'
+    else
+      printf '%d steps passed\n' "$total"
+    fi
+    if [[ -n "$E2E_ARTIFACT_HINT" ]]; then
+      _e2e_print_muted_block "$E2E_ARTIFACT_HINT"
+    fi
   fi
+
   printf '\n'
   if (( code == 0 )); then
     if _am_use_color; then
