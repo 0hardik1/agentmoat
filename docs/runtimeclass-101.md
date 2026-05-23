@@ -10,10 +10,27 @@ container runtime. agentmoat uses it to route selected workloads to gVisor's
    names a container runtime *handler*.
 2. A **Pod** opts in by setting `spec.runtimeClassName: gvisor`.
 3. The **kubelet** consults the named `RuntimeClass`, extracts its
-   `handler` field, and tells **containerd** which OCI runtime to invoke.
+   `handler` field, and tells **containerd** which CRI runtime to invoke.
 4. **containerd** is configured per node (in `/etc/containerd/config.toml`
-   or a drop-in under `/etc/containerd/config.d/`) to map the handler
-   `runsc` to the `containerd-shim-runsc-v1` binary.
+   or a drop-in under `/etc/containerd/config.d/`) with a runtime entry
+   whose **key matches the handler name**. That entry points at the gVisor
+   shim (`io.containerd.runsc.v1` → `containerd-shim-runsc-v1` → `runsc`).
+
+### agentmoat vs upstream handler naming
+
+The handler string is arbitrary as long as it matches between the
+RuntimeClass and containerd config. agentmoat uses **`gvisor`** everywhere:
+
+| Layer | agentmoat | Upstream gVisor quick start |
+| --- | --- | --- |
+| RuntimeClass `handler` | `gvisor` | `runsc` |
+| containerd runtime key | `gvisor` | `runsc` |
+| OCI binary | `runsc` | `runsc` |
+
+See `deploy/runtimeclass.yaml`, `packer/files/gvisor-runtime.toml`, and
+`kind/cluster.yaml`. If you copy upstream examples that use `handler: runsc`
+while your nodes register `gvisor`, pods will fail with a handler-not-found
+error.
 
 ## A minimal RuntimeClass
 

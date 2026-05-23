@@ -30,8 +30,8 @@
 ## Why a Go library at the core
 
 Both the CLI and the MCP server are thin shells over `pkg/agentmoat`. The
-library exposes `Scan`, and (in later phases) `Plan`, `Apply`, `Verify`,
-`Rollback`. Anyone who wants to embed agentmoat in their own operator,
+library exposes `Scan`, `Plan`, `Apply`, `Verify`, `Rollback`, and
+`Explain`. Anyone who wants to embed agentmoat in their own operator,
 controller, or SDK can `import` the package and call those functions
 directly. No shell-out, no subprocess plumbing.
 
@@ -43,10 +43,10 @@ Two distinct operators consume agentmoat:
 2. **AI agents**, which exchange JSON-RPC messages over stdio.
 
 Forcing one population through the other's interface creates friction.
-Instead, `cmd/agentmoat` and `cmd/agentmoat-mcp` are sibling binaries, both
-under 100 lines of glue each, that translate from their respective transport
-to identical calls into `pkg/agentmoat`. That structural symmetry is what
-keeps the two surfaces from drifting.
+Instead, `cmd/agentmoat` and `cmd/agentmoat-mcp` are sibling binaries that
+translate from their respective transport to identical calls into
+`pkg/agentmoat`. That structural symmetry is what keeps the two surfaces
+from drifting.
 
 ## Why client-go directly
 
@@ -65,14 +65,14 @@ Jobs, Pods). This pattern matches the K8s-tooling ecosystem (`kube-bench`,
 | Package | Responsibility |
 | --- | --- |
 | `cmd/agentmoat` | CLI entrypoint (cobra). Thin shell over `pkg/agentmoat`. |
-| `cmd/agentmoat-mcp` | MCP-over-stdio server (Phase 4). Thin shell. |
-| `pkg/agentmoat` | Orchestration: `Scan`, `Plan`, `Apply`, `Verify`, `Rollback`. |
+| `cmd/agentmoat-mcp` | MCP-over-stdio server. Thin shell over `pkg/agentmoat`. |
+| `pkg/agentmoat` | Orchestration: `Scan`, `Plan`, `Apply`, `Verify`, `Rollback`, `Explain`. |
 | `pkg/scanner` | Cluster enumeration via client-go; produces `Workload` values. |
 | `pkg/classifier` | Pure-function rule engine; produces `Verdict` values. |
-| `pkg/planner` | (Phase 2) Migration plan generation. |
-| `pkg/applier` | (Phase 2) Pod-template patching with `runtimeClassName`. |
-| `pkg/verifier` | (Phase 3) Kubelet runtime-field check + in-pod probe. |
-| `pkg/explainer` | (Phase 3) Educational text for `agentmoat explain`. |
+| `pkg/planner` | Migration plan generation from a `ScanReport`. |
+| `pkg/applier` | Pod-template patching with `runtimeClassName`. |
+| `pkg/verifier` | Compares live pods' `runtimeClassName` to the plan; optional in-pod probe. |
+| `pkg/explainer` | Educational text for `agentmoat explain`. |
 | `pkg/output` | Renderers (table / JSON / YAML). |
 | `internal/kube` | client-go construction helpers. |
 | `internal/containerd` | (Phase 5) Drop-in config parser. |

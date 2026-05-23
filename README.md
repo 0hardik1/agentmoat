@@ -211,8 +211,9 @@ elided fields are marked `...`.
   | ---- | --------------------------------------------------------- |
   | 0    | Success. Cluster matches requested state.                 |
   | 1    | Generic error (kubeconfig, network, malformed plan, etc). |
-  | 2    | `scan`: at least one workload classified `incompatible`.  |
+  | 2    | `scan` / `explain namespace` / `explain workload`: at least one `incompatible` workload. |
   | 3    | `apply` or `rollback`: partial outcome; idempotent re-run is safe. |
+  | 4    | `verify`: `runtimeClassName` mismatch and/or in-pod probe did not find gVisor. |
 
   Full table in [`docs/exit-codes.md`](docs/exit-codes.md).
 
@@ -265,6 +266,8 @@ make kind-down
 | `agentmoat plan`     | Produce a deterministic `MigrationPlan` from a scan. RO.      |
 | `agentmoat apply`    | Patch workloads per the plan. Default dry-run. Idempotent.    |
 | `agentmoat rollback` | Reverse a previously applied plan. Default dry-run.           |
+| `agentmoat verify`   | Confirm live pods match the plan's `runtimeClassName`. RO.    |
+| `agentmoat explain`  | Embedded docs viewer; `explain namespace` / `explain workload` for deep scans. |
 | `agentmoat version`  | Print binary version and git SHA.                             |
 
 ### Global flags
@@ -292,6 +295,7 @@ make kind-down
 | `--dry-run`                | apply/rollback | `true`    | Compute patches but do not mutate the cluster.                          |
 | `--no-events`              | apply/rollback | `false`   | Do not emit Kubernetes Events per mutation.                             |
 | `--no-audit`               | apply/rollback | `false`   | Do not append to `~/.agentmoat/audit.jsonl`.                            |
+| `--in-pod-probe`           | verify         | `false`   | Exec into a running pod and check dmesg/cmdline for gVisor markers.     |
 
 ### Output formats
 
@@ -347,9 +351,9 @@ end-to-end against a real gVisor kind cluster.
 
 Roadmap:
 
-- **Phase 3**: `agentmoat verify` (kubelet runtime field + in-pod probe) and
-  `agentmoat explain <topic>` (embedded docs viewer). Skeleton packages
-  exist at `pkg/verifier` and `pkg/explainer`.
+- **Phase 3**: `agentmoat verify` (pod `runtimeClassName` check; optional
+  `--in-pod-probe` for in-container confirmation) and `agentmoat explain`
+  (embedded docs viewer). Both shipped.
 - **Phase 5+**: EKS end-to-end recipe (CloudFormation/Terraform/Karpenter),
   additional Packer variants.
 

@@ -67,13 +67,14 @@ Out-of-bounds write via `PACKET_RX_RING`. Sentry does not implement
 1. **`agentmoat scan`** flags every workload that would not work under
    gVisor (raw sockets, eBPF, GPU passthrough outside `nvproxy`, etc.) so
    you know the blast radius before flipping the switch.
-2. **`agentmoat plan`** (Phase 2) orders the migration lowest-risk first
-   (stateless, no host-network, no privileged) so you can validate the
-   pipeline on safe workloads before touching critical ones.
-3. **`agentmoat apply --dry-run`** (Phase 2) shows you the exact pod-spec
-   diff before you mutate the cluster.
-4. **`agentmoat verify`** (Phase 3) confirms post-migration that the
-   kubelet really is using `runsc` for those pods.
+2. **`agentmoat plan`** orders the migration lowest-risk first (stateless,
+   no host-network, no privileged) so you can validate the pipeline on
+   safe workloads before touching critical ones.
+3. **`agentmoat apply --dry-run`** shows you the exact pod-spec diff
+   before you mutate the cluster.
+4. **`agentmoat verify`** confirms post-migration that live pods carry the
+   expected `runtimeClassName`. Pass `--in-pod-probe` to also check for
+   gVisor markers inside the container (dmesg, `/proc/cmdline`, `uname`).
 
 ## References
 
