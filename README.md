@@ -97,7 +97,7 @@ they appear in `--output json`, in `--rules` overrides, and in the
 | `ebpf`              | error    | Image hint (cilium, tetragon, falco) or `CAP_BPF`                      |
 | `kvm-nested`        | error    | `hostPath` mount of `/dev/kvm`                                         |
 | `host-path-mount`   | warn     | Any `hostPath` volume                                                  |
-| `gpu-passthrough`   | warn     | `nvidia.com/gpu` resource request                                      |
+| `gpu-passthrough`   | warn     | `nvidia.com/gpu` resource request or limit                             |
 | `fuse-mount`        | warn     | CSI driver name containing `fuse`, or `AGENTMOAT_USES_FUSE=true`       |
 | `io-uring`          | warn     | Annotation `agentmoat.io/uses-iouring=true`                            |
 | `perf-events`       | warn     | `CAP_PERFMON` or `CAP_SYS_ADMIN`                                       |

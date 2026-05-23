@@ -1,8 +1,11 @@
 ## Why incompatible
 
 The image hint matches a known eBPF-loading tool (Cilium agent,
-Tetragon, Falco's eBPF driver) or the container requests `CAP_BPF` or
-`CAP_SYS_ADMIN`. eBPF programs run in the host kernel: the workload
+Tetragon, Falco's eBPF driver) or the container requests `CAP_BPF`.
+(`CAP_SYS_ADMIN` is handled separately by the `perf-events` rule; it
+covers perf profiling and many admin operations, not eBPF loading
+specifically. Legacy loaders that only drop `CAP_SYS_ADMIN` may surface
+there instead of here.) eBPF programs run in the host kernel: the workload
 calls `bpf(2)`, hands the kernel a verified program, and the program
 then executes at points like syscall entry, tc ingress, kprobe, or
 sched events. gVisor does not implement `bpf(2)`. There is no way to

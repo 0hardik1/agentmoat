@@ -16,7 +16,7 @@ For the rule implementations, see [`pkg/classifier/builtin_rules.go`](../pkg/cla
 | `host-pid` | `pod.spec.hostPID=true` | gVisor isolates the PID namespace. |
 | `host-ipc` | `pod.spec.hostIPC=true` | gVisor isolates the IPC namespace. |
 | `privileged` | Any container with `securityContext.privileged=true` | The sandbox boundary makes this meaningless; many capabilities unsupported. |
-| `ebpf` | Image hint (cilium, tetragon, falco) or BPF/SYS_ADMIN capability | gVisor does not expose the eBPF syscall surface. |
+| `ebpf` | Image hint (cilium, tetragon, falco) or `CAP_BPF` capability | gVisor does not expose the eBPF syscall surface. |
 | `kvm-nested` | HostPath mount of `/dev/kvm` | gVisor cannot pass through KVM; nested virt is also unavailable on EKS. |
 
 ## Workloads needing review ("review")
@@ -24,7 +24,7 @@ For the rule implementations, see [`pkg/classifier/builtin_rules.go`](../pkg/cla
 | Rule ID | What it detects | Why it warrants review |
 | --- | --- | --- |
 | `host-path-mount` | Any HostPath volume | Gofer must proxy every read/write; some mount semantics not preserved. |
-| `gpu-passthrough` | `resources.requests["nvidia.com/gpu"]` set | gVisor's `nvproxy` supports only a subset of CUDA versions. |
+| `gpu-passthrough` | `nvidia.com/gpu` in container resources requests or limits | gVisor's `nvproxy` supports only a subset of CUDA versions. |
 | `fuse-mount` | CSI driver name containing "fuse" or `AGENTMOAT_USES_FUSE=true` | gVisor supports a subset of FUSE behavior. |
 | `io-uring` | Annotation `agentmoat.io/uses-iouring=true` | gVisor does not implement `io_uring`. |
 | `perf-events` | `CAP_PERFMON` or `CAP_SYS_ADMIN` | gVisor does not expose perf events. |
@@ -38,6 +38,26 @@ will differ. Use them when ordering the rollout.
 | --- | --- | --- |
 | `network-throughput` | Image hints: nginx, envoy, haproxy, traefik | ~20-40% throughput overhead under Sentry's network stack. |
 | `syscall-heavy` | Image hints: redis, memcached | Higher latency; benchmark before migration. |
+
+## Detection notes
+
+These behaviors are implemented in `pkg/classifier/builtin_rules.go` but easy
+to miss when reading the table above:
+
+- **Init containers** are scanned alongside main containers for capabilities,
+  privileged mode, GPU resources, and FUSE env vars.
+- **`/dev/kvm`** triggers both `kvm-nested` (error) and `host-path-mount`
+  (warn) because it is a hostPath volume with that exact path.
+- **`kvm-nested`** matches only `hostPath.path == "/dev/kvm"` exactly; variants
+  like `/dev/kvm0` are not flagged by that rule (but may still hit
+  `host-path-mount`).
+- **`io-uring`** is annotation-only (`agentmoat.io/uses-iouring=true`); there
+  is no static analysis of binaries or libraries.
+- **Image-hint rules** (`ebpf`, `network-throughput`, `syscall-heavy`) are
+  substring heuristics on container image refs, not exhaustive detection.
+- **`CAP_SYS_ADMIN`** is handled by the `perf-events` rule, not `ebpf`.
+  Legacy eBPF loaders that rely on `CAP_SYS_ADMIN` without `CAP_BPF` may
+  surface as `review` via `perf-events` rather than `incompatible` via `ebpf`.
 
 ## Overriding severity
 
