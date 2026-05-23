@@ -34,6 +34,8 @@
 #   KEEP_CLUSTER    set to 1 to leave the cluster running on exit (default: 0)
 #   AGENTMOAT_BIN   path to the agentmoat binary (default: bin/agentmoat)
 #   VERBOSE         set to 1 to print every command before it runs
+#   E2E_EXPAND_EXPLAIN  set to 1 to print full explain table/markdown
+#                       (default: 0; explain output is collapsed to SUMMARY)
 #
 # Exit codes
 #
@@ -55,6 +57,8 @@ NAMESPACE="${NAMESPACE:-agentmoat-e2e}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/lib/output.sh
+source "$REPO_ROOT/scripts/lib/output.sh"
 AGENTMOAT_BIN="${AGENTMOAT_BIN:-$REPO_ROOT/bin/agentmoat}"
 MANIFEST_DIR="$REPO_ROOT/test/e2e/manifests"
 WORK_DIR="$(mktemp -d -t agentmoat-e2e.XXXX)"
@@ -72,10 +76,6 @@ FAIL_COUNT=0
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-
-log() {
-  printf '\n=== %s\n' "$*"
-}
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -117,17 +117,13 @@ wait_runtime_class() {
 cleanup() {
   local code=$?
   if [[ "$KEEP_CLUSTER" != "1" ]]; then
-    log "tearing down kind cluster '$CLUSTER_NAME'"
+    e2e_infra "tearing down kind cluster '$CLUSTER_NAME'..."
     "$REPO_ROOT/scripts/kind-down.sh" >/dev/null 2>&1 || true
   else
-    log "leaving kind cluster '$CLUSTER_NAME' running (KEEP_CLUSTER=1)"
+    e2e_infra "leaving kind cluster '$CLUSTER_NAME' running (KEEP_CLUSTER=1)"
   fi
   rm -rf "$WORK_DIR"
-  if [[ $code -eq 0 ]]; then
-    printf '\ne2e OK\n'
-  else
-    printf '\ne2e FAILED (exit %d)\n' "$code"
-  fi
+  e2e_finish "$code"
 }
 trap cleanup EXIT
 
@@ -135,13 +131,16 @@ trap cleanup EXIT
 # 0. Pre-flight: binary + cluster + manifests.
 # -----------------------------------------------------------------------------
 
-log "building agentmoat binary (if missing)"
+e2e_title
+e2e_subtitle "cluster: $CTX   namespace: $NAMESPACE"
+
+e2e_infra "building agentmoat binary (if missing)..."
 if [[ ! -x "$AGENTMOAT_BIN" ]]; then
   (cd "$REPO_ROOT" && make build)
 fi
 [[ -x "$AGENTMOAT_BIN" ]] || fail "agentmoat binary not found at $AGENTMOAT_BIN"
 
-log "bringing up kind cluster '$CLUSTER_NAME'"
+e2e_infra "bringing up kind cluster '$CLUSTER_NAME'..."
 "$REPO_ROOT/scripts/kind-up.sh"
 
 # Wait for every node (control-plane + gVisor worker) to be Ready. kind's
@@ -150,28 +149,28 @@ log "bringing up kind cluster '$CLUSTER_NAME'"
 # kubelet does its first pull. Be generous.
 "${KCTL[@]}" wait --for=condition=Ready node --all --timeout=180s
 
-log "creating namespace '$NAMESPACE' and applying RuntimeClass + workloads"
+e2e_infra "creating namespace '$NAMESPACE' and applying RuntimeClass + workloads..."
 "${KCTL[@]}" apply -f "$MANIFEST_DIR/runtimeclass.yaml"
 "${KCTL[@]}" create namespace "$NAMESPACE" --dry-run=client -o yaml | "${KCTL[@]}" apply -f -
 "${KCTL[@]}" -n "$NAMESPACE" apply -f "$MANIFEST_DIR/workloads.yaml"
 
-log "waiting for workloads to be Ready"
+e2e_infra "waiting for workloads to be Ready..."
 "${KCTL[@]}" -n "$NAMESPACE" wait --for=condition=Available deployment/web --timeout=180s
 "${KCTL[@]}" -n "$NAMESPACE" rollout status statefulset/cache --timeout=180s
 # host-net's Pod may stay Pending on some kind setups; we tolerate that
 # (the scanner only needs to see the spec). A 30s grace gives the pod
 # a chance to register before we scan.
 "${KCTL[@]}" -n "$NAMESPACE" wait --for=condition=PodScheduled pod/host-net --timeout=30s || true
+e2e_step_pass "preflight"
 
 # -----------------------------------------------------------------------------
 # 1. scan: expect exit 2 (host-net is incompatible) and the right counts.
 # -----------------------------------------------------------------------------
 
-log "scan: enumerate and classify"
-set +e
-"${AGENT[@]}" scan --namespace "$NAMESPACE" --output json >"$WORK_DIR/scan.json"
-SCAN_EXIT=$?
-set -e
+e2e_step "scan: enumerate and classify"
+agentmoat_table_and_json "$WORK_DIR/scan.json" \
+  "${AGENT[@]}" scan --namespace "$NAMESPACE"
+SCAN_EXIT=$AGENT_EXIT
 assert_eq "scan exit code" 2 "$SCAN_EXIT"
 
 # The classifier groups by controller, so bare Pods (host-net plus the
@@ -202,6 +201,7 @@ REVIEW_NAMES=$(jq -r '.spec.workloads | map(select(.compatibility=="review") | .
 assert_eq "scan review workloads" \
   "fuse-app,gpu-app,hostpath-app,iouring-app,perf-app" \
   "$REVIEW_NAMES"
+e2e_step_pass "scan"
 
 # -----------------------------------------------------------------------------
 # 2. plan: deterministic, 2 steps (compatible only), non-empty PlanHash.
@@ -210,8 +210,9 @@ assert_eq "scan review workloads" \
 # The applier accepts JSON or YAML plans (kind sniff on read), and using
 # JSON here lets us assert via jq instead of pulling in a YAML parser.
 
-log "plan: produce MigrationPlan"
-"${AGENT[@]}" plan --scan "$WORK_DIR/scan.json" --output json >"$WORK_DIR/plan.json"
+e2e_step "plan: produce MigrationPlan"
+agentmoat_table_and_json "$WORK_DIR/plan.json" \
+  "${AGENT[@]}" plan --scan "$WORK_DIR/scan.json"
 
 PLAN_KIND=$(jq -r '.kind' "$WORK_DIR/plan.json")
 assert_eq "plan kind" "MigrationPlan" "$PLAN_KIND"
@@ -235,13 +236,15 @@ assert_eq "plan spec.steps length" 2 "$PLAN_STEP_COUNT"
 "${AGENT[@]}" plan --scan "$WORK_DIR/scan.json" --output json >"$WORK_DIR/plan2.json"
 PLAN_HASH_2=$(jq -r '.metadata.planHash' "$WORK_DIR/plan2.json")
 assert_eq "plan determinism (re-run hash)" "$PLAN_HASH" "$PLAN_HASH_2"
+e2e_step_pass "plan"
 
 # -----------------------------------------------------------------------------
 # 3. apply --dry-run: no mutation; Deployment template runtimeClassName empty.
 # -----------------------------------------------------------------------------
 
-log "apply (dry-run): preview patches only"
-"${AGENT[@]}" apply --plan "$WORK_DIR/plan.json" --output json --no-audit >"$WORK_DIR/apply-dry.json"
+e2e_step "apply (dry-run): preview patches only"
+agentmoat_table_and_json "$WORK_DIR/apply-dry.json" \
+  "${AGENT[@]}" apply --plan "$WORK_DIR/plan.json" --no-audit
 
 DRY_RUN_FLAG=$(jq -r '.metadata.dryRun' "$WORK_DIR/apply-dry.json")
 DRY_APPLIED=$(jq -r '.spec.summary.applied' "$WORK_DIR/apply-dry.json")
@@ -255,12 +258,13 @@ WEB_RT=$("${KCTL[@]}" -n "$NAMESPACE" get deployment web -o jsonpath='{.spec.tem
 CACHE_RT=$("${KCTL[@]}" -n "$NAMESPACE" get statefulset cache -o jsonpath='{.spec.template.spec.runtimeClassName}')
 assert_eq "Deployment/web runtimeClassName after dry-run" "" "$WEB_RT"
 assert_eq "StatefulSet/cache runtimeClassName after dry-run" "" "$CACHE_RT"
+e2e_step_pass "apply (dry-run)"
 
 # -----------------------------------------------------------------------------
 # 4. apply (real): patches land; pods carry runtimeClassName=gvisor.
 # -----------------------------------------------------------------------------
 
-log "apply: send real strategic-merge patches"
+e2e_step "apply: send real strategic-merge patches"
 "${AGENT[@]}" apply --plan "$WORK_DIR/plan.json" --dry-run=false --output json --no-audit \
   >"$WORK_DIR/apply.json"
 
@@ -285,6 +289,7 @@ assert_eq "namespace plan-hash annotation" "$PLAN_HASH" "$NS_HASH"
 # against a steady-state spec.
 "${KCTL[@]}" -n "$NAMESPACE" rollout status deployment/web --timeout=180s
 "${KCTL[@]}" -n "$NAMESPACE" rollout status statefulset/cache --timeout=180s
+e2e_step_pass "apply"
 
 # -----------------------------------------------------------------------------
 # 4b. verify (post-apply, with --in-pod-probe): expect ok=2, exit 0.
@@ -301,12 +306,10 @@ assert_eq "namespace plan-hash annotation" "$PLAN_HASH" "$NS_HASH"
 # we want the e2e to catch a regression where a future containerd patch
 # accidentally falls back to runc despite handler=gvisor surviving.
 
-log "verify (post-apply, --in-pod-probe): expect ok=2, exit 0"
-set +e
-"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --in-pod-probe \
-  --output json >"$WORK_DIR/verify-after-apply.json"
-VERIFY_EXIT=$?
-set -e
+e2e_step "verify (post-apply, --in-pod-probe): expect ok=2, exit 0"
+agentmoat_table_and_json "$WORK_DIR/verify-after-apply.json" \
+  "${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --in-pod-probe
+VERIFY_EXIT=$AGENT_EXIT
 assert_eq "verify exit code (post-apply)" 0 "$VERIFY_EXIT"
 assert_eq "verify summary.ok (post-apply)" 2 \
   "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-after-apply.json")"
@@ -325,14 +328,15 @@ PROBE_DETECTED_COUNT=$(jq -r \
   '[.spec.results[].probe | select(.!=null) | select(.detected==true)] | length' \
   "$WORK_DIR/verify-after-apply.json")
 assert_eq "verify probe detected count (post-apply)" 2 "$PROBE_DETECTED_COUNT"
+e2e_step_pass "verify (post-apply)"
 
 # -----------------------------------------------------------------------------
 # 5. idempotent re-apply: every step already-applied.
 # -----------------------------------------------------------------------------
 
-log "apply (re-run): expect already-applied for every step"
-"${AGENT[@]}" apply --plan "$WORK_DIR/plan.json" --dry-run=false --output json --no-audit \
-  >"$WORK_DIR/apply2.json"
+e2e_step "apply (re-run): expect already-applied for every step"
+agentmoat_table_and_json "$WORK_DIR/apply2.json" \
+  "${AGENT[@]}" apply --plan "$WORK_DIR/plan.json" --dry-run=false --no-audit
 
 RE_APPLIED=$(jq -r '.spec.summary.applied' "$WORK_DIR/apply2.json")
 RE_ALREADY=$(jq -r '.spec.summary.alreadyApplied' "$WORK_DIR/apply2.json")
@@ -340,6 +344,7 @@ RE_FAILED=$(jq -r '.spec.summary.failed' "$WORK_DIR/apply2.json")
 assert_eq "re-apply summary.applied" 0 "$RE_APPLIED"
 assert_eq "re-apply summary.alreadyApplied" 2 "$RE_ALREADY"
 assert_eq "re-apply summary.failed" 0 "$RE_FAILED"
+e2e_step_pass "apply (re-run)"
 
 # -----------------------------------------------------------------------------
 # 5b. verify (post-idempotent-apply): still all-ok.
@@ -349,19 +354,20 @@ assert_eq "re-apply summary.failed" 0 "$RE_FAILED"
 # verifier is stateless and reads live cluster state (not the applier's
 # in-memory result).
 
-log "verify (post-idempotent-apply): still all-ok"
-"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --in-pod-probe \
-  --output json >"$WORK_DIR/verify-after-reapply.json"
+e2e_step "verify (post-idempotent-apply): still all-ok"
+agentmoat_table_and_json "$WORK_DIR/verify-after-reapply.json" \
+  "${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --in-pod-probe
 assert_eq "verify summary.ok (post-reapply)" 2 \
   "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-after-reapply.json")"
 assert_eq "verify summary.mismatch (post-reapply)" 0 \
   "$(jq -r '.spec.summary.mismatch' "$WORK_DIR/verify-after-reapply.json")"
+e2e_step_pass "verify (post-idempotent-apply)"
 
 # -----------------------------------------------------------------------------
 # 6. rollback: runtimeClassName cleared; namespace annotation removed.
 # -----------------------------------------------------------------------------
 
-log "rollback: clear runtimeClassName + plan-hash"
+e2e_step "rollback: clear runtimeClassName + plan-hash"
 "${AGENT[@]}" rollback --plan "$WORK_DIR/plan.json" --dry-run=false --output json --no-audit \
   >"$WORK_DIR/rollback.json"
 
@@ -385,6 +391,7 @@ wait_runtime_class statefulset cache ""
 NS_HASH_AFTER=$("${KCTL[@]}" get namespace "$NAMESPACE" \
   -o jsonpath='{.metadata.annotations.agentmoat\.io/plan-hash}')
 assert_eq "namespace plan-hash after rollback" "" "$NS_HASH_AFTER"
+e2e_step_pass "rollback"
 
 # -----------------------------------------------------------------------------
 # 6b. verify (post-rollback): expect mismatch=2 and exit 4.
@@ -397,12 +404,10 @@ assert_eq "namespace plan-hash after rollback" "" "$NS_HASH_AFTER"
 # check alone is enough to drive the mismatch, and skipping the exec
 # saves a few seconds in CI.
 
-log "verify (post-rollback): expect mismatch=2 and exit 4"
-set +e
-"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" \
-  --output json >"$WORK_DIR/verify-after-rollback.json"
-VERIFY_RB_EXIT=$?
-set -e
+e2e_step "verify (post-rollback): expect mismatch=2 and exit 4"
+agentmoat_table_and_json "$WORK_DIR/verify-after-rollback.json" \
+  "${AGENT[@]}" verify --plan "$WORK_DIR/plan.json"
+VERIFY_RB_EXIT=$AGENT_EXIT
 assert_eq "verify exit code (post-rollback)" 4 "$VERIFY_RB_EXIT"
 assert_eq "verify summary.ok (post-rollback)" 0 \
   "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-after-rollback.json")"
@@ -411,6 +416,7 @@ assert_eq "verify summary.mismatch (post-rollback)" 2 \
 STATUSES_RB=$(jq -r '.spec.results | map(.status) | sort | unique | join(",")' \
   "$WORK_DIR/verify-after-rollback.json")
 assert_eq "verify result statuses (post-rollback)" "mismatch" "$STATUSES_RB"
+e2e_step_pass "verify (post-rollback)"
 
 # -----------------------------------------------------------------------------
 # 7. explain smoke: list mode, valid topic, unknown topic.
@@ -419,14 +425,19 @@ assert_eq "verify result statuses (post-rollback)" "mismatch" "$STATUSES_RB"
 # Cluster-independent (the explainer reads embedded docs, never the API
 # server). Cheap, so we run it at the end alongside the cluster checks.
 
-log "explain (no topic): expect topic list on stdout"
+e2e_step "explain (no topic): expect topic list on stdout"
 EXPLAIN_LIST=$("${AGENT[@]}" explain)
 if ! printf '%s' "$EXPLAIN_LIST" | grep -q 'runtimeclass'; then
   fail "explain (list) stdout missing 'runtimeclass':\n$EXPLAIN_LIST"
 fi
 
-log "explain runtimeclass: expect markdown content"
-EXPLAIN_RTC=$("${AGENT[@]}" explain runtimeclass)
+e2e_step "explain runtimeclass: expect markdown content"
+if [[ "${E2E_EXPAND_EXPLAIN:-0}" == "1" ]]; then
+  EXPLAIN_RTC=$("${AGENT[@]}" explain runtimeclass)
+else
+  EXPLAIN_RTC=$("${AGENT[@]}" explain runtimeclass)
+  e2e_collapsed "explain runtimeclass: ${#EXPLAIN_RTC} bytes collapsed (E2E_EXPAND_EXPLAIN=1 make e2e to expand)"
+fi
 if [[ "${EXPLAIN_RTC:0:2}" != "# " ]]; then
   fail "explain runtimeclass should start with '# ': got '${EXPLAIN_RTC:0:40}'"
 fi
@@ -434,7 +445,7 @@ if (( ${#EXPLAIN_RTC} <= 200 )); then
   fail "explain runtimeclass content too short (${#EXPLAIN_RTC} bytes)"
 fi
 
-log "explain bogus-topic: expect non-zero exit, valid topics in stderr"
+e2e_step "explain bogus-topic: expect non-zero exit, valid topics in stderr"
 set +e
 EXPLAIN_BOGUS=$("${AGENT[@]}" explain bogus-topic 2>&1)
 EXPLAIN_BOGUS_EXIT=$?
@@ -447,6 +458,7 @@ for want in runtimeclass gvisor threat-model performance compatibility; do
     fail "explain bogus-topic stderr missing topic '$want':\n$EXPLAIN_BOGUS"
   fi
 done
+e2e_step_pass "explain (topics)"
 
 # -----------------------------------------------------------------------------
 # 8. explain namespace / workload: deep per-workload explanation.
@@ -457,12 +469,10 @@ done
 # baseline (host-net still incompatible, web + cache compatible), and we
 # assert on structured JSON so the assertions are stable.
 
-log "explain namespace: expect exit 2 (host-net is incompatible) and structured findings"
-set +e
-"${AGENT[@]}" explain namespace "$NAMESPACE" --output json \
-  >"$WORK_DIR/explain-ns.json"
-EXPLAIN_NS_EXIT=$?
-set -e
+e2e_step "explain namespace: expect exit 2 (host-net is incompatible) and structured findings"
+agentmoat_explain_json "$WORK_DIR/explain-ns.json" \
+  "${AGENT[@]}" explain namespace "$NAMESPACE"
+EXPLAIN_NS_EXIT=$AGENT_EXIT
 assert_eq "explain namespace exit code" 2 "$EXPLAIN_NS_EXIT"
 
 EXPLAIN_KIND=$(jq -r '.kind' "$WORK_DIR/explain-ns.json")
@@ -517,13 +527,12 @@ WEB_CHECKED=$(jq -r '.spec.namespace.workloads[] | select(.name=="web") | .check
 if (( WEB_CHECKED < 10 )); then
   fail "explain namespace web checked too short ($WEB_CHECKED entries; expected the full rule sweep)"
 fi
+e2e_step_pass "explain namespace"
 
-log "explain workload: drill into host-net specifically"
-set +e
-"${AGENT[@]}" explain workload "$NAMESPACE/host-net" --output json \
-  >"$WORK_DIR/explain-wl.json"
-EXPLAIN_WL_EXIT=$?
-set -e
+e2e_step "explain workload: drill into host-net specifically"
+agentmoat_explain_json "$WORK_DIR/explain-wl.json" \
+  "${AGENT[@]}" explain workload "$NAMESPACE/host-net"
+EXPLAIN_WL_EXIT=$AGENT_EXIT
 assert_eq "explain workload exit code" 2 "$EXPLAIN_WL_EXIT"
 
 WL_COUNT=$(jq -r '.spec.namespace.workloads | length' "$WORK_DIR/explain-wl.json")
@@ -532,7 +541,7 @@ WL_NAME=$(jq -r '.spec.namespace.workloads[0].name' "$WORK_DIR/explain-wl.json")
 assert_eq "explain workload name" "host-net" "$WL_NAME"
 
 # Bad workload reference must fail with a clear error.
-log "explain workload (bad ref): expect non-zero exit, helpful error"
+e2e_step "explain workload (bad ref): expect non-zero exit, helpful error"
 set +e
 EXPLAIN_BAD=$("${AGENT[@]}" explain workload bogus-ref 2>&1)
 EXPLAIN_BAD_EXIT=$?
@@ -543,9 +552,8 @@ fi
 if ! printf '%s' "$EXPLAIN_BAD" | grep -q '<namespace>/<name>'; then
   fail "explain workload bogus-ref error missing format hint:\n$EXPLAIN_BAD"
 fi
+e2e_step_pass "explain workload"
 
 # -----------------------------------------------------------------------------
 # Done. Cleanup runs from the EXIT trap.
 # -----------------------------------------------------------------------------
-
-log "all e2e assertions passed"
