@@ -13,7 +13,7 @@
 #     human-facing CLI) and `agentmoat-mcp` (the MCP stdio server). They are
 #     built from the same module so they always ship at the same version.
 #   * Targets are linux and darwin on amd64 and arm64. Windows is excluded
-#     because the project is Linux-first (see plan.md Section 3 non-goals).
+#     because the project is Linux-first: gVisor itself targets Linux nodes.
 #     macOS is included so contributors on Apple Silicon and Intel Macs can
 #     download a prebuilt CLI without building from source.
 #   * Archives are tar.gz on Unix-likes (industry standard for Go releases).
@@ -24,9 +24,10 @@
 #   * The changelog groups commits by conventional-commit prefix (feat, fix,
 #     perf, refactor) and lumps everything else under "Other". This keeps
 #     release notes readable without forcing every commit to be conventional.
-#   * SBOM generation is stubbed (commented) and will be enabled in Phase 5
-#     once the release path is exercised end-to-end. Generating SBOMs on
-#     every dev tag adds friction we do not need yet.
+#   * SBOM generation is commented out for now (the block at the bottom of
+#     this file) and can be enabled once the release path is exercised
+#     end-to-end. Generating SBOMs on every dev tag adds friction we do not
+#     need yet.
 # ---------------------------------------------------------------------------
 
 version: 2
@@ -48,8 +49,7 @@ builds:
   - id: agentmoat
     # `binary` is the basename of the produced executable inside each archive.
     binary: agentmoat
-    # `main` points at the package main directory. Matches the repo layout
-    # documented in plan.md Section 13.
+    # `main` points at the package main directory.
     main: ./cmd/agentmoat
     # Disable CGO. We have no native dependencies and a static binary is the
     # right default for distributing to containers and minimal hosts.
@@ -90,29 +90,46 @@ builds:
 # contains a single binary plus the LICENSE and README so consumers can
 # verify provenance without visiting the repo.
 archives:
-  - id: default
-    # `formats` defaults to tar.gz. We list it explicitly for clarity.
+  # One archive per binary. Splitting them keeps the `{{ .Binary }}` name
+  # template unambiguous (each tarball holds exactly one executable) and gives
+  # the Homebrew/krew blocks below a stable archive id to select via `ids`.
+  # `ids` here selects which build's output goes into the archive.
+  # `format_overrides` switches to zip on windows (not built today, but correct
+  # the day we add it). `name_template` yields names like
+  # `agentmoat_0.1.0_linux_amd64.tar.gz`. LICENSE + README ride along so
+  # consumers can verify provenance offline.
+  - id: agentmoat
+    ids:
+      - agentmoat
     formats:
       - tar.gz
-    # `format_overrides` switches to zip on windows. We do not currently build
-    # for windows, but keeping this here means the day we do, the archive
-    # format is already correct (zip is the de facto Windows convention).
     format_overrides:
       - goos: windows
         formats:
           - zip
-    # `name_template` produces archive filenames like
-    # `agentmoat_0.1.0_linux_amd64.tar.gz`. The template substitutes the
-    # binary id, version (without leading v), OS, and arch.
     name_template: >-
       {{ .Binary }}_
       {{- .Version }}_
       {{- .Os }}_
       {{- .Arch }}
     files:
-      # Include source-of-truth metadata in every archive so consumers always
-      # have license and high-level docs on hand without round-tripping to
-      # the repo. These globs match files at the module root.
+      - LICENSE*
+      - README*
+  - id: agentmoat-mcp
+    ids:
+      - agentmoat-mcp
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      {{ .Binary }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    files:
       - LICENSE*
       - README*
 
@@ -179,7 +196,52 @@ release:
   prerelease: auto
 
 # ---------------------------------------------------------------------------
-# SBOM (Software Bill of Materials) stub.
+# Homebrew tap (macOS / Linux). Generated now, uploaded once the tap exists.
+#
+# `skip_upload: "true"` makes goreleaser render the formula into ./dist as a
+# release artifact WITHOUT pushing it to a tap repo. That keeps the very first
+# tagged release from failing on a not-yet-created tap, while still producing
+# the formula. Wiring the tap later (create 0hardik1/homebrew-tap, flip
+# skip_upload to "false") is then a one-line change.
+# ---------------------------------------------------------------------------
+brews:
+  - name: agentmoat
+    ids:
+      - agentmoat
+    repository:
+      owner: 0hardik1
+      name: homebrew-tap
+    directory: Formula
+    homepage: "https://github.com/0hardik1/agentmoat"
+    description: "Migrate Kubernetes workloads from runc to gVisor: scan, plan, apply, rollback, verify."
+    license: "Apache-2.0"
+    skip_upload: "true"
+
+# ---------------------------------------------------------------------------
+# krew plugin manifest (`kubectl agentmoat`). Generated now, submitted later.
+#
+# Same guard as the brew block: `skip_upload: "true"` produces the krew plugin
+# manifest as a release artifact without pushing to a plugin index. The real
+# distribution step is a PR to kubernetes-sigs/krew-index (tracked as a
+# follow-up), which consumes this generated manifest.
+# ---------------------------------------------------------------------------
+krews:
+  - name: agentmoat
+    ids:
+      - agentmoat
+    repository:
+      owner: 0hardik1
+      name: krew-index
+    homepage: "https://github.com/0hardik1/agentmoat"
+    short_description: "Migrate Kubernetes workloads from runc to gVisor."
+    description: |
+      agentmoat scans a cluster, classifies each workload by gVisor
+      compatibility, generates a deterministic migration plan, applies it
+      via RuntimeClass, and rolls it back on demand.
+    skip_upload: "true"
+
+# ---------------------------------------------------------------------------
+# SBOM (Software Bill of Materials): commented out for now.
 #
 # Enabling SBOMs requires syft (or an equivalent) on the runner. We will
 # enable in Phase 5 release prep, once the rest of the release pipeline is
