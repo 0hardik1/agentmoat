@@ -1,0 +1,48 @@
+# A representative "agent runner": a stateless Deployment that executes tool
+# calls / model-generated code. It uses no host namespaces, no privileged mode,
+# and no exotic syscalls, so the classifier marks it Compatible and the planner
+# includes it. This is exactly the workload gVisor is built to contain: if the
+# agent is tricked into running hostile code, the Sentry user-space kernel
+# absorbs the container-escape attempt instead of the host kernel.
+#
+# Note there is no runtimeClassName here on purpose: this is the BEFORE state.
+# `agentmoat apply` adds `runtimeClassName: gvisor` (and the matching
+# toleration) to this pod template.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-runner
+  namespace: agentic-demo
+  labels:
+    app: agent-runner
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-runner
+  template:
+    metadata:
+      labels:
+        app: agent-runner
+    spec:
+      containers:
+        - name: runner
+          image: busybox:1.36
+          # Stand-in for the agent loop; the classifier reads the PodSpec, not
+          # the running process, so any benign command works for the demo.
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault

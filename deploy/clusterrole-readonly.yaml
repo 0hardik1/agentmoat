@@ -1,0 +1,55 @@
+# agentmoat: read-only RBAC for `scan`, `plan`, `explain`, and `verify`.
+#
+# `scan` and `plan` only ever GET/LIST/WATCH workloads and namespaces; they
+# never mutate. `explain` and `verify` (without --in-pod-probe) are read-only
+# too. Bind this ClusterRole to the identity agentmoat runs as to back the
+# README's promise that "a read-only kubeconfig is sufficient to run scan and
+# plan." For `apply`/`rollback`, use deploy/clusterrole-apply.yaml instead.
+#
+# Apply:
+#   kubectl apply -f deploy/clusterrole-readonly.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentmoat-readonly
+  labels:
+    app.kubernetes.io/name: agentmoat
+    app.kubernetes.io/component: rbac
+rules:
+  # The six workload kinds agentmoat enumerates and classifies.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  # Namespaces: enumerated as scan targets and read for the
+  # agentmoat.io/plan-hash annotation (read-only here).
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+# Example wiring: a ServiceAccount plus a ClusterRoleBinding. Adjust the
+# namespace/name to your environment, or bind to a human user/group instead.
+# This same ServiceAccount is reused by deploy/clusterrole-apply.yaml.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentmoat
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentmoat-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentmoat-readonly
+subjects:
+  - kind: ServiceAccount
+    name: agentmoat
+    namespace: kube-system

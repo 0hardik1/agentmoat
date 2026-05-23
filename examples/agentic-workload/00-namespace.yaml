@@ -1,0 +1,8 @@
+# A dedicated namespace so the example is easy to scan in isolation
+# (`agentmoat scan -n agentic-demo`) and easy to delete afterwards.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentic-demo
+  labels:
+    app.kubernetes.io/part-of: agentmoat-example
