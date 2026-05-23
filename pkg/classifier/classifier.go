@@ -4,7 +4,7 @@
 // Registry, it produces a single Verdict. No I/O, no time, no randomness,
 // no shared state. The same workload classified twice with the same
 // registry produces byte-identical output. This determinism is a hard
-// requirement (plan.md section 12.6) because the same scan should round-
+// requirement because the same scan should round-
 // trip cleanly through both the CLI and the MCP server, and because diffs
 // between scans only mean anything if rule evaluation is repeatable.
 //
@@ -73,7 +73,7 @@ func Classify(w scanner.Workload, registry *Registry) Verdict {
 		case SeverityInfo:
 			// Info-class rules don't affect Compatibility, but they
 			// do set the Overhead hint. Map each well-known info rule
-			// to its qualitative cost label from plan.md section 5.5.
+			// to its qualitative cost label.
 			switch rule.ID {
 			case "network-throughput":
 				// Network-throughput is the dominant overhead category

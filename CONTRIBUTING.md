@@ -8,7 +8,7 @@ issues, and design discussions are all welcome.
 
 Requirements:
 
-- **Go 1.23 or newer.**
+- **Go 1.26 or newer.** (Matches the `go` directive in `go.mod`.)
 - **Docker** (for running the kind-based e2e tests).
 - **Packer 1.10+** (only if you are working on the AMI build).
 
@@ -31,8 +31,8 @@ raw `go test` invocation more than twice, please add or extend a target.
 ## Project layout
 
 The high-level layout (`cmd/`, `pkg/`, `internal/`, `packer/`, `deploy/`,
-`kind/`, `docs/`, `test/`) is documented in `plan.md` section 13 (gitignored
-locally) and summarized in the [README](README.md). The short version:
+`kind/`, `docs/`, `test/`) is summarized in the [README](README.md) and in
+[`CLAUDE.md`](CLAUDE.md). The short version:
 
 - `cmd/agentmoat/` and `cmd/agentmoat-mcp/` are thin shells.
 - `pkg/agentmoat/` (with `scanner/`, `classifier/`, `planner/`, `applier/`,
@@ -76,8 +76,9 @@ locally) and summarized in the [README](README.md). The short version:
   tests over golden files; both are acceptable.
 - **`testdata/`** is the place for fixture YAML, Pod specs, and golden
   outputs. Keep fixtures minimal and commented.
-- **E2E tests on kind** will be added in later phases (see `plan.md`). When
-  they land, every new mutating operation will need an e2e case.
+- **E2E tests on kind** run via `make e2e` (the harness under `test/e2e/`
+  driven by `scripts/e2e.sh`). Every new mutating operation should get an
+  e2e case.
 - **Determinism.** Classifier rules are pure functions over `PodSpec` and OCI
   image labels. Tests must not depend on cluster state or wall-clock time.
 

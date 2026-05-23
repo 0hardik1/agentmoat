@@ -94,8 +94,8 @@ type ApplyOptions struct {
 	// Required when PlanInline is nil.
 	PlanPath string
 
-	// DryRun defaults to true per plan.md section 12.2. Callers must set
-	// this to false explicitly to mutate the cluster.
+	// DryRun defaults to true: dry-run is the safe default, so callers
+	// must set this to false explicitly to mutate the cluster.
 	DryRun bool
 
 	// EmitEvents, when true, emits one Kubernetes Event per mutation on

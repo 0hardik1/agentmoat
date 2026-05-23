@@ -10,7 +10,7 @@
 #
 # Jobs (both run in parallel; they have no inter-job dependencies):
 #   * `lint`: runs golangci-lint against the whole module. Uses the official
-#     `golangci/golangci-lint-action@v6`, which understands the .golangci.yml
+#     `golangci/golangci-lint-action@v7`, which understands the .golangci.yml
 #     at the repo root.
 #   * `test`: runs `go test -race -cover ./...` on a matrix. The matrix has
 #     a single dimension today (go-version: 1.26 on ubuntu-latest) but is

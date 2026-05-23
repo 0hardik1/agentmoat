@@ -41,8 +41,8 @@ import (
 const EnvPathOverride = "AGENTMOAT_AUDIT_PATH"
 
 // defaultRelativePath is the path under the user's home directory where the
-// audit log is written when EnvPathOverride is not set. Matches plan.md
-// section 12.5 ("~/.agentmoat/audit.jsonl").
+// audit log is written when EnvPathOverride is not set
+// ("~/.agentmoat/audit.jsonl").
 const defaultRelativePath = ".agentmoat/audit.jsonl"
 
 // fileMu serializes writes to the audit file inside this process. The file

@@ -12,7 +12,7 @@
 //   - Image-label lookups (used in later phases to detect known agent
 //     workloads) are I/O. Keeping them on this side of the boundary lets
 //     us cache them on disk and replay them deterministically in tests
-//     (plan.md section 12.6).
+//     (determinism).
 //
 // This file declares the data shapes only. The actual cluster enumeration
 // lives in scanner.go.

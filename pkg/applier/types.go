@@ -49,7 +49,7 @@ type Options struct {
 
 	// DryRun, when true, makes Apply/Rollback compute the patches and
 	// report what it WOULD do, without sending any write requests to the
-	// API server. Default per plan.md section 12.2 is true; the
+	// API server. Default is true (dry-run is the safe default); the
 	// orchestrator opts mutating callers in explicitly.
 	DryRun bool
 

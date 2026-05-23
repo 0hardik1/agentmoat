@@ -1,9 +1,9 @@
 // Package classifier: built-in rule set.
 //
 // The 14 rules registered in this file are the standard gVisor
-// compatibility checks. They are drawn directly from plan.md section 5.4
-// ("When gVisor is the wrong answer") and section 5.5 ("Performance
-// trade-offs"). The upstream source for most rules is the gVisor user
+// compatibility checks, covering both the cases where gVisor is the wrong
+// answer and the performance trade-offs to weigh. The upstream source for
+// most rules is the gVisor user
 // guide at https://gvisor.dev/docs/user_guide/compatibility/ and the
 // performance guide at https://gvisor.dev/docs/architecture_guide/performance/.
 //

@@ -1,7 +1,8 @@
 // agentmoat apply: execute a MigrationPlan against the cluster.
 //
-// `apply` defaults to `--dry-run=true` per plan.md section 12.2. Mutating
-// the cluster requires the operator to set `--dry-run=false` explicitly.
+// `apply` defaults to `--dry-run=true`: dry-run is the safe default, so
+// mutating the cluster requires the operator to set `--dry-run=false`
+// explicitly.
 //
 // Exit codes (docs/exit-codes.md):
 //   0  fully successful apply (or fully dry-run preview)

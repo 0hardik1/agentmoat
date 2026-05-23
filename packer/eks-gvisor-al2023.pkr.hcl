@@ -1,7 +1,7 @@
 // agentmoat: Packer template that builds a gVisor-ready EKS-optimized AMI
 // on Amazon Linux 2023.
 //
-// Recipe sources (see plan.md, section 9.2 for full citations):
+// Recipe sources:
 //   - https://www.blinkops.com/blog/run-containers-securely-with-gvisor-on-eks
 //   - https://www.verygoodsecurity.com/blog/posts/secure-compute-part-2
 //   - https://gvisor.dev/docs/user_guide/install/

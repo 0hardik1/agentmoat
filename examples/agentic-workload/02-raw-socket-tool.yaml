@@ -1,0 +1,37 @@
+# A network-diagnostic sidecar that needs raw sockets (think ping/traceroute or
+# packet capture). Requesting CAP_NET_RAW trips agentmoat's `raw-socket` rule,
+# which is an ERROR: gVisor disables raw sockets unless runsc is started with
+# --net-raw. The classifier marks this Incompatible and the planner EXCLUDES it,
+# so `apply` will not migrate it. agentmoat's recommendation surfaces in the
+# scan/plan output: keep it on runc (a non-gVisor node pool) or move it to Kata,
+# rather than weakening the sandbox for everything else.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: raw-socket-tool
+  namespace: agentic-demo
+  labels:
+    app: raw-socket-tool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: raw-socket-tool
+  template:
+    metadata:
+      labels:
+        app: raw-socket-tool
+    spec:
+      containers:
+        - name: nettool
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          securityContext:
+            capabilities:
+              # CAP_NET_RAW is the trigger: it is what the `raw-socket` rule
+              # inspects. Real raw-socket tools (ping, tcpdump) request it.
+              add: ["NET_RAW"]
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"

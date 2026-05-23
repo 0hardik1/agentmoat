@@ -1,0 +1,60 @@
+# agentmoat: RBAC for `apply` and `rollback` (the cluster-mutating verbs).
+#
+# Extends the read-only set with exactly the writes agentmoat performs:
+#   - patch the six workload kinds (set/clear spec.template.spec.runtimeClassName),
+#   - create + patch Events on the patched objects (audit breadcrumb; --no-events skips),
+#   - get + patch Namespaces (the agentmoat.io/plan-hash idempotency annotation),
+#   - create pods/exec, ONLY if you use `verify --in-pod-probe`.
+#
+# Grant this only to the identity that runs `apply`/`rollback --dry-run=false`.
+# For scan / plan / explain / verify-without-probe, prefer the narrower
+# deploy/clusterrole-readonly.yaml.
+#
+# Apply (the `agentmoat` ServiceAccount is defined in clusterrole-readonly.yaml,
+# so apply that file too, or repoint the binding below at your own identity):
+#   kubectl apply -f deploy/clusterrole-readonly.yaml -f deploy/clusterrole-apply.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentmoat-apply
+  labels:
+    app.kubernetes.io/name: agentmoat
+    app.kubernetes.io/component: rbac
+rules:
+  # Read + patch the six workload kinds. get/list/watch so apply can read
+  # current state; patch to set or clear runtimeClassName via strategic-merge.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Namespaces: get to read the plan-hash annotation, patch to write/clear it.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Events: agentmoat emits one per mutated step as an audit breadcrumb.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # pods/exec: ONLY needed for `verify --in-pod-probe`, which execs into a pod
+  # to confirm gVisor markers in /proc. Drop this rule if you never probe.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentmoat-apply
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentmoat-apply
+subjects:
+  - kind: ServiceAccount
+    name: agentmoat
+    namespace: kube-system

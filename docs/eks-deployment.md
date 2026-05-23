@@ -17,6 +17,7 @@
 
 - The Packer template: [`packer/eks-gvisor-al2023.pkr.hcl`](../packer/eks-gvisor-al2023.pkr.hcl)
 - The RuntimeClass: [`deploy/runtimeclass.yaml`](../deploy/runtimeclass.yaml)
-- plan.md section 9 (gitignored locally) for the full design
+- The RBAC manifests: [`deploy/clusterrole-readonly.yaml`](../deploy/clusterrole-readonly.yaml) and [`deploy/clusterrole-apply.yaml`](../deploy/clusterrole-apply.yaml)
 
-For Phase 0 + Phase 1 (today), this doc is intentionally empty.
+The full end-to-end recipe is not written yet (tracked for Phase 5); the links
+above are the working pieces today.

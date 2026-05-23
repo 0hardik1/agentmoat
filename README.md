@@ -42,6 +42,20 @@ make build                                            # produces ./bin/agentmoat
 `apply` and `rollback` are idempotent: re-running an applied plan reports every
 step as `already-applied` and exits 0.
 
+## Install
+
+Build from source with Go 1.26+:
+
+```bash
+go install github.com/0hardik1/agentmoat/cmd/agentmoat@latest
+go install github.com/0hardik1/agentmoat/cmd/agentmoat-mcp@latest
+```
+
+Once a release is tagged, prebuilt binaries (linux/darwin, amd64/arm64) and a
+checksums file are attached to each
+[GitHub release](https://github.com/0hardik1/agentmoat/releases); a Homebrew
+formula and a `kubectl agentmoat` krew plugin follow.
+
 ## What it does
 
 ```
@@ -66,7 +80,8 @@ step as `already-applied` and exits 0.
 - **`apply`** is the only stage that mutates the cluster. It patches each pod
   template with `runtimeClassName` and the matching `runtime=gvisor:NoSchedule`
   toleration, stamps the namespace with `agentmoat.io/plan-hash`, emits a
-  Kubernetes Event per step, and appends a line to `~/.agentmoat/audit.jsonl`.
+  Kubernetes Event for each step it actually mutates, and appends an audit
+  line for every step (dry-run included) to `~/.agentmoat/audit.jsonl`.
   It defaults to `--dry-run=true`. Re-running an applied plan reports every
   step as `already-applied` and exits 0 via the namespace annotation.
 - **`rollback`** walks the same plan in reverse, removes `runtimeClassName`,
@@ -150,6 +165,7 @@ elided fields are marked `...`.
   },
   "spec": {
     "summary": {"total": 3, "included": 2, "excluded": 1},
+    "options": {"runtimeClassName": "gvisor"},
     "steps": [
       {
         "order": 1,
@@ -202,9 +218,11 @@ elided fields are marked `...`.
 - **Idempotent.** Every `apply` writes the plan hash to the affected
   namespace as `agentmoat.io/plan-hash`. Re-running the same plan against
   the same cluster reports every step as `already-applied` and exits 0.
-- **Auditable.** Every mutation appends one JSON line to
-  `~/.agentmoat/audit.jsonl` (disable with `--no-audit`) and emits one
-  Kubernetes Event on the patched object (disable with `--no-events`).
+- **Auditable.** Every step appends one JSON line to
+  `~/.agentmoat/audit.jsonl` (disable with `--no-audit`), including dry-run
+  steps, which carry `dryRun: true`. Each step that actually mutates also
+  emits one Kubernetes Event on the patched object (disable with
+  `--no-events`).
 - **Deterministic exit codes.** CI scripts can branch on them:
 
   | Code | Meaning                                                   |
@@ -316,7 +334,10 @@ keeps an audit trail, and it has a one-command rollback.
 **Is it safe to run against production?** `scan` and `plan` are strictly
 read-only. `apply` and `rollback` default to `--dry-run=true` and surface the
 exact strategic-merge patch in `StepResult.patch` before any mutation. A
-read-only kubeconfig is sufficient to run `scan` and `plan`.
+read-only kubeconfig is sufficient to run `scan` and `plan`: ready-to-bind
+RBAC for both modes ships under [`deploy/`](deploy/) as
+`clusterrole-readonly.yaml` (scan / plan / verify) and `clusterrole-apply.yaml`
+(apply / rollback).
 
 **What about workloads that need raw sockets, eBPF, or GPU passthrough?**
 The classifier marks them `incompatible`. The planner excludes them. The
@@ -357,10 +378,6 @@ Roadmap:
 - **Phase 5+**: EKS end-to-end recipe (CloudFormation/Terraform/Karpenter),
   additional Packer variants.
 
-The in-tree design notes (`plan.md`, `plan-checklist.md`) are gitignored
-locally; they hold the per-phase gates and rationale but are not part of the
-public surface.
-
 ## Where to go next
 
 - [Architecture](docs/architecture.md): the Go library at the core; CLI as a thin shell.
@@ -370,7 +387,7 @@ public surface.
 - [Compatibility checklist](docs/compatibility-checklist.md): the full rule catalog and `--rules` override schema.
 - [Exit codes](docs/exit-codes.md): the deterministic exit codes by command.
 - [EKS deployment](docs/eks-deployment.md): the Packer + EKS recipe (stub today; tracked for Phase 5).
-- [Kind quickstart](docs/kind-quickstart.md): bring up a local cluster with gVisor preinstalled.
+- [Kind quickstart](docs/kind-quickstart.md): bring up a local cluster with gVisor preinstalled (doc is a stub today; `make kind-up` is the working path).
 
 ## License
 

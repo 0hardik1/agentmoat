@@ -1,7 +1,7 @@
 // Package classifier turns a scanned Workload into a gVisor-compatibility
 // Verdict by running a registered set of Rules against the Pod spec.
 //
-// Design properties (from plan.md section 12.6 "Determinism")
+// Design properties (determinism)
 //
 //   - Pure functions. Classify takes a Workload + Rule set, returns a
 //     Verdict. No I/O, no time, no randomness. Same input -> same output.

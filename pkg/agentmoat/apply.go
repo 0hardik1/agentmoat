@@ -7,8 +7,8 @@
 //   - read the MigrationPlan from disk if PlanPath is set.
 //   - stamp the apply result with the binary version.
 //
-// Per plan.md section 12.2, DryRun defaults to true at the orchestrator
-// boundary as well. Callers (CLI, MCP server) must set ApplyOptions.DryRun
+// DryRun defaults to true at the orchestrator boundary as well: dry-run is
+// the safe default, so callers (CLI, MCP server) must set ApplyOptions.DryRun
 // to false explicitly to mutate the cluster.
 package agentmoat
 

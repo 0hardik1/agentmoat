@@ -12,9 +12,9 @@
 #     consistent code style in a Go-ecosystem project. Each enabled linter
 #     is documented inline so readers do not have to cross-reference the
 #     golangci-lint docs to know what it does.
-#   * Disable noisy, opinionated linters that fight early-stage scaffolding
-#     (e.g. requiring godoc comments on every exported symbol when most of
-#     the code is still stubs). They can be re-enabled in later phases.
+#   * Disable noisy, opinionated linters whose cost outweighs their benefit
+#     here (e.g. requiring a godoc comment on every exported symbol). They
+#     can be re-enabled later if the project's needs change.
 #   * Exclude `test/testdata/` because that tree is fixture data, not
 #     production code. Linting fixtures produces false positives and slows
 #     down CI for no benefit.
