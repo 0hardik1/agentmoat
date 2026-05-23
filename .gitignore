@@ -29,7 +29,7 @@ vendor/
 # 3. agentmoat working files
 # Packer manifest output (post-processor "manifest" target).
 build-manifest.json
-# Per-user audit log written by `agentmoat apply` (see plan.md section 12.5).
+# Per-user audit log written by `agentmoat apply`.
 .agentmoat/
 # JSON artifacts copied from `make e2e` for manual replay.
 .agentmoat-e2e/

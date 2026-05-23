@@ -5,7 +5,7 @@
 // header-styling, per-cell StyleFunc, and ANSI-aware width measurement so
 // pre-colored cells line up correctly.
 //
-// Each renderer follows the same skeleton, in this order:
+// Each renderer follows the same structure, in this order:
 //
 //  1. Bold title:        "agentmoat <verb>"
 //  2. Dim subtitle:      metadata chips (plan-hash, dry-run, ...) when relevant

@@ -1,6 +1,6 @@
 // Resource handlers for the MCP server.
 //
-// Two read-only resources are exposed (per plan.md section 8):
+// Two read-only resources are exposed:
 //
 //   - agentmoat://compatibility-rules
 //     Returns internal/rules/gvisor.yaml. This is the classifier's

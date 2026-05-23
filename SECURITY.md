@@ -3,13 +3,11 @@
 ## Reporting a Vulnerability
 
 If you think you have found a security vulnerability in agentmoat, please do
-**not** open a public issue. Instead, choose one of:
-
-1. **Private GitHub Security Advisory.** Open a private vulnerability report
-   via the repository's "Security" tab. This is the preferred channel: it
-   gives us a private space to coordinate a fix and a CVE if warranted.
-2. **Email.** Send details to `security@agentmoat.example`.
-   <!-- TODO: replace this placeholder address before the first public release. -->
+**not** open a public issue. Instead, report it privately via the
+repository's [Security tab](https://github.com/0hardik1/agentmoat/security/advisories/new)
+("Report a vulnerability"). GitHub private vulnerability reporting gives us a
+private space to coordinate a fix, and a CVE if one is warranted, without
+disclosing the issue publicly before a patch is available.
 
 Please include:
 

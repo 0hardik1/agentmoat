@@ -7,7 +7,7 @@
 //     No I/O, no Kubernetes calls, no time-dependent state (the timestamp on
 //     the resulting plan is supplied by the orchestrator, not stamped here).
 //     This is what makes it testable with golden fixtures and reproducible
-//     across runs (plan.md section 12.6).
+//     across runs (determinism).
 //
 //   - Decoupling planner from applier means the operator workflow can be
 //     split: produce a plan, eyeball it (kubectl-style "review the diff"),

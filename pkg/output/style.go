@@ -155,8 +155,9 @@ func StatusBadge(s *Styles, status string) string {
 		return symbolDot + " " + s.Muted.Render(status)
 	case "failed":
 		return symbolFail + " " + s.Danger.Render(status)
-	// verify step statuses (defined here so the badge mapping is the single
-	// source of truth even while pkg/verifier is still a stub)
+	// verify step statuses (defined here so the badge mapping stays the
+	// single source of truth for rendering, regardless of which
+	// package produces the status)
 	case "ok":
 		return symbolOK + " " + s.Success.Render(status)
 	case "mismatch":

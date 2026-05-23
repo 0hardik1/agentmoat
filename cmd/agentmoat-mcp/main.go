@@ -91,7 +91,7 @@ Flags:
   --log-level LEVEL   Diagnostic log level (silent|info|debug). stdout always
                       carries JSON-RPC framing; only stderr is gated.
 
-Surface (per plan.md section 8):
+Surface:
   Tools     scan_cluster, assess_workload, propose_plan, apply_plan,
             rollback_plan, verify_migration, explain
   Resources agentmoat://compatibility-rules, agentmoat://known-gotchas

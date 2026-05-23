@@ -1,7 +1,7 @@
 # agentmoat: classifier rule overrides.
 #
 # Each entry has `id`, `severity`, `description`, `remediationUrl`, and a
-# `source` field citing the upstream gVisor doc URL or plan.md section.
+# `source` field citing the upstream gVisor doc URL.
 #
 # This file is loaded by `Registry.LoadYAML()` at CLI startup so operators
 # can dial a rule's severity (e.g. demote `host-path-mount` from warn to
@@ -50,7 +50,7 @@ overrides:
     severity: error
     description: "Workload appears to load eBPF programs (Cilium agent, Tetragon, Falco eBPF driver); gVisor does not expose the eBPF syscall surface."
     remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
-    source: "plan.md section 5.4"
+    source: "https://gvisor.dev/docs/user_guide/compatibility/"
 
   - id: gpu-passthrough
     severity: warn
@@ -68,28 +68,28 @@ overrides:
     severity: warn
     description: "Workload may use io_uring (annotation `agentmoat.io/uses-iouring=true` set); gVisor does not implement io_uring."
     remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
-    source: "plan.md section 5.4"
+    source: "https://gvisor.dev/docs/user_guide/compatibility/"
 
   - id: perf-events
     severity: warn
     description: "Workload requests CAP_PERFMON or CAP_SYS_ADMIN typically used for perf_event_open; gVisor does not expose perf events."
     remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
-    source: "plan.md section 5.4"
+    source: "https://gvisor.dev/docs/user_guide/compatibility/"
 
   - id: kvm-nested
     severity: error
     description: "Workload uses /dev/kvm (nested virtualization); gVisor sandbox cannot pass through KVM, and on EKS nested virt is unavailable anyway."
     remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
-    source: "plan.md section 5.4"
+    source: "https://gvisor.dev/docs/user_guide/compatibility/"
 
   - id: network-throughput
     severity: info
     description: "Workload appears network-throughput-bound (image hint: nginx, envoy, haproxy, traefik); expect ~20-40% throughput overhead under gVisor's sandbox network stack."
     remediationUrl: "https://gvisor.dev/docs/architecture_guide/performance/"
-    source: "plan.md section 5.5"
+    source: "https://gvisor.dev/docs/architecture_guide/performance/"
 
   - id: syscall-heavy
     severity: info
     description: "Workload appears syscall-heavy (image hint: redis, memcached); expect higher latency under Sentry; benchmark before migration."
     remediationUrl: "https://gvisor.dev/docs/architecture_guide/performance/"
-    source: "plan.md section 5.5"
+    source: "https://gvisor.dev/docs/architecture_guide/performance/"

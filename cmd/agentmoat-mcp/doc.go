@@ -8,8 +8,9 @@
 // (Scan, AssessWorkload, Plan, Apply, Rollback, Verify, Explain) so they
 // cannot drift.
 //
-// The seven tools and two resources form the contract documented in
-// plan.md section 8. The one prompt (audit-cluster-for-agentic-workloads)
+// The seven tools and two resources form the MCP contract; see
+// docs/mcp-integration.md for the full surface. The one prompt
+// (audit-cluster-for-agentic-workloads)
 // is a curated heuristic for identifying workloads that benefit most from
 // gVisor's sandbox boundary (LLM-calling services, autonomous agents, MCP
 // servers). See docs/mcp-integration.md for the wire-level walkthrough.
