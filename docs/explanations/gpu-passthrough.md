@@ -1,6 +1,8 @@
 ## Why this warrants review
 
-The container requests `resources.requests["nvidia.com/gpu"]`. gVisor
+The container requests an NVIDIA GPU via `resources.requests` or
+`resources.limits` for `nvidia.com/gpu` (Kubernetes commonly sets GPUs
+in limits only; the scheduler treats the limit as the request). gVisor
 supports NVIDIA GPUs through `nvproxy`, a Sentry subsystem that proxies
 the NVIDIA driver `ioctl` surface from inside the sandbox out to the
 real driver on the host. The good news is that it works: CUDA workloads

@@ -49,7 +49,7 @@ BIN_DIR := ./bin
 
 # Declare every target as phony. None of these targets produce a file at the
 # literal name of the target, so Make should always run the recipe.
-.PHONY: help build test lint tidy clean version kind-build kind-up kind-down e2e scan mcp-smoke
+.PHONY: help build test lint tidy clean version check-gvisor-version kind-build kind-up kind-down e2e scan mcp-smoke
 
 help: ## Print this help message (default target).
 	@# The awk pattern below scans this Makefile for lines of the form
@@ -74,6 +74,9 @@ test: ## Run unit tests with race detector and coverage.
 	@# -cover prints a per-package coverage summary; CI uploads the profile
 	@# in a later phase when coverage gating is added.
 	go test -race -cover ./...
+
+check-gvisor-version: ## Verify pinned gVisor release tags resolve and packer/kind defaults match.
+	@./scripts/check-gvisor-version.sh
 
 lint: ## Run golangci-lint against the whole module.
 	@# Configuration lives in .golangci.yml at the repo root. Run this before
