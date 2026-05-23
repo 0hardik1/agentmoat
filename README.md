@@ -1,5 +1,15 @@
 # agentmoat
 
+[![release](https://img.shields.io/github/v/release/0hardik1/agentmoat?label=release&sort=semver)](https://github.com/0hardik1/agentmoat/releases)
+[![license](https://img.shields.io/github/license/0hardik1/agentmoat)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/0hardik1/agentmoat/ci.yml?branch=main&label=CI&logo=github)](https://github.com/0hardik1/agentmoat/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/github/go-mod/go-version/0hardik1/agentmoat?logo=go&label=Go)](go.mod)
+[![Go Report Card](https://goreportcard.com/badge/github.com/0hardik1/agentmoat)](https://goreportcard.com/report/github.com/0hardik1/agentmoat)
+
+**Move Kubernetes workloads from `runc` to gVisor (`runsc`), safely and reversibly.**
+
+https://github.com/user-attachments/assets/2b04bc86-74a2-4936-a829-4653559eb954
+
 agentmoat moves Kubernetes workloads from the default `runc` runtime to gVisor
 (`runsc`), the user-space kernel that defends against the kernel-exploit step of
 a container-escape chain. It scans a cluster, classifies every workload by
