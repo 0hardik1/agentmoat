@@ -41,11 +41,21 @@ func fixtureReport() *schema.ScanReport {
 						{RuleID: "network-throughput", Severity: schema.SeverityInfo},
 					},
 				},
-				// Compatible: a busybox Pod (no rules fired).
+				// Compatible but not plannable: a busybox Pod (no rules
+				// fired). Standalone Pods are excluded by the kind gate:
+				// spec.runtimeClassName is immutable on a live Pod.
 				{
 					Kind:          "Pod",
 					Namespace:     "default",
 					Name:          "sleeper",
+					Compatibility: schema.CompatibilityCompatible,
+				},
+				// Compatible but not plannable: a one-shot Job. Excluded by
+				// the kind gate: Job spec.template is immutable.
+				{
+					Kind:          "Job",
+					Namespace:     "batch",
+					Name:          "reindex",
 					Compatibility: schema.CompatibilityCompatible,
 				},
 				// Compatible: a StatefulSet running redis (syscall-heavy info).
@@ -60,7 +70,7 @@ func fixtureReport() *schema.ScanReport {
 				},
 				// Review: GPU passthrough.
 				{
-					Kind:          "Pod",
+					Kind:          "Deployment",
 					Namespace:     "default",
 					Name:          "gpu-worker",
 					Compatibility: schema.CompatibilityReview,
@@ -70,7 +80,7 @@ func fixtureReport() *schema.ScanReport {
 				},
 				// Review: hostPath mount.
 				{
-					Kind:          "Pod",
+					Kind:          "DaemonSet",
 					Namespace:     "default",
 					Name:          "log-reader",
 					Compatibility: schema.CompatibilityReview,
@@ -120,21 +130,27 @@ func TestPlan_PartitionsByCompatibility(t *testing.T) {
 		t.Fatalf("Plan: %v", err)
 	}
 
-	// 3 Compatible -> 3 steps. 2 Review + 3 Incompatible -> 5 excluded.
-	if got := plan.Spec.Summary.Total; got != 8 {
-		t.Errorf("Summary.Total: got %d want 8", got)
+	// 4 Compatible, but the Pod and the Job are blocked by the kind gate
+	// -> 2 steps. 2 Review + 3 Incompatible + 2 kind-gated -> 7 excluded.
+	if got := plan.Spec.Summary.Total; got != 9 {
+		t.Errorf("Summary.Total: got %d want 9", got)
 	}
-	if got := plan.Spec.Summary.Included; got != 3 {
-		t.Errorf("Summary.Included: got %d want 3", got)
+	if got := plan.Spec.Summary.Included; got != 2 {
+		t.Errorf("Summary.Included: got %d want 2", got)
 	}
-	if got := plan.Spec.Summary.Excluded; got != 5 {
-		t.Errorf("Summary.Excluded: got %d want 5", got)
+	if got := plan.Spec.Summary.Excluded; got != 7 {
+		t.Errorf("Summary.Excluded: got %d want 7", got)
 	}
 
 	// Spot-check that the excluded list carries the right kind of reason.
 	foundIncompat := 0
 	foundReview := 0
+	foundKindGate := 0
 	for _, e := range plan.Spec.Excluded {
+		if strings.Contains(e.Reason, "cannot patch in place") {
+			foundKindGate++
+			continue
+		}
 		switch e.Compatibility {
 		case schema.CompatibilityIncompatible:
 			foundIncompat++
@@ -156,6 +172,49 @@ func TestPlan_PartitionsByCompatibility(t *testing.T) {
 	if foundReview != 2 {
 		t.Errorf("review-excluded count: got %d want 2", foundReview)
 	}
+	if foundKindGate != 2 {
+		t.Errorf("kind-gated excluded count: got %d want 2 (Pod + Job)", foundKindGate)
+	}
+}
+
+func TestPlan_ExcludesPodAndJobKinds(t *testing.T) {
+	plan, err := Plan(fixtureReport(), Options{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	// Neither the compatible Pod nor the compatible Job may appear as a
+	// step: the API server rejects in-place runtimeClassName patches for
+	// both kinds.
+	if s := findStep(plan, "Pod", "default", "sleeper"); s != nil {
+		t.Errorf("Pod 'default/sleeper' must not be a plan step (immutable spec)")
+	}
+	if s := findStep(plan, "Job", "batch", "reindex"); s != nil {
+		t.Errorf("Job 'batch/reindex' must not be a plan step (immutable template)")
+	}
+
+	// Both must be excluded with an actionable reason.
+	wantExcluded := map[string]string{
+		"sleeper": "immutable",
+		"reindex": "immutable",
+	}
+	for _, e := range plan.Spec.Excluded {
+		want, ok := wantExcluded[e.Target.Name]
+		if !ok {
+			continue
+		}
+		delete(wantExcluded, e.Target.Name)
+		if !strings.Contains(e.Reason, want) {
+			t.Errorf("excluded %s: reason %q should mention %q", e.Target.Name, e.Reason, want)
+		}
+		if e.Compatibility != schema.CompatibilityCompatible {
+			t.Errorf("excluded %s: compatibility should stay %q, got %q",
+				e.Target.Name, schema.CompatibilityCompatible, e.Compatibility)
+		}
+	}
+	for name := range wantExcluded {
+		t.Errorf("workload %q missing from the excluded list", name)
+	}
 }
 
 func TestPlan_IncludeReviewAddsThemToSteps(t *testing.T) {
@@ -163,12 +222,13 @@ func TestPlan_IncludeReviewAddsThemToSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	// 3 Compatible + 2 Review -> 5 steps. 3 Incompatible -> 3 excluded.
-	if got := plan.Spec.Summary.Included; got != 5 {
-		t.Errorf("Summary.Included with IncludeReview: got %d want 5", got)
+	// 2 plannable Compatible + 2 Review -> 4 steps.
+	// 3 Incompatible + 2 kind-gated (Pod, Job) -> 5 excluded.
+	if got := plan.Spec.Summary.Included; got != 4 {
+		t.Errorf("Summary.Included with IncludeReview: got %d want 4", got)
 	}
-	if got := plan.Spec.Summary.Excluded; got != 3 {
-		t.Errorf("Summary.Excluded with IncludeReview: got %d want 3", got)
+	if got := plan.Spec.Summary.Excluded; got != 5 {
+		t.Errorf("Summary.Excluded with IncludeReview: got %d want 5", got)
 	}
 }
 
@@ -177,15 +237,14 @@ func TestPlan_OrdersLowestRiskFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	if len(plan.Spec.Steps) != 3 {
-		t.Fatalf("step count: got %d want 3", len(plan.Spec.Steps))
+	if len(plan.Spec.Steps) != 2 {
+		t.Fatalf("step count: got %d want 2", len(plan.Spec.Steps))
 	}
 
 	// Expected order, derived by hand from ordering.Score():
-	//   - Pod "default/sleeper": Pod weight 1, no reasons -> 1.
 	//   - Deployment "default/web": Deployment 0 + network-throughput 2 -> 2.
 	//   - StatefulSet "data/cache": StatefulSet 5 + syscall-heavy 1 -> 6.
-	wantOrder := []string{"sleeper", "web", "cache"}
+	wantOrder := []string{"web", "cache"}
 	for i, w := range wantOrder {
 		got := plan.Spec.Steps[i].Target.Name
 		if got != w {
@@ -226,12 +285,40 @@ func TestPlan_PerStepFields(t *testing.T) {
 		t.Errorf("Deployment WaitFor: got %q want %q", deploymentStep.WaitFor, "Ready")
 	}
 
-	podStep := findStep(plan, "Pod", "default", "sleeper")
-	if podStep == nil {
-		t.Fatalf("Pod 'default/sleeper' missing from plan")
+	stsStep := findStep(plan, "StatefulSet", "data", "cache")
+	if stsStep == nil {
+		t.Fatalf("StatefulSet 'data/cache' missing from plan")
 	}
-	if podStep.WaitFor != "Running" {
-		t.Errorf("Pod WaitFor: got %q want %q", podStep.WaitFor, "Running")
+	if stsStep.WaitFor != "Ready" {
+		t.Errorf("StatefulSet WaitFor: got %q want %q", stsStep.WaitFor, "Ready")
+	}
+}
+
+func TestComputePlanHash_MatchesPlanMetadata(t *testing.T) {
+	plan, err := Plan(fixtureReport(), Options{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	recomputed, err := ComputePlanHash(plan.Spec.Steps, plan.Spec.Options)
+	if err != nil {
+		t.Fatalf("ComputePlanHash: %v", err)
+	}
+	if recomputed != plan.Metadata.PlanHash {
+		t.Errorf("recomputed hash %q != plan hash %q", recomputed, plan.Metadata.PlanHash)
+	}
+
+	// nil and empty step slices must hash identically: a plan with zero
+	// steps round-trips through YAML as an absent (nil) list.
+	h1, err := ComputePlanHash(nil, Options{})
+	if err != nil {
+		t.Fatalf("ComputePlanHash(nil): %v", err)
+	}
+	h2, err := ComputePlanHash([]schema.PlanStep{}, Options{})
+	if err != nil {
+		t.Fatalf("ComputePlanHash(empty): %v", err)
+	}
+	if h1 != h2 {
+		t.Errorf("nil vs empty step slice hashes differ: %q vs %q", h1, h2)
 	}
 }
 

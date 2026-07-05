@@ -134,14 +134,20 @@ func Order(in []schema.WorkloadResult) []Scored {
 	return out
 }
 
-// waitForKind returns the appropriate `waitFor` hint for a given controller
-// kind. Lifted out of Plan() so the policy is visible in one place.
+// waitForKind returns the `waitFor` hint for a given controller kind.
+// Lifted out of Plan() so the policy is visible in one place.
 //
-//   - Deployment, StatefulSet, DaemonSet: wait on "Ready" because these are
-//     long-running serving controllers; the rollout should converge before
-//     the applier moves on.
+// NOTE: waitFor is advisory. The v1 applier does not wait on rollouts; the
+// hint tells the operator (or a future applier) which pod condition marks
+// the step as converged. See the WaitFor field docs in internal/schema.
+//
+//   - Deployment, StatefulSet, DaemonSet: "Ready", because these are
+//     long-running serving controllers and the rollout should converge
+//     before the migration is considered done.
 //   - Job, CronJob, Pod: "Running" is enough; some of these intentionally
 //     exit shortly after starting and would never reach Ready=true.
+//     (The planner no longer emits Pod/Job steps, but the mapping stays
+//     total so legacy plans keep rendering sensibly.)
 //   - Anything else: empty string ("do not wait"), the conservative default.
 func waitForKind(kind string) string {
 	switch kind {
