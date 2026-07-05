@@ -15,6 +15,7 @@ import (
 	"os"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
+	"github.com/0hardik1/agentmoat/pkg/planner"
 	"sigs.k8s.io/yaml"
 )
 
@@ -57,6 +58,26 @@ func loadPlan(path string) (*schema.MigrationPlan, error) {
 	// the test "the file is parseable as a real MigrationPlan" cheap.
 	if _, err := json.Marshal(plan); err != nil {
 		return nil, fmt.Errorf("validating plan shape: %w", err)
+	}
+
+	// Integrity check: when the file claims a planHash, recompute it from
+	// the steps + options and reject a mismatch. A hand-edited (or
+	// corrupted) plan whose hash no longer matches its content would
+	// otherwise poison the namespace-annotation idempotency check: apply
+	// would stamp (or trust) a hash that does not describe the steps it
+	// ran. A plan with no planHash is allowed through: the applier never
+	// short-circuits on an empty hash, so there is nothing to poison.
+	if plan.Metadata.PlanHash != "" {
+		recomputed, err := planner.ComputePlanHash(plan.Spec.Steps, plan.Spec.Options)
+		if err != nil {
+			return nil, fmt.Errorf("recomputing plan hash for %s: %w", path, err)
+		}
+		if recomputed != plan.Metadata.PlanHash {
+			return nil, fmt.Errorf(
+				"plan file %s failed its integrity check: metadata.planHash is %q but the steps/options hash to %q; "+
+					"the file was edited after planning (re-run 'agentmoat plan' to regenerate it)",
+				path, plan.Metadata.PlanHash, recomputed)
+		}
 	}
 	return &plan, nil
 }

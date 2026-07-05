@@ -55,7 +55,7 @@ func Apply(ctx context.Context, opts ApplyOptions) (*schema.ApplyResult, error) 
 		EmitEvents:       opts.EmitEvents,
 		AuditEnabled:     opts.AuditEnabled,
 		Stderr:           stderr,
-		Cluster:          kube.CurrentContext(opts.KubeconfigPath),
+		Cluster:          kube.CurrentContext(opts.KubeconfigPath, opts.Context),
 		AgentmoatVersion: Version,
 	})
 	if err != nil {
@@ -100,7 +100,7 @@ func Rollback(ctx context.Context, opts RollbackOptions) (*schema.RollbackResult
 		EmitEvents:       opts.EmitEvents,
 		AuditEnabled:     opts.AuditEnabled,
 		Stderr:           stderr,
-		Cluster:          kube.CurrentContext(opts.KubeconfigPath),
+		Cluster:          kube.CurrentContext(opts.KubeconfigPath, opts.Context),
 		AgentmoatVersion: Version,
 	})
 	if err != nil {

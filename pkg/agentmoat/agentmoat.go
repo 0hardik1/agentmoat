@@ -1,18 +1,18 @@
 // Package agentmoat: orchestration entry points.
 //
 // Scan() is the single function that wires scanner -> classifier ->
-// schema.ScanReport. The CLI and the future MCP server both call this so
-// the two surfaces cannot drift.
+// schema.ScanReport. The CLI and the MCP server (cmd/agentmoat-mcp) both
+// call this so the two surfaces cannot drift.
 //
-// Phase 1 ships only Scan. Subsequent phases will add Plan, Apply, Verify,
-// and Rollback to this package, each following the same pattern: a public
-// function that returns a versioned schema type plus an error.
+// The package's other entry points (Plan, Apply, Rollback, Verify,
+// Explain, AssessWorkload) live in their own files and follow the same
+// pattern: a public function that returns a versioned schema type plus an
+// error.
 package agentmoat
 
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"time"
@@ -99,8 +99,8 @@ func Scan(ctx context.Context, opts ScanOptions) (*schema.ScanReport, error) {
 	report := schema.NewScanReport()
 	report.Metadata = schema.ReportMetadata{
 		GeneratedAt:      time.Now().UTC().Format(time.RFC3339),
-		Cluster:          kube.CurrentContext(opts.KubeconfigPath),
-		Namespaces:       opts.Namespaces,
+		Cluster:          kube.CurrentContext(opts.KubeconfigPath, opts.Context),
+		Namespaces:       enumOpts.Namespaces, // nil when the scan was cluster-wide
 		AgentmoatVersion: Version,
 	}
 
@@ -161,6 +161,3 @@ func summarize(results []schema.WorkloadResult) schema.Summary {
 	}
 	return s
 }
-
-// _ keeps the io import live for callers that pass opts.Stderr.
-var _ io.Writer = (io.Writer)(nil)

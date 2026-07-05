@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
+	"github.com/0hardik1/agentmoat/pkg/planner"
 	"sigs.k8s.io/yaml"
 )
 
@@ -20,10 +21,6 @@ import (
 func writeTestPlan(t *testing.T) string {
 	t.Helper()
 	plan := schema.NewMigrationPlan()
-	plan.Metadata = schema.PlanMetadata{
-		GeneratedAt: "2026-05-22T12:00:00Z",
-		PlanHash:    "test-hash",
-	}
 	plan.Spec = schema.PlanSpec{
 		Summary: schema.PlanSummary{Total: 1, Included: 1, Excluded: 0},
 		Options: schema.PlannerOptions{RuntimeClassName: "gvisor"},
@@ -37,6 +34,16 @@ func writeTestPlan(t *testing.T) string {
 		},
 		Excluded: []schema.ExcludedWorkload{},
 	}
+	// The loader verifies metadata.planHash against the steps/options, so
+	// the fixture carries the real content hash.
+	hash, err := planner.ComputePlanHash(plan.Spec.Steps, plan.Spec.Options)
+	if err != nil {
+		t.Fatalf("compute plan hash: %v", err)
+	}
+	plan.Metadata = schema.PlanMetadata{
+		GeneratedAt: "2026-05-22T12:00:00Z",
+		PlanHash:    hash,
+	}
 	data, err := yaml.Marshal(plan)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -46,6 +53,44 @@ func writeTestPlan(t *testing.T) string {
 		t.Fatalf("write: %v", err)
 	}
 	return path
+}
+
+// TestLoadPlanRejectsTamperedHash asserts the loader's integrity check:
+// a plan whose metadata.planHash does not match its steps/options is
+// rejected before any Kubernetes call.
+func TestLoadPlanRejectsTamperedHash(t *testing.T) {
+	t.Parallel()
+	planPath := writeTestPlan(t)
+	data, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan: %v", err)
+	}
+	// Tamper with the content but keep the original hash: swap the
+	// runtime class the steps set.
+	tampered := strings.ReplaceAll(string(data), "runtimeClassName: gvisor", "runtimeClassName: kata")
+	tamperedPath := filepath.Join(t.TempDir(), "tampered.yaml")
+	if err := os.WriteFile(tamperedPath, []byte(tampered), 0o600); err != nil {
+		t.Fatalf("write tampered plan: %v", err)
+	}
+
+	_, err = loadPlan(tamperedPath)
+	if err == nil {
+		t.Fatalf("expected integrity-check error for tampered plan")
+	}
+	if !strings.Contains(err.Error(), "integrity") {
+		t.Errorf("error should mention the integrity check: %v", err)
+	}
+
+	// A plan with no hash at all is allowed through: the applier never
+	// short-circuits on an empty hash.
+	noHash := strings.ReplaceAll(string(data), "planHash:", "somethingElse:")
+	noHashPath := filepath.Join(t.TempDir(), "nohash.yaml")
+	if err := os.WriteFile(noHashPath, []byte(noHash), 0o600); err != nil {
+		t.Fatalf("write no-hash plan: %v", err)
+	}
+	if _, err := loadPlan(noHashPath); err != nil {
+		t.Errorf("plan without a planHash should load, got: %v", err)
+	}
 }
 
 // TestVerifyRejectsMissingPlan asserts the orchestrator surfaces a clean
