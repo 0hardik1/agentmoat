@@ -703,3 +703,74 @@ func TestVerify_TerminatingPodIgnored(t *testing.T) {
 			rep.Spec.Summary, rep.Spec.Results)
 	}
 }
+
+// TestVerify_TerminalPodsIgnored confirms that Succeeded / Failed pods are
+// excluded from the spec-level check. Completed Job and CronJob pods linger
+// until TTL cleanup carrying the runtime class they were created with;
+// counting them would report a permanent false mismatch for a migration
+// that is correct for every future pod.
+func TestVerify_TerminalPodsIgnored(t *testing.T) {
+	cronLabels := map[string]string{"app": "reporter"}
+	// A completed pod from a pre-migration run: no runtimeClassName.
+	donePod := runningPod("ns-a", "reporter-old", cronLabels, nil)
+	donePod.Status.Phase = corev1.PodSucceeded
+	// A crashed pod from a pre-migration run.
+	failedPod := runningPod("ns-a", "reporter-crashed", cronLabels, nil)
+	failedPod.Status.Phase = corev1.PodFailed
+	// The current (post-migration) pod.
+	newPod := runningPod("ns-a", "reporter-new", cronLabels, strPtr("gvisor"))
+
+	cj := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "reporter"},
+		Spec: batchv1.CronJobSpec{
+			JobTemplate: batchv1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: cronLabels},
+					},
+				},
+			},
+		},
+	}
+
+	client := fake.NewSimpleClientset(cj, donePod, failedPod, newPod)
+	plan := makePlan(stepRef("CronJob", "ns-a", "reporter", "gvisor"))
+
+	rep, err := Verify(context.Background(), Options{Client: client, Plan: plan})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if rep.Spec.Summary.OK != 1 || rep.Spec.Summary.Mismatch != 0 {
+		t.Errorf("expected ok=1 mismatch=0, got %+v\nresults: %+v",
+			rep.Spec.Summary, rep.Spec.Results)
+	}
+}
+
+// TestVerify_MatchExpressionsSelector confirms that a controller whose
+// selector uses only matchExpressions (no matchLabels) still resolves its
+// pods. Before the fix, such a selector produced a bogus "no pods matched
+// controller selector" error.
+func TestVerify_MatchExpressionsSelector(t *testing.T) {
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "expr"},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"expr"}},
+				},
+			},
+		},
+	}
+	pod := runningPod("ns-a", "expr-1", map[string]string{"app": "expr"}, strPtr("gvisor"))
+
+	client := fake.NewSimpleClientset(dep, pod)
+	plan := makePlan(stepRef("Deployment", "ns-a", "expr", "gvisor"))
+
+	rep, err := Verify(context.Background(), Options{Client: client, Plan: plan})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if rep.Spec.Summary.OK != 1 {
+		t.Errorf("expected ok=1, got %+v\nresults: %+v", rep.Spec.Summary, rep.Spec.Results)
+	}
+}

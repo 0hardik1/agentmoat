@@ -18,11 +18,14 @@
 //     the controller's pod template.
 //
 //   - For controllers (Deployment / StatefulSet / DaemonSet / Job /
-//     CronJob) we list the controller's selected pods via
-//     `spec.selector.matchLabels` and check each. CronJob is the awkward
-//     one: it has no spec.selector of its own (the Jobs it spawns do).
-//     We fall back to the labels on the JobTemplate's pod template, which
-//     is what those Jobs end up selecting on.
+//     CronJob) we list the controller's selected pods via the full
+//     `spec.selector` (matchLabels AND matchExpressions) and check each.
+//     Pods being deleted and pods in a terminal phase (Succeeded/Failed)
+//     are skipped: they carry the runtime class they were created with
+//     and can never converge to the plan. CronJob is the awkward one: it
+//     has no spec.selector of its own (the Jobs it spawns do). We fall
+//     back to the labels on the JobTemplate's pod template, which is what
+//     those Jobs end up selecting on.
 //
 //   - For a "Pod" PlanStep we Get the pod directly. A NotFound is the
 //     verdict-bearing error; we report it and move on.
@@ -57,7 +60,6 @@ import (
 	"time"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -266,21 +268,21 @@ func resolvePods(ctx context.Context, client kubernetes.Interface, target schema
 		if err != nil {
 			return nil, controllerErr("Deployment", target, err)
 		}
-		return listBySelectorMatchLabels(ctx, client, target.Namespace, dep.Spec.Selector.MatchLabels)
+		return listByLabelSelector(ctx, client, target.Namespace, dep.Spec.Selector)
 
 	case kindStatefulSet:
 		ss, err := client.AppsV1().StatefulSets(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
 		if err != nil {
 			return nil, controllerErr("StatefulSet", target, err)
 		}
-		return listBySelectorMatchLabels(ctx, client, target.Namespace, ss.Spec.Selector.MatchLabels)
+		return listByLabelSelector(ctx, client, target.Namespace, ss.Spec.Selector)
 
 	case kindDaemonSet:
 		ds, err := client.AppsV1().DaemonSets(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
 		if err != nil {
 			return nil, controllerErr("DaemonSet", target, err)
 		}
-		return listBySelectorMatchLabels(ctx, client, target.Namespace, ds.Spec.Selector.MatchLabels)
+		return listByLabelSelector(ctx, client, target.Namespace, ds.Spec.Selector)
 
 	case kindJob:
 		job, err := client.BatchV1().Jobs(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
@@ -291,8 +293,10 @@ func resolvePods(ctx context.Context, client kubernetes.Interface, target schema
 		// controller (the controller-uid label is auto-added). If a
 		// user-built Job omits the selector we fall back to the
 		// template's labels, mirroring the CronJob fallback below.
-		matchLabels := jobMatchLabels(job)
-		return listBySelectorMatchLabels(ctx, client, target.Namespace, matchLabels)
+		if job.Spec.Selector != nil && (len(job.Spec.Selector.MatchLabels) > 0 || len(job.Spec.Selector.MatchExpressions) > 0) {
+			return listByLabelSelector(ctx, client, target.Namespace, job.Spec.Selector)
+		}
+		return listBySelectorMatchLabels(ctx, client, target.Namespace, job.Spec.Template.Labels)
 
 	case kindCronJob:
 		// CronJob is the awkward one. CronJob itself has no .spec.selector:
@@ -308,8 +312,11 @@ func resolvePods(ctx context.Context, client kubernetes.Interface, target schema
 		if err != nil {
 			return nil, controllerErr("CronJob", target, err)
 		}
-		matchLabels := cronJobMatchLabels(cj)
-		return listBySelectorMatchLabels(ctx, client, target.Namespace, matchLabels)
+		jt := cj.Spec.JobTemplate
+		if jt.Spec.Selector != nil && (len(jt.Spec.Selector.MatchLabels) > 0 || len(jt.Spec.Selector.MatchExpressions) > 0) {
+			return listByLabelSelector(ctx, client, target.Namespace, jt.Spec.Selector)
+		}
+		return listBySelectorMatchLabels(ctx, client, target.Namespace, jt.Spec.Template.Labels)
 
 	default:
 		return nil, fmt.Errorf("unsupported kind %q", target.Kind)
@@ -326,25 +333,46 @@ func controllerErr(kind string, target schema.WorkloadRef, err error) error {
 	return fmt.Errorf("getting %s %s/%s: %w", kind, target.Namespace, target.Name, err)
 }
 
-// listBySelectorMatchLabels lists pods in ns matching the given
-// matchLabels. An empty (or nil) matchLabels yields the empty list rather
-// than every pod in the namespace: a selector that matches everything
-// would lead to absurd verify reports if a controller's selector is
-// accidentally empty.
-//
-// We also filter out pods that have a DeletionTimestamp set. Those are
-// pods Kubernetes is actively removing (the old replicas during a
-// rolling-update, for example). Counting them against the verification
-// would race the rollout: the new replicas already carry the patched
-// runtimeClassName, but the old replicas (mid-termination) still report
-// the pre-patch spec for a short window. Excluding them gives the
-// verifier a stable view that matches what kubectl's `READY` count
-// effectively shows.
+// listByLabelSelector lists pods in ns matching a full metav1.LabelSelector
+// (matchLabels AND matchExpressions). A nil or empty selector yields the
+// empty list rather than every pod in the namespace: a selector that
+// matches everything would lead to absurd verify reports if a controller's
+// selector is accidentally empty.
+func listByLabelSelector(ctx context.Context, client kubernetes.Interface, ns string, selector *metav1.LabelSelector) ([]corev1.Pod, error) {
+	if selector == nil || (len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0) {
+		return nil, nil
+	}
+	sel, err := metav1.LabelSelectorAsSelector(selector)
+	if err != nil {
+		return nil, fmt.Errorf("converting label selector: %w", err)
+	}
+	return listPodsFiltered(ctx, client, ns, sel)
+}
+
+// listBySelectorMatchLabels is the plain-matchLabels variant, used where
+// only a label map is available (Job/CronJob pod-template fallbacks).
 func listBySelectorMatchLabels(ctx context.Context, client kubernetes.Interface, ns string, matchLabels map[string]string) ([]corev1.Pod, error) {
 	if len(matchLabels) == 0 {
 		return nil, nil
 	}
-	sel := labels.SelectorFromSet(matchLabels)
+	return listPodsFiltered(ctx, client, ns, labels.SelectorFromSet(matchLabels))
+}
+
+// listPodsFiltered lists pods matching sel and drops the ones that cannot
+// carry a verification verdict:
+//
+//   - Pods with a DeletionTimestamp are being removed (the old replicas
+//     during a rolling update, for example). Counting them would race the
+//     rollout: the new replicas already carry the patched runtimeClassName
+//     while the old ones (mid-termination) still report the pre-patch spec.
+//
+//   - Pods in a terminal phase (Succeeded / Failed) already ran to
+//     completion and will never be re-admitted. Completed Job and CronJob
+//     pods linger until TTL cleanup with the runtime class they were
+//     *created* with; holding them against the plan would report a
+//     permanent false mismatch for a migration that is correct for every
+//     future pod.
+func listPodsFiltered(ctx context.Context, client kubernetes.Interface, ns string, sel labels.Selector) ([]corev1.Pod, error) {
 	list, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
 		LabelSelector: sel.String(),
 	})
@@ -356,37 +384,12 @@ func listBySelectorMatchLabels(ctx context.Context, client kubernetes.Interface,
 		if p.DeletionTimestamp != nil {
 			continue
 		}
+		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
 		alive = append(alive, p)
 	}
 	return alive, nil
-}
-
-// jobMatchLabels returns the labels we use to find a Job's pods. Honors
-// Spec.Selector when populated (which is the K8s norm: the Job controller
-// auto-adds a controller-uid label), else falls back to the pod
-// template's own labels for hand-built fixtures.
-func jobMatchLabels(job *batchv1.Job) map[string]string {
-	if job == nil {
-		return nil
-	}
-	if job.Spec.Selector != nil && len(job.Spec.Selector.MatchLabels) > 0 {
-		return job.Spec.Selector.MatchLabels
-	}
-	return job.Spec.Template.Labels
-}
-
-// cronJobMatchLabels returns the labels we use to find a CronJob's pods.
-// CronJobs do not have a top-level Selector; we look first at the
-// JobTemplate's Selector, then at the JobTemplate's pod-template labels.
-func cronJobMatchLabels(cj *batchv1.CronJob) map[string]string {
-	if cj == nil {
-		return nil
-	}
-	jt := cj.Spec.JobTemplate
-	if jt.Spec.Selector != nil && len(jt.Spec.Selector.MatchLabels) > 0 {
-		return jt.Spec.Selector.MatchLabels
-	}
-	return jt.Spec.Template.Labels
 }
 
 // podRuntimeClassName safely extracts the live pod's runtimeClassName.
