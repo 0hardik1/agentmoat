@@ -61,6 +61,7 @@ func writeTestPlan(t *testing.T) string {
 func TestLoadPlanRejectsTamperedHash(t *testing.T) {
 	t.Parallel()
 	planPath := writeTestPlan(t)
+	// #nosec G304 -- planPath is a t.TempDir() join; not attacker-controlled.
 	data, err := os.ReadFile(planPath)
 	if err != nil {
 		t.Fatalf("read plan: %v", err)
@@ -69,6 +70,7 @@ func TestLoadPlanRejectsTamperedHash(t *testing.T) {
 	// runtime class the steps set.
 	tampered := strings.ReplaceAll(string(data), "runtimeClassName: gvisor", "runtimeClassName: kata")
 	tamperedPath := filepath.Join(t.TempDir(), "tampered.yaml")
+	// #nosec G703 -- tamperedPath is a t.TempDir() join; not attacker-controlled.
 	if err := os.WriteFile(tamperedPath, []byte(tampered), 0o600); err != nil {
 		t.Fatalf("write tampered plan: %v", err)
 	}
@@ -85,6 +87,7 @@ func TestLoadPlanRejectsTamperedHash(t *testing.T) {
 	// short-circuits on an empty hash.
 	noHash := strings.ReplaceAll(string(data), "planHash:", "somethingElse:")
 	noHashPath := filepath.Join(t.TempDir(), "nohash.yaml")
+	// #nosec G703 -- noHashPath is a t.TempDir() join; not attacker-controlled.
 	if err := os.WriteFile(noHashPath, []byte(noHash), 0o600); err != nil {
 		t.Fatalf("write no-hash plan: %v", err)
 	}

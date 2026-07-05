@@ -254,14 +254,7 @@ func verifyStep(ctx context.Context, client kubernetes.Interface, step schema.Pl
 func resolvePods(ctx context.Context, client kubernetes.Interface, target schema.WorkloadRef) ([]corev1.Pod, error) {
 	switch target.Kind {
 	case kindPod:
-		pod, err := client.CoreV1().Pods(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil, fmt.Errorf("pod %s/%s not found", target.Namespace, target.Name)
-			}
-			return nil, fmt.Errorf("getting pod %s/%s: %w", target.Namespace, target.Name, err)
-		}
-		return []corev1.Pod{*pod}, nil
+		return resolveSinglePod(ctx, client, target)
 
 	case kindDeployment:
 		dep, err := client.AppsV1().Deployments(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
@@ -285,42 +278,69 @@ func resolvePods(ctx context.Context, client kubernetes.Interface, target schema
 		return listByLabelSelector(ctx, client, target.Namespace, ds.Spec.Selector)
 
 	case kindJob:
-		job, err := client.BatchV1().Jobs(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, controllerErr("Job", target, err)
-		}
-		// Jobs always populate Spec.Selector when created by the Job
-		// controller (the controller-uid label is auto-added). If a
-		// user-built Job omits the selector we fall back to the
-		// template's labels, mirroring the CronJob fallback below.
-		if job.Spec.Selector != nil && (len(job.Spec.Selector.MatchLabels) > 0 || len(job.Spec.Selector.MatchExpressions) > 0) {
-			return listByLabelSelector(ctx, client, target.Namespace, job.Spec.Selector)
-		}
-		return listBySelectorMatchLabels(ctx, client, target.Namespace, job.Spec.Template.Labels)
+		return resolveJobPods(ctx, client, target)
 
 	case kindCronJob:
-		// CronJob is the awkward one. CronJob itself has no .spec.selector:
-		// it manages Jobs, which in turn manage pods. We could enumerate the
-		// CronJob's recent Jobs and union their selectors, but that doubles
-		// the API calls and races a fresh Job that the controller has not
-		// yet created. The simpler, deterministic approach is to inspect
-		// the JobTemplate.Spec.Template.Labels (which is what those Jobs
-		// will select on by default) and use that as the verification
-		// selector. If the operator supplied an explicit JobTemplate
-		// selector we honor it first.
-		cj, err := client.BatchV1().CronJobs(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, controllerErr("CronJob", target, err)
-		}
-		jt := cj.Spec.JobTemplate
-		if jt.Spec.Selector != nil && (len(jt.Spec.Selector.MatchLabels) > 0 || len(jt.Spec.Selector.MatchExpressions) > 0) {
-			return listByLabelSelector(ctx, client, target.Namespace, jt.Spec.Selector)
-		}
-		return listBySelectorMatchLabels(ctx, client, target.Namespace, jt.Spec.Template.Labels)
+		return resolveCronJobPods(ctx, client, target)
 
 	default:
 		return nil, fmt.Errorf("unsupported kind %q", target.Kind)
 	}
+}
+
+// resolveSinglePod handles the Kind="Pod" case: fetch the one named pod.
+// A NotFound gets a friendly message; other API errors propagate wrapped.
+func resolveSinglePod(ctx context.Context, client kubernetes.Interface, target schema.WorkloadRef) ([]corev1.Pod, error) {
+	pod, err := client.CoreV1().Pods(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("pod %s/%s not found", target.Namespace, target.Name)
+		}
+		return nil, fmt.Errorf("getting pod %s/%s: %w", target.Namespace, target.Name, err)
+	}
+	return []corev1.Pod{*pod}, nil
+}
+
+// resolveJobPods lists the pods a Job governs. Jobs always populate
+// Spec.Selector when created by the Job controller (the controller-uid
+// label is auto-added). If a user-built Job omits the selector we fall
+// back to the template's labels, mirroring the CronJob fallback.
+func resolveJobPods(ctx context.Context, client kubernetes.Interface, target schema.WorkloadRef) ([]corev1.Pod, error) {
+	job, err := client.BatchV1().Jobs(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, controllerErr("Job", target, err)
+	}
+	if hasSelectorTerms(job.Spec.Selector) {
+		return listByLabelSelector(ctx, client, target.Namespace, job.Spec.Selector)
+	}
+	return listBySelectorMatchLabels(ctx, client, target.Namespace, job.Spec.Template.Labels)
+}
+
+// resolveCronJobPods lists the pods a CronJob's Jobs govern. CronJob is
+// the awkward one: it has no .spec.selector of its own (the Jobs it spawns
+// do). We could enumerate the CronJob's recent Jobs and union their
+// selectors, but that doubles the API calls and races a fresh Job that the
+// controller has not yet created. The simpler, deterministic approach is
+// to inspect the JobTemplate's pod-template labels (which is what those
+// Jobs select on by default). If the operator supplied an explicit
+// JobTemplate selector we honor it first.
+func resolveCronJobPods(ctx context.Context, client kubernetes.Interface, target schema.WorkloadRef) ([]corev1.Pod, error) {
+	cj, err := client.BatchV1().CronJobs(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, controllerErr("CronJob", target, err)
+	}
+	jt := cj.Spec.JobTemplate
+	if hasSelectorTerms(jt.Spec.Selector) {
+		return listByLabelSelector(ctx, client, target.Namespace, jt.Spec.Selector)
+	}
+	return listBySelectorMatchLabels(ctx, client, target.Namespace, jt.Spec.Template.Labels)
+}
+
+// hasSelectorTerms reports whether the selector carries at least one
+// matchLabels or matchExpressions term. An empty selector must not be
+// treated as "match everything" here (see listByLabelSelector).
+func hasSelectorTerms(sel *metav1.LabelSelector) bool {
+	return sel != nil && (len(sel.MatchLabels) > 0 || len(sel.MatchExpressions) > 0)
 }
 
 // controllerErr shapes a per-step error from a controller Get. We
@@ -339,7 +359,7 @@ func controllerErr(kind string, target schema.WorkloadRef, err error) error {
 // matches everything would lead to absurd verify reports if a controller's
 // selector is accidentally empty.
 func listByLabelSelector(ctx context.Context, client kubernetes.Interface, ns string, selector *metav1.LabelSelector) ([]corev1.Pod, error) {
-	if selector == nil || (len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0) {
+	if !hasSelectorTerms(selector) {
 		return nil, nil
 	}
 	sel, err := metav1.LabelSelectorAsSelector(selector)
