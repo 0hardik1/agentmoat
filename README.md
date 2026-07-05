@@ -86,7 +86,10 @@ formula and a `kubectl agentmoat` krew plugin follow.
 - **`plan`** is a pure function from a `ScanReport` to a `MigrationPlan`.
   Same scan in, same plan and same SHA-256 `planHash` out. The plan orders
   steps by risk (stateless first, no host-network first, etc.) and excludes
-  any workload classified `incompatible`.
+  any workload classified `incompatible`. It also excludes standalone Pods
+  and Jobs with an actionable reason: the Kubernetes API rejects in-place
+  `runtimeClassName` patches for both (a running Pod's spec and a Job's
+  template are immutable), so those workloads must be re-created instead.
 - **`apply`** is the only stage that mutates the cluster. It patches each pod
   template with `runtimeClassName` and the matching `runtime=gvisor:NoSchedule`
   toleration, stamps the namespace with `agentmoat.io/plan-hash`, emits a
@@ -134,8 +137,10 @@ the plan. `warn` makes it `review`; the planner only includes `review`
 workloads when `--include-review` is passed. `info` is purely advisory and
 never blocks.
 
-Override severities (or add rules) without recompiling via `--rules
-<file.yaml>`. See [`docs/compatibility-checklist.md`](docs/compatibility-checklist.md).
+Override rule severities without recompiling via `--rules <file.yaml>`
+(unknown rule IDs are warned about and skipped; adding brand-new rules
+requires a code change). See
+[`docs/compatibility-checklist.md`](docs/compatibility-checklist.md).
 
 ## Sample output
 
@@ -149,7 +154,7 @@ elided fields are marked `...`.
   "kind": "Deployment",
   "namespace": "edge",
   "name": "frontdoor",
-  "compatibility": "review",
+  "compatibility": "compatible",
   "reasons": [
     {
       "ruleId": "network-throughput",
@@ -158,7 +163,7 @@ elided fields are marked `...`.
       "remediationUrl": "https://gvisor.dev/docs/architecture_guide/performance/"
     }
   ],
-  "recommendation": "Benchmark under gVisor before opting in; consider host-network alternatives if throughput-critical.",
+  "recommendation": "Safe to migrate: set spec.runtimeClassName: gvisor on this workload.",
   "overhead": "Network throughput: 20-40%"
 }
 ```
@@ -309,8 +314,7 @@ make kind-down
 | `--all-namespaces / -A`    | true if `-n` unset | Explicit all-namespaces flag.                                          |
 | `--selector / -l`          | (none)           | Kubernetes label selector applied to every list call.                    |
 | `--include-system`         | `false`          | Include `kube-system` and other `kube-*` namespaces.                     |
-| `--rules`                  | (none)           | Path to YAML overriding rule severities or adding rules.                 |
-| `--explain`                | `false`          | Inline educational notes in supported output formats.                    |
+| `--rules`                  | (none)           | Path to YAML overriding built-in rule severities.                        |
 
 ### Per-command flags
 
@@ -375,16 +379,15 @@ image.
 
 ## Status and roadmap
 
-Phase 0 (foundation), Phase 1 (read-only scan + classifier), and Phase 2
-(planner + applier + rollback, with idempotency and audit) are committed.
-`agentmoat scan`, `plan`, `apply`, and `rollback` are wired and exercised
-end-to-end against a real gVisor kind cluster.
+Phase 0 (foundation), Phase 1 (read-only scan + classifier), Phase 2
+(planner + applier + rollback, with idempotency and audit), Phase 3
+(`agentmoat verify` with optional `--in-pod-probe`, plus `agentmoat
+explain`), and Phase 4 (the `agentmoat-mcp` MCP server: 7 tools over
+stdio, see [`docs/mcp-integration.md`](docs/mcp-integration.md)) are all
+shipped and exercised end-to-end against a real gVisor kind cluster.
 
 Roadmap:
 
-- **Phase 3**: `agentmoat verify` (pod `runtimeClassName` check; optional
-  `--in-pod-probe` for in-container confirmation) and `agentmoat explain`
-  (embedded docs viewer). Both shipped.
 - **Phase 5+**: EKS end-to-end recipe (CloudFormation/Terraform/Karpenter),
   additional Packer variants.
 

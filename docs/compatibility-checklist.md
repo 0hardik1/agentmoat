@@ -58,6 +58,9 @@ to miss when reading the table above:
 - **`CAP_SYS_ADMIN`** is handled by the `perf-events` rule, not `ebpf`.
   Legacy eBPF loaders that rely on `CAP_SYS_ADMIN` without `CAP_BPF` may
   surface as `review` via `perf-events` rather than `incompatible` via `ebpf`.
+  Note that `CAP_SYS_ADMIN` is a near-root capability that gates far more
+  than perf events; if your environment treats it as disqualifying, promote
+  `perf-events` to `error` via a `--rules` override.
 
 ## Overriding severity
 
