@@ -28,10 +28,12 @@ import (
 )
 
 // readNamespaceAnnotation fetches the value of the agentmoat.io/plan-hash
-// annotation on the given namespace, returning "" if absent.
+// annotation on the given namespace, returning "" if the annotation is
+// absent.
 //
-// A missing namespace is treated as "no annotation" (returns ""). A real
-// client error is propagated so the applier surfaces it.
+// All client errors (including NotFound for a missing namespace) are
+// propagated; the caller (readAllNamespaceAnnotations) is what maps
+// NotFound to "no annotation".
 func readNamespaceAnnotation(ctx context.Context, client kubernetes.Interface, ns string) (string, error) {
 	got, err := client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
 	if err != nil {

@@ -317,3 +317,52 @@ func TestAffectedNamespaces_Dedupes(t *testing.T) {
 		t.Errorf("len: got %d want 2 (%v)", len(got), got)
 	}
 }
+
+// TestRollback_SkipsNamespaceStampedWithDifferentPlan asserts that a
+// rollback does not touch a namespace whose plan-hash annotation belongs
+// to a different plan: the steps are reported as skipped (with a reason)
+// and the other plan's annotation is preserved.
+func TestRollback_SkipsNamespaceStampedWithDifferentPlan(t *testing.T) {
+	client := seededClient(t)
+	auditTmp(t)
+	ctx := context.Background()
+
+	// Stamp ns-a with a DIFFERENT plan's hash; ns-b stays unstamped.
+	if _, err := writeNamespaceAnnotation(ctx, client, "ns-a", "some-other-plan-hash", false); err != nil {
+		t.Fatalf("seeding annotation: %v", err)
+	}
+
+	res, err := Rollback(ctx, Options{
+		Client:       client,
+		Plan:         twoStepPlan(), // PlanHash: "test-hash-1"
+		DryRun:       false,
+		AuditEnabled: true,
+		EmitEvents:   false,
+	})
+	if err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+
+	// The ns-a step must be skipped with an explanatory reason; the ns-b
+	// step is already-applied (annotation absent).
+	if res.Spec.Summary.Skipped != 1 {
+		t.Errorf("Skipped count: got %d want 1; steps=%+v", res.Spec.Summary.Skipped, res.Spec.Steps)
+	}
+	if res.Spec.Summary.AlreadyApplied != 1 {
+		t.Errorf("AlreadyApplied count: got %d want 1; steps=%+v", res.Spec.Summary.AlreadyApplied, res.Spec.Steps)
+	}
+	for _, sr := range res.Spec.Steps {
+		if sr.Status == schema.StepStatusSkipped && !strings.Contains(sr.Error, "different plan") {
+			t.Errorf("skipped step should explain the hash mismatch, got %q", sr.Error)
+		}
+	}
+
+	// The other plan's annotation must survive.
+	got, err := readNamespaceAnnotation(ctx, client, "ns-a")
+	if err != nil {
+		t.Fatalf("readNamespaceAnnotation: %v", err)
+	}
+	if got != "some-other-plan-hash" {
+		t.Errorf("ns-a annotation: got %q, want the other plan's hash preserved", got)
+	}
+}
