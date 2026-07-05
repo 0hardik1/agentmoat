@@ -76,10 +76,17 @@ and sandboxes with no filesystem layout dependency.
 
 ## 4. Wiring into Claude Code
 
-Claude Code reads its MCP server list from
-`~/.claude/claude_desktop_config.json` (or `~/.claude/settings.json`
-depending on the install; check `claude --help` if unsure). Add an
-entry under `mcpServers`:
+The easiest wiring is the `claude mcp add` command:
+
+```bash
+claude mcp add agentmoat -- /absolute/path/to/agentmoat-mcp
+```
+
+Alternatively, declare the server in a checked-in `.mcp.json` at the
+project root (shared with your team) or in your user-level
+`~/.claude.json`. All three accept the same `mcpServers` shape. (Claude
+Desktop — the chat app, not Claude Code — uses
+`claude_desktop_config.json` with the same entry format.)
 
 ```json
 {

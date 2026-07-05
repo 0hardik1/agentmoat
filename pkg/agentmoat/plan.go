@@ -8,14 +8,13 @@
 //   - resolving the source (in-memory ScanReport vs running a Scan).
 //   - stamping the produced MigrationPlan with the agentmoat binary version.
 //
-// Both the CLI and the future MCP server call into this so the resulting
+// Both the CLI and the MCP server call into this so the resulting
 // MigrationPlan is identical regardless of operator surface.
 package agentmoat
 
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -63,13 +62,9 @@ func Plan(ctx context.Context, opts PlanOptions) (*schema.MigrationPlan, error) 
 		plan.Metadata.AgentmoatVersion = Version
 	}
 
-	_, _ = fmt.Fprintf(stderr, "planned %d steps (%d included, %d excluded)\n",
-		plan.Spec.Summary.Total,
+	_, _ = fmt.Fprintf(stderr, "planned %d steps (%d workloads excluded)\n",
 		plan.Spec.Summary.Included,
 		plan.Spec.Summary.Excluded,
 	)
 	return plan, nil
 }
-
-// _ keeps the io import live for callers that pass opts.Stderr.
-var _ io.Writer = (io.Writer)(nil)

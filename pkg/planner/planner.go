@@ -14,7 +14,9 @@
 //     IDs as the reason.
 //     - Compatibility == Review       -> Excluded unless opts.IncludeReview
 //     is true.
-//     - Compatibility == Compatible   -> Included.
+//     - Compatibility == Compatible   -> Included, unless the kind cannot
+//     be patched in place (standalone Pod, Job), in which case it is
+//     Excluded with an actionable reason (see kindMigrationBlocker).
 //
 //  2. Score the included workloads via ordering.Order(). The orderer also
 //     tie-breaks deterministically on (Namespace, Kind, Name).
@@ -82,23 +84,35 @@ func Plan(report *schema.ScanReport, opts Options) (*schema.MigrationPlan, error
 					commaJoinErrorReasons(w.Reasons),
 				),
 			})
+			continue
 		case schema.CompatibilityReview:
-			if effective.IncludeReview {
-				included = append(included, w)
+			if !effective.IncludeReview {
+				excluded = append(excluded, schema.ExcludedWorkload{
+					Target:        toWorkloadRef(w),
+					Compatibility: w.Compatibility,
+					Reason: fmt.Sprintf(
+						"workload needs review (use --include-review to plan anyway): %s",
+						commaJoinWarnReasons(w.Reasons),
+					),
+				})
 				continue
 			}
+		}
+
+		// Compatible (or Review with the opt-in): one last gate. Some
+		// kinds cannot be migrated by patching them in place, because the
+		// Kubernetes API rejects the mutation outright. Excluding them
+		// here (rather than letting apply fail per-step with a raw 422)
+		// gives the operator an actionable reason in the plan itself.
+		if blocker := kindMigrationBlocker(w.Kind); blocker != "" {
 			excluded = append(excluded, schema.ExcludedWorkload{
 				Target:        toWorkloadRef(w),
 				Compatibility: w.Compatibility,
-				Reason: fmt.Sprintf(
-					"workload needs review (use --include-review to plan anyway): %s",
-					commaJoinWarnReasons(w.Reasons),
-				),
+				Reason:        "cannot patch in place: " + blocker,
 			})
-		default:
-			// Compatible (default).
-			included = append(included, w)
+			continue
 		}
+		included = append(included, w)
 	}
 
 	// 2 + 3. Score, sort, build steps.
@@ -127,14 +141,7 @@ func Plan(report *schema.ScanReport, opts Options) (*schema.MigrationPlan, error
 	// from the hash on purpose: re-planning the same scan moments later
 	// must produce the same PlanHash so namespace-annotation idempotency
 	// works across operator runs.
-	hashIn := struct {
-		Steps   []schema.PlanStep     `json:"steps"`
-		Options schema.PlannerOptions `json:"options"`
-	}{
-		Steps:   steps,
-		Options: effective,
-	}
-	planHash, err := hashSteps(hashIn)
+	planHash, err := ComputePlanHash(steps, effective)
 	if err != nil {
 		return nil, fmt.Errorf("planner: computing plan hash: %w", err)
 	}
@@ -157,6 +164,31 @@ func Plan(report *schema.ScanReport, opts Options) (*schema.MigrationPlan, error
 		Excluded: excluded,
 	}
 	return plan, nil
+}
+
+// kindMigrationBlocker returns a non-empty reason when the given kind
+// cannot be migrated by patching the live object, and "" when in-place
+// patching is allowed.
+//
+// The two blocked kinds are blocked by the Kubernetes API itself, not by
+// agentmoat policy:
+//
+//   - Pod: `spec.runtimeClassName` is immutable on a running Pod (only
+//     container images, activeDeadlineSeconds, and additive tolerations
+//     may change). A patch would be rejected with 422 Forbidden.
+//   - Job: `spec.template` is immutable after creation; the API rejects
+//     the patch with "field is immutable". CronJobs are fine: their
+//     `spec.jobTemplate` is mutable and governs future Jobs.
+func kindMigrationBlocker(kind string) string {
+	switch kind {
+	case "Pod":
+		return "a running Pod's spec.runtimeClassName is immutable; " +
+			"re-create the Pod (ideally under a controller) with runtimeClassName set"
+	case "Job":
+		return "a Job's spec.template is immutable after creation; " +
+			"re-create the Job with runtimeClassName set (CronJobs migrate via their jobTemplate)"
+	}
+	return ""
 }
 
 // toWorkloadRef projects a WorkloadResult down to the WorkloadRef shape
@@ -214,11 +246,32 @@ func commaJoinWarnReasons(r []schema.Reason) string {
 	return out
 }
 
-// hashSteps computes a SHA-256 hex digest of v. The marshaling step uses
-// encoding/json with the schema struct tags, so the hash is stable across
-// runs as long as the struct shapes do not change.
-func hashSteps(v any) (string, error) {
-	data, err := json.Marshal(v)
+// ComputePlanHash returns the SHA-256 hex digest of a plan's content:
+// its ordered steps plus the planner options that shaped them. This is
+// the value stored in MigrationPlan.Metadata.PlanHash and stamped onto
+// namespaces as the agentmoat.io/plan-hash annotation.
+//
+// Exported so consumers of a plan file (the loader in pkg/agentmoat) can
+// recompute the hash and reject a plan whose metadata.planHash no longer
+// matches its steps (a hand-edited or corrupted file). The marshaling
+// step uses encoding/json with the schema struct tags, so the hash is
+// stable across runs as long as the struct shapes do not change.
+func ComputePlanHash(steps []schema.PlanStep, opts schema.PlannerOptions) (string, error) {
+	// Normalize nil to an empty slice: a freshly planned document always
+	// carries a non-nil (possibly empty) step list, but a plan round-
+	// tripped through YAML/JSON may deserialize an absent list as nil.
+	// Both must hash identically.
+	if steps == nil {
+		steps = []schema.PlanStep{}
+	}
+	hashIn := struct {
+		Steps   []schema.PlanStep     `json:"steps"`
+		Options schema.PlannerOptions `json:"options"`
+	}{
+		Steps:   steps,
+		Options: opts,
+	}
+	data, err := json.Marshal(hashIn)
 	if err != nil {
 		return "", err
 	}

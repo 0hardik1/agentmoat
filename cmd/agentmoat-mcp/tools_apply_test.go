@@ -20,6 +20,7 @@ import (
 
 	"github.com/0hardik1/agentmoat/internal/audit"
 	"github.com/0hardik1/agentmoat/internal/schema"
+	"github.com/0hardik1/agentmoat/pkg/planner"
 )
 
 // writeApplyPlan emits a one-step MigrationPlan on disk targeting the
@@ -28,10 +29,6 @@ import (
 func writeApplyPlan(t *testing.T, ns, name string) string {
 	t.Helper()
 	plan := schema.NewMigrationPlan()
-	plan.Metadata = schema.PlanMetadata{
-		GeneratedAt: "2026-05-22T12:00:00Z",
-		PlanHash:    "test-hash",
-	}
 	plan.Spec = schema.PlanSpec{
 		Summary: schema.PlanSummary{Total: 1, Included: 1},
 		Options: schema.PlannerOptions{RuntimeClassName: "gvisor"},
@@ -42,6 +39,16 @@ func writeApplyPlan(t *testing.T, ns, name string) string {
 			RuntimeClassName: "gvisor",
 		}},
 		Excluded: []schema.ExcludedWorkload{},
+	}
+	// The loader verifies metadata.planHash against the steps/options, so
+	// the fixture must carry the real content hash, not a placeholder.
+	hash, err := planner.ComputePlanHash(plan.Spec.Steps, plan.Spec.Options)
+	if err != nil {
+		t.Fatalf("compute plan hash: %v", err)
+	}
+	plan.Metadata = schema.PlanMetadata{
+		GeneratedAt: "2026-05-22T12:00:00Z",
+		PlanHash:    hash,
 	}
 	data, err := yaml.Marshal(plan)
 	if err != nil {

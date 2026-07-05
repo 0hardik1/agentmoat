@@ -25,10 +25,10 @@ gVisor-shaped is demoted to `mismatch` even when the API field is correct.
 ## Why these exact codes
 
 - `0` and `1` are the universal "success" and "generic error" conventions.
-- `2` is reserved (per `man 2`) for misuse in many CLIs, but here we
-  repurpose it for "completed successfully but the answer is bad news"
-  because that pattern is widely understood (think `grep` returning 1
-  on no matches).
+- `2` conventionally signals "misuse of shell builtins" in Bash, but many
+  CLIs repurpose it. Here it means "completed successfully but the answer
+  is bad news", a widely understood pattern (think `grep` returning 1 on
+  no matches).
 - `3` and `4` are application-specific. They never collide with shell
   conventions (126 for "found but not executable", 127 for "not found").
 
@@ -36,16 +36,24 @@ gVisor-shaped is demoted to `mismatch` even when the API field is correct.
 
 ```bash
 # Fail the pipeline only on real errors, not on "found incompatible workloads".
-agentmoat scan --output json > scan.json || true
-test $? -lt 2 && echo "scan completed (with or without findings)"
-
-# Conversely: fail loudly if anything is incompatible.
-if ! agentmoat scan; then
-  case $? in
-    1) echo "scan errored out, bailing"; exit 1 ;;
-    2) echo "incompatible workloads found, blocking merge"; exit 2 ;;
-  esac
+# Capture the exit code before anything else can overwrite $?.
+rc=0
+agentmoat scan --output json > scan.json || rc=$?
+if [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; then
+  echo "scan completed (with or without findings)"
+else
+  echo "scan errored out ($rc)"; exit "$rc"
 fi
+
+# Conversely: fail loudly if anything is incompatible. (Don't test $?
+# inside an `if ! cmd` branch: the `!` negation rewrites $? to 0.)
+rc=0
+agentmoat scan || rc=$?
+case "$rc" in
+  0) echo "all workloads compatible" ;;
+  2) echo "incompatible workloads found, blocking merge"; exit 2 ;;
+  *) echo "scan errored out, bailing"; exit "$rc" ;;
+esac
 
 # After apply, confirm spec and (optionally) runtime inside the pod.
 agentmoat verify --plan plan.json --in-pod-probe || test $? -eq 4

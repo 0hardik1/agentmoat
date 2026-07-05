@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/0hardik1/agentmoat/internal/audit"
@@ -74,8 +75,7 @@ func Apply(ctx context.Context, opts Options) (*schema.ApplyResult, error) {
 	}
 
 	stepResults := make([]schema.StepResult, 0, len(opts.Plan.Spec.Steps))
-	touchedNamespaces := make(map[string]bool) // ns -> any step applied?
-	allSuccess := make(map[string]bool)        // ns -> all-steps-succeeded?
+	allSuccess := make(map[string]bool) // ns -> all-steps-succeeded?
 	for ns := range existing {
 		allSuccess[ns] = true
 	}
@@ -131,7 +131,6 @@ func Apply(ctx context.Context, opts Options) (*schema.ApplyResult, error) {
 
 		sr.Status = schema.StepStatusApplied
 		stepResults = append(stepResults, sr)
-		touchedNamespaces[ns] = true
 		_, _ = fmt.Fprintf(stderr, "applied: %s/%s %s\n",
 			step.Target.Kind, step.Target.Namespace, step.Target.Name)
 		if opts.EmitEvents {
@@ -163,6 +162,10 @@ func Apply(ctx context.Context, opts Options) (*schema.ApplyResult, error) {
 // Rollback is also idempotent: a fully rolled-back namespace re-runs
 // cleanly and reports every step as already-applied (the annotation is
 // already absent and the spec already lacks runtimeClassName).
+//
+// Rollback only acts on namespaces stamped with THIS plan's hash. A
+// namespace stamped with a different hash is governed by another plan;
+// its steps are reported as skipped and its annotation is preserved.
 func Rollback(ctx context.Context, opts Options) (*schema.RollbackResult, error) {
 	if err := validate(opts); err != nil {
 		return nil, err
@@ -182,7 +185,11 @@ func Rollback(ctx context.Context, opts Options) (*schema.RollbackResult, error)
 	}
 
 	// For rollback, the namespace-level signal is the inverse of apply:
-	// if the annotation is absent the rollback is already-applied.
+	// if the annotation is absent the rollback is already-applied. If the
+	// annotation carries a DIFFERENT plan's hash, this plan is not what
+	// governs the namespace anymore (a newer plan was applied on top);
+	// steps there are skipped rather than blindly un-patched, and the
+	// other plan's annotation is left untouched.
 	existing, err := readAllNamespaceAnnotations(ctx, opts.Client, opts.Plan)
 	if err != nil {
 		return nil, fmt.Errorf("applier: reading namespace annotations: %w", err)
@@ -209,6 +216,23 @@ func Rollback(ctx context.Context, opts Options) (*schema.RollbackResult, error)
 		// namespace; report already-applied (the rollback target state).
 		if existing[ns] == "" {
 			sr.Status = schema.StepStatusAlreadyApplied
+			stepResults = append(stepResults, sr)
+			emitAudit(opts, step, sr, "rollback")
+			continue
+		}
+
+		// If the annotation carries a different plan's hash, a newer plan
+		// governs this namespace. Un-patching now would fight that plan,
+		// and clearing the annotation would erase its idempotency stamp.
+		// Skip the step and tell the operator which way out to take.
+		if opts.Plan.Metadata.PlanHash != "" && existing[ns] != opts.Plan.Metadata.PlanHash {
+			sr.Status = schema.StepStatusSkipped
+			sr.Error = fmt.Sprintf(
+				"namespace %s is stamped with a different plan (hash %s); roll back with that plan, or re-apply this one first",
+				ns, existing[ns])
+			allSuccess[ns] = false // never clear the other plan's stamp
+			_, _ = fmt.Fprintf(stderr, "skipped: %s/%s %s: %s\n",
+				step.Target.Kind, step.Target.Namespace, step.Target.Name, sr.Error)
 			stepResults = append(stepResults, sr)
 			emitAudit(opts, step, sr, "rollback")
 			continue
@@ -439,14 +463,7 @@ func summariseSteps(steps []schema.StepResult) schema.ApplySummary {
 // sortStepResultsByOrder sorts step results by their original Order
 // (1-based) ascending. Used by Rollback, which walks the plan in reverse.
 func sortStepResultsByOrder(steps []schema.StepResult) {
-	for i := 1; i < len(steps); i++ {
-		j := i
-		for j > 0 && steps[j-1].Order > steps[j].Order {
-			steps[j-1], steps[j] = steps[j], steps[j-1]
-			j--
-		}
-	}
+	sort.SliceStable(steps, func(i, j int) bool {
+		return steps[i].Order < steps[j].Order
+	})
 }
-
-// _ keeps the io import live for callers that pass opts.Stderr.
-var _ io.Writer = (io.Writer)(nil)

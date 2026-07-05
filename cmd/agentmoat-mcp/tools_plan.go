@@ -44,10 +44,6 @@ func registerProposePlan(srv *server.MCPServer, deps Deps) {
 			mcp.Description("Include 'review'-class workloads in the plan. Default false (only 'compatible' workloads are included)."),
 			mcp.DefaultBool(false),
 		),
-		mcp.WithNumber("batch_size",
-			mcp.Description("How many workloads to apply per batch before waiting on readiness. 0 uses the planner default.")),
-		mcp.WithNumber("max_parallel",
-			mcp.Description("Maximum patches in flight inside a single batch. 0 uses the planner default.")),
 		mcp.WithString("runtime_class_name",
 			mcp.Description("RuntimeClass name to write into the migrated pod templates. Default 'gvisor' matches the bundled RuntimeClass.")),
 		mcp.WithReadOnlyHintAnnotation(true),
@@ -67,9 +63,12 @@ func registerProposePlan(srv *server.MCPServer, deps Deps) {
 				Stderr:         deps.Stderr,
 				KubeClient:     deps.KubeClient,
 			},
+			// BatchSize / MaxParallel are deliberately NOT exposed as tool
+			// arguments: the v1 applier walks steps serially, so those
+			// fields would only perturb the planHash without changing any
+			// behavior. They stay in the schema (reserved for a future
+			// batched applier) but default to zero here.
 			Planner: schema.PlannerOptions{
-				BatchSize:        intArg(req, "batch_size"),
-				MaxParallel:      intArg(req, "max_parallel"),
 				IncludeReview:    req.GetBool("include_review", false),
 				RuntimeClassName: req.GetString("runtime_class_name", ""),
 			},
@@ -92,26 +91,6 @@ func registerProposePlan(srv *server.MCPServer, deps Deps) {
 		}
 		return marshalResult(plan)
 	})
-}
-
-// intArg pulls a number argument and casts it to int. Returns 0 when the
-// caller omitted the field; the planner treats 0 as "use the default".
-func intArg(req mcp.CallToolRequest, key string) int {
-	args := req.GetArguments()
-	v, ok := args[key]
-	if !ok {
-		return 0
-	}
-	switch x := v.(type) {
-	case float64:
-		return int(x)
-	case int:
-		return x
-	case int64:
-		return int(x)
-	default:
-		return 0
-	}
 }
 
 // loadScanReport reads a ScanReport from disk (JSON or YAML; sigs.k8s.io/yaml

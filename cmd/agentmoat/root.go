@@ -26,7 +26,6 @@ var (
 	flagLabelSelector string
 	flagIncludeSystem bool
 	flagRulesYAML     string
-	flagExplain       bool
 
 	// flagNoColor disables ANSI escapes in the table renderer even when
 	// stdout is a TTY. The CLI honors this AND the NO_COLOR env var (per
@@ -78,8 +77,6 @@ Documentation: see docs/ in the repo or run 'agentmoat explain <topic>'.`,
 		"include kube-system and other kube-* namespaces (default false)")
 	pf.StringVar(&flagRulesYAML, "rules", "",
 		"path to classifier rules YAML override (default: built-in only)")
-	pf.BoolVar(&flagExplain, "explain", false,
-		"add inline educational notes to output where supported")
 	// --no-color and --quiet do not have a short form: there is no widely-
 	// accepted convention for them, and the existing short flags (-A, -l,
 	// -n, -o) already cover the kubectl muscle memory.

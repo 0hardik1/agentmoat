@@ -174,15 +174,23 @@ func defaultKubeconfigPath() string {
 	return filepath.Join(home, ".kube", "config")
 }
 
-// CurrentContext returns the active context name from the kubeconfig that
-// would be loaded by NewClient given the same kubeconfigPath. It is a
-// best-effort lookup used to populate ScanReport.Metadata.Cluster.
+// CurrentContext returns the context name NewClient would use given the
+// same (kubeconfigPath, contextName) pair. It is a best-effort lookup used
+// to populate ScanReport.Metadata.Cluster and its siblings.
+//
+// When contextName is non-empty it wins outright: that is the context the
+// client actually talks to (NewClient overrides current-context with it),
+// so report metadata must record it rather than whatever current-context
+// the kubeconfig file happens to point at.
 //
 // An empty return value is acceptable: it just means "we could not tell"
 // and the caller (the orchestrator) leaves Cluster blank. This is exactly
 // what happens when agentmoat is running in-cluster: there is no context
 // name, only a service-account token.
-func CurrentContext(kubeconfigPath string) string {
+func CurrentContext(kubeconfigPath, contextName string) string {
+	if contextName != "" {
+		return contextName
+	}
 	// Resolve which file to inspect using the same precedence as
 	// loadConfig, minus the in-cluster tier.
 	path := kubeconfigPath

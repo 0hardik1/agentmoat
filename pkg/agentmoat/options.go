@@ -1,6 +1,6 @@
 // Package agentmoat is the public Go entrypoint for the agentmoat toolkit.
 //
-// Both the CLI (`cmd/agentmoat`) and the future MCP server
+// Both the CLI (`cmd/agentmoat`) and the MCP server
 // (`cmd/agentmoat-mcp`) call into this package. Keeping the orchestration
 // here, not in cmd/, is what makes agentmoat embeddable: a third party can
 // `import "github.com/0hardik1/agentmoat/pkg/agentmoat"` and call Scan()
@@ -91,7 +91,7 @@ type ApplyOptions struct {
 	Context        string
 
 	// PlanPath is the path to a MigrationPlan YAML/JSON file on disk.
-	// Required when PlanInline is nil.
+	// Required.
 	PlanPath string
 
 	// DryRun defaults to true: dry-run is the safe default, so callers

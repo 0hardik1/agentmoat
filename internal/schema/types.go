@@ -276,12 +276,15 @@ type PlanSummary struct {
 // plan envelope so re-running planner against the same scan with the same
 // options yields the same plan (determinism).
 type PlannerOptions struct {
-	// BatchSize is the number of workloads the applier will mutate before
-	// pausing to await readiness. Zero means "all in one batch".
+	// BatchSize is RESERVED for a future batched applier. The v1 applier
+	// walks steps serially and ignores this field; it is carried on the
+	// envelope (and folded into the planHash) only so the schema does not
+	// need a version bump when batching lands. Zero means "unset".
 	BatchSize int `json:"batchSize,omitempty" yaml:"batchSize,omitempty"`
 
-	// MaxParallel is the maximum number of patches in flight at one time
-	// within a batch. Zero means "serial".
+	// MaxParallel is RESERVED, like BatchSize. The v1 applier is strictly
+	// serial (see pkg/applier's package doc for why); this field is
+	// echoed back but never honored. Zero means "unset".
 	MaxParallel int `json:"maxParallel,omitempty" yaml:"maxParallel,omitempty"`
 
 	// IncludeReview, when true, allows Review-class workloads into the
@@ -316,11 +319,13 @@ type PlanStep struct {
 	// section 9.4 requires this be true by default.
 	AddToleration bool `json:"addToleration" yaml:"addToleration"`
 
-	// WaitFor names the pod condition the applier should wait on after
-	// patching. One of:
+	// WaitFor is an ADVISORY hint naming the pod condition that marks
+	// this step as converged. The v1 applier does not wait on rollouts
+	// (it patches and moves on); the hint tells the operator (or a
+	// future waiting applier) what to watch. One of:
 	//   "Ready"   the controller's pods are Ready (rolling deploys, etc.)
 	//   "Running" the pod is Running but not necessarily Ready (Jobs, etc.)
-	//   ""        do not wait (default for one-shot Pods and CronJobs).
+	//   ""        nothing to wait on.
 	WaitFor string `json:"waitFor,omitempty" yaml:"waitFor,omitempty"`
 
 	// RiskScore is the integer score the planner used to order this step,
@@ -421,8 +426,10 @@ const (
 	// has already been applied; no mutation was needed.
 	StepStatusAlreadyApplied StepStatus = "already-applied"
 
-	// StepStatusSkipped: the operator declined this step (e.g. via a
-	// future --workload selector), or it was excluded post-plan.
+	// StepStatusSkipped: the step was deliberately not executed. Today
+	// this happens when a rollback finds the namespace stamped with a
+	// different plan's hash (a newer plan governs it); the
+	// StepResult.Error string explains why and what to do instead.
 	StepStatusSkipped StepStatus = "skipped"
 
 	// StepStatusFailed: the API server rejected the patch, or a precheck
@@ -443,8 +450,10 @@ type StepResult struct {
 	// change without running kubectl diff themselves.
 	Patch string `json:"patch,omitempty" yaml:"patch,omitempty"`
 
-	// Error is populated when Status == "failed". Empty otherwise. We use
-	// a string (not a Go error) so the envelope survives JSON round-trips.
+	// Error is populated when Status == "failed" (why the patch was
+	// rejected) or "skipped" (why the step was not attempted). Empty
+	// otherwise. We use a string (not a Go error) so the envelope
+	// survives JSON round-trips.
 	Error string `json:"error,omitempty" yaml:"error,omitempty"`
 }
 

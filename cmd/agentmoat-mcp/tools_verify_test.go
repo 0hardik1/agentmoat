@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
+	"github.com/0hardik1/agentmoat/pkg/planner"
 )
 
 // strPtr is a single-line helper because *string parameters appear in
@@ -54,7 +55,6 @@ func deploymentWithSelector(ns, name string, sel map[string]string) *appsv1.Depl
 func writeVerifyPlan(t *testing.T, ns, name string) string {
 	t.Helper()
 	plan := schema.NewMigrationPlan()
-	plan.Metadata = schema.PlanMetadata{GeneratedAt: "2026-05-22T12:00:00Z", PlanHash: "h"}
 	plan.Spec = schema.PlanSpec{
 		Summary: schema.PlanSummary{Total: 1, Included: 1},
 		Options: schema.PlannerOptions{RuntimeClassName: "gvisor"},
@@ -66,6 +66,12 @@ func writeVerifyPlan(t *testing.T, ns, name string) string {
 		}},
 		Excluded: []schema.ExcludedWorkload{},
 	}
+	// The loader verifies metadata.planHash against the steps/options.
+	hash, err := planner.ComputePlanHash(plan.Spec.Steps, plan.Spec.Options)
+	if err != nil {
+		t.Fatalf("compute plan hash: %v", err)
+	}
+	plan.Metadata = schema.PlanMetadata{GeneratedAt: "2026-05-22T12:00:00Z", PlanHash: hash}
 	data, _ := yaml.Marshal(plan)
 	path := filepath.Join(t.TempDir(), "plan.yaml")
 	if err := os.WriteFile(path, data, 0o600); err != nil {

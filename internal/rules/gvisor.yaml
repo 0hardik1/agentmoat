@@ -7,8 +7,11 @@
 # can dial a rule's severity (e.g. demote `host-path-mount` from warn to
 # info for their environment) without recompiling.
 #
-# Fields here OVERRIDE the matching built-in registration in
-# pkg/classifier/builtin_rules.go. Unknown IDs are reported as warnings.
+# Only the `severity` field is honored at runtime: it overrides the
+# matching built-in registration in pkg/classifier/builtin_rules.go.
+# The description/remediationUrl/source fields are documentation for
+# readers of this file (the shipped text lives in the Go source).
+# Unknown IDs are reported as warnings and skipped.
 overrides:
   - id: raw-socket
     severity: error

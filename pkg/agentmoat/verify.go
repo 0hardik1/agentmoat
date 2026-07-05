@@ -63,7 +63,7 @@ func Verify(ctx context.Context, opts VerifyOptions) (*schema.VerifyReport, erro
 		InPodProbe:       opts.InPodProbe,
 		Exec:             opts.ExecRunner,
 		Stderr:           stderr,
-		Cluster:          kube.CurrentContext(opts.KubeconfigPath),
+		Cluster:          kube.CurrentContext(opts.KubeconfigPath, opts.Context),
 		AgentmoatVersion: Version,
 	})
 	if err != nil {
