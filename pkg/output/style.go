@@ -133,6 +133,10 @@ const (
 //	verify:  ok            -> ✓ Success
 //	verify:  mismatch      -> ⚠ Warn
 //	verify:  error         -> ✗ Danger
+//	preflight: ready       -> ✓ Success
+//	preflight: blocked     -> ✗ Danger
+//	finding: warn          -> ⚠ Warn   (error shares the verify mapping)
+//	finding: info          -> • Info
 //
 // Unknown statuses fall through to the raw status string with no symbol
 // and no color: that way new schema values surface in the table during
@@ -164,6 +168,15 @@ func StatusBadge(s *Styles, status string) string {
 		return symbolWarn + " " + s.Warn.Render(status)
 	case "error":
 		return symbolFail + " " + s.Danger.Render(status)
+	// preflight readiness and finding severities
+	case "ready":
+		return symbolOK + " " + s.Success.Render(status)
+	case "blocked":
+		return symbolFail + " " + s.Danger.Render(status)
+	case "warn":
+		return symbolWarn + " " + s.Warn.Render(status)
+	case "info":
+		return symbolDot + " " + s.Info.Render(status)
 	default:
 		return status
 	}

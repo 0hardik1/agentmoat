@@ -124,7 +124,7 @@ func Plan(report *schema.ScanReport, opts Options) (*schema.MigrationPlan, error
 			Target:           toWorkloadRef(s.Workload),
 			Action:           "set-runtime-class",
 			RuntimeClassName: effective.RuntimeClassName,
-			AddToleration:    true,
+			AddToleration:    effective.AddToleration,
 			WaitFor:          waitForKind(s.Workload.Kind),
 			RiskScore:        s.Score,
 			Notes:            buildNotes(s.Workload),

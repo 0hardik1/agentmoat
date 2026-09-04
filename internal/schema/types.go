@@ -33,6 +33,7 @@ const (
 	KindRollbackResult  = "RollbackResult"
 	KindVerifyReport    = "VerifyReport"
 	KindExplainDocument = "ExplainDocument"
+	KindPreflightReport = "PreflightReport"
 )
 
 // DefaultRuntimeClassName is the RuntimeClass name that the applier writes
@@ -41,9 +42,11 @@ const (
 // Public so the MCP server can include it in tool documentation.
 const DefaultRuntimeClassName = "gvisor"
 
-// DefaultGVisorToleration is the toleration injected onto every migrated
-// pod template, matching the `runtime=gvisor:NoSchedule` taint that the
-// Packer-built nodes carry.
+// GVisorTaint* describe the `runtime=gvisor:NoSchedule` taint an operator
+// may put on gVisor nodes. Placement normally comes from the RuntimeClass's
+// scheduling block (nodeSelector + tolerations, merged at admission); the
+// applier injects a matching pod toleration only when the plan opted in via
+// PlannerOptions.AddToleration (`agentmoat plan --add-toleration`).
 const (
 	GVisorTaintKey    = "runtime"
 	GVisorTaintValue  = "gvisor"
@@ -121,6 +124,13 @@ type ReportMetadata struct {
 	// AgentmoatVersion records which binary produced this report. Useful
 	// for replaying scans and debugging classifier-rule drift over time.
 	AgentmoatVersion string `json:"agentmoatVersion" yaml:"agentmoatVersion"`
+
+	// ClusterFacts is the read-only node + RuntimeClass inventory the
+	// scan collected (see preflight.go). Nil when the scan ran with
+	// --no-cluster-facts or when the identity lacked get/list on nodes
+	// and runtimeclasses; the scan itself still succeeds. `plan` reads
+	// this to warn when no node can host the plan.
+	ClusterFacts *ClusterFacts `json:"clusterFacts,omitempty" yaml:"clusterFacts,omitempty"`
 }
 
 // ReportSpec is the payload of a ScanReport: a summary plus the per-workload
@@ -263,6 +273,12 @@ type PlanSpec struct {
 	// the reason. Always populated (may be empty) so consumers do not need
 	// to nil-check.
 	Excluded []ExcludedWorkload `json:"excluded" yaml:"excluded"`
+
+	// Warnings are plan-level cautions derived from the source scan's
+	// ClusterFacts (for example: no Ready node matches the RuntimeClass
+	// nodeSelector). They never change the steps and are excluded from
+	// the plan hash. `agentmoat apply` re-checks the live cluster anyway.
+	Warnings []PlanWarning `json:"warnings,omitempty" yaml:"warnings,omitempty"`
 }
 
 // PlanSummary is the bucketed count of plan contents.
@@ -294,6 +310,14 @@ type PlannerOptions struct {
 	// RuntimeClassName overrides the default "gvisor" RuntimeClass name.
 	// Empty means use schema.DefaultRuntimeClassName.
 	RuntimeClassName string `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
+
+	// AddToleration, when true, makes every step also inject the
+	// runtime=gvisor:NoSchedule toleration into the pod template. Default
+	// false: placement comes from RuntimeClass.scheduling, which admission
+	// merges into every pod that requests the class. Opt in only for a
+	// RuntimeClass that lacks scheduling.tolerations on a cluster whose
+	// gVisor nodes carry that exact taint.
+	AddToleration bool `json:"addToleration,omitempty" yaml:"addToleration,omitempty"`
 }
 
 // PlanStep is one migration action. The applier consumes these in order.
@@ -315,8 +339,10 @@ type PlanStep struct {
 	RuntimeClassName string `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
 
 	// AddToleration, when true, also adds the runtime=gvisor:NoSchedule
-	// toleration so the pod can land on a tainted gVisor node. Plan.md
-	// section 9.4 requires this be true by default.
+	// toleration to the pod template. False by default since placement is
+	// the RuntimeClass's job (scheduling.nodeSelector + tolerations are
+	// merged at admission); set via `agentmoat plan --add-toleration`.
+	// The field has no omitempty so old plan files keep hashing the same.
 	AddToleration bool `json:"addToleration" yaml:"addToleration"`
 
 	// WaitFor is an ADVISORY hint naming the pod condition that marks
@@ -394,6 +420,12 @@ type ApplyMetadata struct {
 	// DryRun records whether the apply was a dry-run (no mutations) or a
 	// real apply. Dry-run is the default; callers opt in to mutate.
 	DryRun bool `json:"dryRun" yaml:"dryRun"`
+
+	// Preflight summarizes the cluster preflight that ran before the
+	// steps (see preflight.go). Nil when --skip-preflight was passed or
+	// for rollback, which runs no preflight. Ready=false means every step
+	// was skipped and nothing was mutated; the CLI exits 5.
+	Preflight *PreflightSummary `json:"preflight,omitempty" yaml:"preflight,omitempty"`
 }
 
 // ApplySpec is the payload of an ApplyResult.
@@ -403,6 +435,11 @@ type ApplySpec struct {
 	// Steps is the per-step outcome, in the same order as the source
 	// MigrationPlan.Spec.Steps.
 	Steps []StepResult `json:"steps" yaml:"steps"`
+
+	// PreflightFindings carries the preflight findings (all severities)
+	// so a blocked apply explains itself in the same document. Empty when
+	// the preflight was skipped or found nothing.
+	PreflightFindings []PreflightFinding `json:"preflightFindings,omitempty" yaml:"preflightFindings,omitempty"`
 }
 
 // ApplySummary is the bucketed count of step outcomes.
@@ -604,6 +641,11 @@ type VerifyResult struct {
 	// Probe holds the in-pod probe result when --in-pod-probe is on.
 	// Nil when the probe was skipped.
 	Probe *ProbeResult `json:"probe,omitempty" yaml:"probe,omitempty"`
+
+	// NodePlacement reports whether the step's pods run on nodes the
+	// RuntimeClass nodeSelector selects (see preflight.go). Nil when the
+	// spec-level check already failed, so placement was not evaluated.
+	NodePlacement *NodePlacement `json:"nodePlacement,omitempty" yaml:"nodePlacement,omitempty"`
 }
 
 // ProbeResult is the output of one in-pod gVisor probe. The verifier picks a

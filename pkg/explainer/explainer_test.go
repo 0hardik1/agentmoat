@@ -26,6 +26,7 @@ func TestListsAllTopics(t *testing.T) {
 		"compatibility",
 		"gvisor",
 		"performance",
+		"preflight",
 		"runtimeclass",
 		"threat-model",
 	}

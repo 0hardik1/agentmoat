@@ -34,21 +34,29 @@ func registerScanCluster(srv *server.MCPServer, deps Deps) {
 			mcp.Description("Kubernetes-style label selector applied to every list call. Empty means no filter.")),
 		mcp.WithString("rules_yaml_path",
 			mcp.Description("Optional path to a classifier rules YAML override (layered on top of the built-in rule set).")),
+		mcp.WithString("runtime_class_name",
+			mcp.Description("RuntimeClass to inspect for metadata.clusterFacts (node and RuntimeClass inventory). Default 'gvisor'.")),
+		mcp.WithBoolean("no_cluster_facts",
+			mcp.Description("Skip the node and RuntimeClass reads; the report omits metadata.clusterFacts. Default false."),
+			mcp.DefaultBool(false),
+		),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
 
 	srv.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		nsList := req.GetStringSlice("namespaces", nil)
 		opts := agentmoat.ScanOptions{
-			KubeconfigPath: req.GetString("kubeconfig_path", ""),
-			Context:        req.GetString("context", ""),
-			Namespaces:     nsList,
-			AllNamespaces:  len(nsList) == 0,
-			IncludeSystem:  req.GetBool("include_system", false),
-			LabelSelector:  req.GetString("label_selector", ""),
-			RulesYAMLPath:  req.GetString("rules_yaml_path", ""),
-			Stderr:         deps.Stderr,
-			KubeClient:     deps.KubeClient,
+			KubeconfigPath:   req.GetString("kubeconfig_path", ""),
+			Context:          req.GetString("context", ""),
+			Namespaces:       nsList,
+			AllNamespaces:    len(nsList) == 0,
+			IncludeSystem:    req.GetBool("include_system", false),
+			LabelSelector:    req.GetString("label_selector", ""),
+			RulesYAMLPath:    req.GetString("rules_yaml_path", ""),
+			RuntimeClassName: req.GetString("runtime_class_name", ""),
+			SkipClusterFacts: req.GetBool("no_cluster_facts", false),
+			Stderr:           deps.Stderr,
+			KubeClient:       deps.KubeClient,
 		}
 		report, err := agentmoat.Scan(ctx, opts)
 		if err != nil {

@@ -49,9 +49,31 @@ accounting; see `deploy/runtimeclass.yaml`.
 
 | Field | Purpose |
 | --- | --- |
-| `scheduling.nodeSelector` | Pin gVisor pods to nodes that actually have `runsc` installed (label `runtime: gvisor`). |
+| `scheduling.nodeSelector` | Pin gVisor pods to nodes that actually have `runsc` installed (label `runtime: gvisor`). agentmoat treats a missing selector as an error (`agentmoat preflight` finding `runtimeclass-no-node-selector`). |
 | `scheduling.tolerations` | Pair with a `runtime=gvisor:NoSchedule` taint on the gVisor nodes so other workloads stay off them. |
 | `overhead.podFixed` | Tell the scheduler about Sentry's resident memory and CPU overhead (~140Mi / 250m by default). |
+
+## How the scheduling block reaches the pod
+
+When a pod requests a RuntimeClass, the RuntimeClass admission controller
+(enabled by default since Kubernetes 1.16) merges the class's
+`scheduling.nodeSelector` into the pod's own `nodeSelector` and unions its
+`scheduling.tolerations` into the pod's tolerations. Two consequences:
+
+- The pod spec you write (or agentmoat patches) needs only
+  `runtimeClassName`. Placement follows from the RuntimeClass. This is why
+  `agentmoat apply` patches nothing else by default; `plan --add-toleration`
+  exists for a RuntimeClass that lacks `scheduling.tolerations`.
+- If the pod already has a `nodeSelector` that conflicts with the class's,
+  admission rejects the pod. A workload pinned to a `runc` node pool by its
+  own labels cannot be moved by setting `runtimeClassName` alone.
+
+`agentmoat preflight` reads the RuntimeClass and the nodes and reports
+whether that merge can land anywhere: the selector must match at least one
+Ready node whose taints the class tolerates, and those nodes must be able to
+run `runsc` (not EKS Auto Mode, not Bottlerocket). See
+[`preflight.md`](preflight.md). `agentmoat verify` later confirms that the
+pods' hosting nodes satisfy the selector.
 
 ## When to NOT use RuntimeClass
 

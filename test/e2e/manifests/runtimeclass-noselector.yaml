@@ -1,0 +1,19 @@
+# agentmoat e2e: a deliberately misconfigured RuntimeClass.
+#
+# The handler is the real gvisor handler the kind worker registers, but
+# there is no scheduling.nodeSelector, so nothing steers pods that request
+# this class onto the gVisor node. That is exactly the misconfiguration
+# `agentmoat preflight` exists to catch:
+#
+#   agentmoat preflight --runtime-class gvisor-noselector
+#     -> exit 5, finding runtimeclass-no-node-selector
+#
+#   agentmoat apply --plan <plan targeting gvisor-noselector>
+#     -> exit 5, every step skipped, nothing patched
+#
+# scripts/e2e.sh applies this next to runtimeclass.yaml and asserts both.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor-noselector
+handler: gvisor

@@ -31,14 +31,15 @@ byte-identical: same Go struct, same `json:` tags, same APIVersion
 
 ## 3. Tools, resources, prompts
 
-### Tools (7)
+### Tools (8)
 
 | Tool                | Orchestrator                  | Mutating | Notes                                                                |
 |---------------------|-------------------------------|----------|----------------------------------------------------------------------|
-| `scan_cluster`      | `agentmoat.Scan`              | no       | Returns a `ScanReport`.                                              |
+| `scan_cluster`      | `agentmoat.Scan`              | no       | Returns a `ScanReport` (with `metadata.clusterFacts`; `no_cluster_facts` skips them). |
+| `preflight_cluster` | `agentmoat.Preflight`         | no       | Returns a `PreflightReport`. `spec.summary.ready=false` means `apply_plan` will refuse to run. |
 | `assess_workload`   | `agentmoat.AssessWorkload`    | no       | Returns a `WorkloadResult` for one named workload.                   |
-| `propose_plan`      | `agentmoat.Plan`              | no       | Same scan in -> same `planHash`. Accepts `scan_report_path` to reuse a saved scan. |
-| `apply_plan`        | `agentmoat.Apply`             | YES      | Defaults to dry-run. Must set `"dry_run": false` explicitly to mutate. |
+| `propose_plan`      | `agentmoat.Plan`              | no       | Same scan in -> same `planHash`. Accepts `scan_report_path` to reuse a saved scan; `add_toleration` opts into the pod toleration. |
+| `apply_plan`        | `agentmoat.Apply`             | YES      | Defaults to dry-run. Must set `"dry_run": false` explicitly to mutate. Runs the preflight first; `skip_preflight` bypasses it. |
 | `rollback_plan`     | `agentmoat.Rollback`          | YES      | Same dry-run gate as `apply_plan`.                                   |
 | `verify_migration`  | `agentmoat.Verify`            | no       | Set `in_pod_probe=true` to also exec a /proc-and-uname probe.        |
 | `explain`           | `agentmoat.Explain`           | no       | Offline; reads the embedded docs.                                    |
@@ -52,6 +53,15 @@ distinguishes "field omitted" from "field set to `false`":
 
 A non-boolean `dry_run` value is rejected with a structured tool-result
 error. This mirrors the CLI's load-bearing `--dry-run=true` default.
+
+**Preflight gate.** `apply_plan` runs `agentmoat.Preflight` before its
+first step, in dry-run too. On an error finding it returns a normal
+`ApplyResult` (not a tool error) with `metadata.preflight.ready: false`,
+every step `skipped`, and the findings under `spec.preflightFindings`;
+nothing is mutated. An agent should call `preflight_cluster` first, show the
+operator the remediation text, and only pass `"skip_preflight": true` when
+the operator has confirmed the cluster can host the RuntimeClass anyway.
+See [`preflight.md`](preflight.md) for the finding ids.
 
 ### Resources (2, read-only)
 

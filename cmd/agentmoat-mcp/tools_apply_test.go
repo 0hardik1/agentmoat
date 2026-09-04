@@ -12,6 +12,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	nodev1 "k8s.io/api/node/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -21,6 +22,7 @@ import (
 	"github.com/0hardik1/agentmoat/internal/audit"
 	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/planner"
+	"github.com/0hardik1/agentmoat/pkg/preflight"
 )
 
 // writeApplyPlan emits a one-step MigrationPlan on disk targeting the
@@ -61,11 +63,29 @@ func writeApplyPlan(t *testing.T, ns, name string) string {
 	return path
 }
 
-// seededApplyClient returns a fake clientset pre-loaded with the
-// namespace and deployment the test plan targets, so a real apply call
-// has somewhere to write the patch.
-func seededApplyClient(ns, name string) *fake.Clientset {
-	return fake.NewSimpleClientset(
+// gvisorReadyObjects are the RuntimeClass and the one Ready, labeled node
+// the apply preflight needs to say "ready". Every apply fixture includes
+// them; the blocked-preflight tests leave them out on purpose.
+func gvisorReadyObjects() []runtime.Object {
+	return []runtime.Object{
+		&nodev1.RuntimeClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "gvisor"},
+			Handler:    "gvisor",
+			Scheduling: &nodev1.Scheduling{NodeSelector: map[string]string{"runtime": "gvisor"}},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "gv-1", Labels: map[string]string{"runtime": "gvisor"}},
+			Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+			}},
+		},
+	}
+}
+
+// workloadObjects are the namespace and deployment the test plan targets,
+// so a real apply call has somewhere to write the patch.
+func workloadObjects(ns, name string) []runtime.Object {
+	return []runtime.Object{
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}},
 		&appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
@@ -75,7 +95,19 @@ func seededApplyClient(ns, name string) *fake.Clientset {
 				}},
 			},
 		},
-	)
+	}
+}
+
+// seededApplyClient returns a fake clientset pre-loaded with the workload
+// plus a gVisor-ready cluster (RuntimeClass + labeled Ready node).
+func seededApplyClient(ns, name string) *fake.Clientset {
+	return fake.NewSimpleClientset(append(workloadObjects(ns, name), gvisorReadyObjects()...)...)
+}
+
+// runcOnlyApplyClient is the workload with no RuntimeClass and no gVisor
+// node: the cluster the preflight must block.
+func runcOnlyApplyClient(ns, name string) *fake.Clientset {
+	return fake.NewSimpleClientset(workloadObjects(ns, name)...)
 }
 
 // patchCount returns the number of `patch` actions the fake recorded
@@ -160,6 +192,93 @@ func TestApplyPlanHandler_ExplicitFalseMutates(t *testing.T) {
 	}
 	if got := patchCount(client); got == 0 {
 		t.Errorf("explicit dry_run=false produced 0 patches; applier did not run")
+	}
+}
+
+// TestApplyPlanHandler_BlockedByPreflight: a cluster with no RuntimeClass
+// yields an ApplyResult (not a tool error) with every step skipped, the
+// preflight summary not ready, the findings attached, and zero patches,
+// even though the caller asked for a real apply.
+func TestApplyPlanHandler_BlockedByPreflight(t *testing.T) {
+	t.Setenv(audit.EnvPathOverride, filepath.Join(t.TempDir(), "audit.jsonl"))
+
+	ns, name := "agentmoat-test", "web"
+	client := runcOnlyApplyClient(ns, name)
+	srv := newTestServer(client)
+
+	result, err := callTool(t, srv, "apply_plan", map[string]any{
+		"plan_path":     writeApplyPlan(t, ns, name),
+		"dry_run":       false,
+		"emit_events":   false,
+		"audit_enabled": false,
+	})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var ar schema.ApplyResult
+	readTool(t, result, &ar)
+	if ar.Metadata.Preflight == nil || ar.Metadata.Preflight.Ready {
+		t.Fatalf("Metadata.Preflight = %+v, want not ready", ar.Metadata.Preflight)
+	}
+	if ar.Spec.Summary.Skipped != 1 || ar.Spec.Summary.Applied != 0 || len(ar.Spec.Steps) != 1 {
+		t.Fatalf("Summary = %+v steps=%d", ar.Spec.Summary, len(ar.Spec.Steps))
+	}
+	if ar.Spec.Steps[0].Status != schema.StepStatusSkipped || !contains(ar.Spec.Steps[0].Error, preflight.FindingRuntimeClassMissing) {
+		t.Fatalf("step = %+v", ar.Spec.Steps[0])
+	}
+	if len(ar.Spec.PreflightFindings) == 0 || ar.Spec.PreflightFindings[0].ID != preflight.FindingRuntimeClassMissing {
+		t.Fatalf("PreflightFindings = %+v", ar.Spec.PreflightFindings)
+	}
+	if got := patchCount(client); got != 0 {
+		t.Errorf("blocked apply produced %d patch actions, want 0", got)
+	}
+}
+
+// TestApplyPlanHandler_SkipPreflight: the escape hatch runs the applier
+// against the same runc-only cluster and records no preflight summary.
+func TestApplyPlanHandler_SkipPreflight(t *testing.T) {
+	t.Setenv(audit.EnvPathOverride, filepath.Join(t.TempDir(), "audit.jsonl"))
+
+	ns, name := "agentmoat-test", "web"
+	client := runcOnlyApplyClient(ns, name)
+	srv := newTestServer(client)
+
+	result, err := callTool(t, srv, "apply_plan", map[string]any{
+		"plan_path":      writeApplyPlan(t, ns, name),
+		"skip_preflight": true,
+	})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var ar schema.ApplyResult
+	readTool(t, result, &ar)
+	if ar.Metadata.Preflight != nil {
+		t.Errorf("Metadata.Preflight = %+v, want nil when skipped", ar.Metadata.Preflight)
+	}
+	if ar.Spec.Summary.Applied != 1 {
+		t.Errorf("Summary.Applied = %d, want 1 (dry-run applied)", ar.Spec.Summary.Applied)
+	}
+}
+
+// TestApplyPlanHandler_ReadyPreflightAttached: a passing preflight rides
+// along on the result so the agent sees warnings next to the steps.
+func TestApplyPlanHandler_ReadyPreflightAttached(t *testing.T) {
+	t.Setenv(audit.EnvPathOverride, filepath.Join(t.TempDir(), "audit.jsonl"))
+
+	ns, name := "agentmoat-test", "web"
+	srv := newTestServer(seededApplyClient(ns, name))
+	result, err := callTool(t, srv, "apply_plan", map[string]any{"plan_path": writeApplyPlan(t, ns, name)})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var ar schema.ApplyResult
+	readTool(t, result, &ar)
+	if ar.Metadata.Preflight == nil || !ar.Metadata.Preflight.Ready {
+		t.Fatalf("Metadata.Preflight = %+v, want ready", ar.Metadata.Preflight)
+	}
+	// The fixture RuntimeClass has no overhead: one info finding rides along.
+	if ar.Metadata.Preflight.Info != 1 || len(ar.Spec.PreflightFindings) != 1 {
+		t.Fatalf("expected the info finding attached: %+v / %+v", ar.Metadata.Preflight, ar.Spec.PreflightFindings)
 	}
 }
 

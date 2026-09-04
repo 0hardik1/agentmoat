@@ -278,8 +278,8 @@ func TestPlan_PerStepFields(t *testing.T) {
 	if deploymentStep.RuntimeClassName != "gvisor" {
 		t.Errorf("RuntimeClassName default: got %q want %q", deploymentStep.RuntimeClassName, "gvisor")
 	}
-	if !deploymentStep.AddToleration {
-		t.Errorf("AddToleration: got false, want true (every step adds the toleration)")
+	if deploymentStep.AddToleration {
+		t.Errorf("AddToleration: got true, want false (placement is the RuntimeClass's job unless --add-toleration)")
 	}
 	if deploymentStep.WaitFor != "Ready" {
 		t.Errorf("Deployment WaitFor: got %q want %q", deploymentStep.WaitFor, "Ready")
@@ -291,6 +291,40 @@ func TestPlan_PerStepFields(t *testing.T) {
 	}
 	if stsStep.WaitFor != "Ready" {
 		t.Errorf("StatefulSet WaitFor: got %q want %q", stsStep.WaitFor, "Ready")
+	}
+}
+
+// TestPlan_AddTolerationOptIn: the toleration is off by default (the
+// RuntimeClass's scheduling block owns placement) and on for every step
+// when the option is set. Because PlannerOptions is hashed, the two plans
+// must carry different hashes: an operator cannot apply an opt-in plan
+// against a namespace stamped by the default one and be told
+// "already-applied".
+func TestPlan_AddTolerationOptIn(t *testing.T) {
+	base, err := Plan(fixtureReport(), Options{})
+	if err != nil {
+		t.Fatalf("Plan(default): %v", err)
+	}
+	optIn, err := Plan(fixtureReport(), Options{AddToleration: true})
+	if err != nil {
+		t.Fatalf("Plan(AddToleration): %v", err)
+	}
+	if len(optIn.Spec.Steps) == 0 || len(optIn.Spec.Steps) != len(base.Spec.Steps) {
+		t.Fatalf("step count: default %d, opt-in %d", len(base.Spec.Steps), len(optIn.Spec.Steps))
+	}
+	for i, st := range optIn.Spec.Steps {
+		if !st.AddToleration {
+			t.Errorf("step %d: AddToleration false with the option set", i)
+		}
+		if base.Spec.Steps[i].AddToleration {
+			t.Errorf("step %d: AddToleration true without the option", i)
+		}
+	}
+	if !optIn.Spec.Options.AddToleration {
+		t.Errorf("Spec.Options.AddToleration not recorded on the plan")
+	}
+	if base.Metadata.PlanHash == optIn.Metadata.PlanHash {
+		t.Errorf("planHash identical with and without AddToleration; the option must be hashed")
 	}
 }
 

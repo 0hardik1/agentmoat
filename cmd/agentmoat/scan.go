@@ -20,8 +20,14 @@ import (
 	"github.com/0hardik1/agentmoat/pkg/output"
 )
 
+// Scan-specific flag values.
+var (
+	flagScanRuntimeClass   string
+	flagScanNoClusterFacts bool
+)
+
 func newScanCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "scan",
 		Short: "Enumerate workloads and classify gVisor compatibility",
 		Long: `scan walks the cluster via client-go, classifies each workload
@@ -32,9 +38,21 @@ versioned, stable schema suitable for piping into other tools or AI agents:
 
     agentmoat scan --output json | jq '.spec.workloads[] | select(.compatibility=="incompatible")'
 
+The report also records cluster facts (metadata.clusterFacts): whether the
+RuntimeClass exists, how many Ready nodes match its nodeSelector, and
+whether those nodes are EKS Auto Mode or Bottlerocket instances that can
+never run runsc. 'agentmoat plan --scan' turns them into warnings. Facts
+need get/list on nodes and runtimeclasses; without that permission the scan
+still succeeds and just omits them (--no-cluster-facts skips the reads).
+
 scan is strictly read-only and never mutates cluster state.`,
 		RunE: runScan,
 	}
+	cmd.Flags().StringVar(&flagScanRuntimeClass, "runtime-class", "gvisor",
+		"RuntimeClass name to inspect for metadata.clusterFacts")
+	cmd.Flags().BoolVar(&flagScanNoClusterFacts, "no-cluster-facts", false,
+		"do not read nodes and the RuntimeClass; omit metadata.clusterFacts")
+	return cmd
 }
 
 func runScan(cmd *cobra.Command, _ []string) error {
@@ -64,14 +82,16 @@ func runScan(cmd *cobra.Command, _ []string) error {
 	allNs := flagAllNamespaces || len(flagNamespaces) == 0
 
 	opts := agentmoat.ScanOptions{
-		KubeconfigPath: flagKubeconfig,
-		Context:        flagContext,
-		Namespaces:     flagNamespaces,
-		AllNamespaces:  allNs,
-		IncludeSystem:  flagIncludeSystem,
-		LabelSelector:  flagLabelSelector,
-		RulesYAMLPath:  flagRulesYAML,
-		Stderr:         stderr,
+		KubeconfigPath:   flagKubeconfig,
+		Context:          flagContext,
+		Namespaces:       flagNamespaces,
+		AllNamespaces:    allNs,
+		IncludeSystem:    flagIncludeSystem,
+		LabelSelector:    flagLabelSelector,
+		RulesYAMLPath:    flagRulesYAML,
+		RuntimeClassName: flagScanRuntimeClass,
+		SkipClusterFacts: flagScanNoClusterFacts,
+		Stderr:           stderr,
 	}
 
 	report, err := agentmoat.Scan(context.Background(), opts)

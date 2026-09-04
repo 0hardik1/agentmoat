@@ -32,6 +32,7 @@ var topicFiles = map[string]string{
 	"compatibility": "compatibility-checklist.md",
 	"gvisor":        "gvisor-101.md",
 	"performance":   "performance.md",
+	"preflight":     "preflight.md",
 	"runtimeclass":  "runtimeclass-101.md",
 	"threat-model":  "threat-model.md",
 }

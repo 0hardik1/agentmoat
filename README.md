@@ -82,7 +82,15 @@ formula and a `kubectl agentmoat` krew plugin follow.
 - **`scan`** is strictly read-only. It enumerates every Pod, Deployment,
   StatefulSet, DaemonSet, Job, and CronJob across the selected namespaces,
   classifies each one against the built-in rules, and emits a versioned
-  `ScanReport`.
+  `ScanReport`. It also records `metadata.clusterFacts`: whether the
+  RuntimeClass exists and how many Ready nodes its `nodeSelector` matches.
+- **`preflight`** is read-only too. It answers "can a pod that requests
+  this RuntimeClass schedule at all?": the RuntimeClass exists, its
+  `scheduling.nodeSelector` matches at least one Ready node whose taints it
+  tolerates, and the candidate nodes are not EKS Auto Mode or Bottlerocket
+  instances (AWS-managed, immutable, no `runsc`). Findings have stable IDs
+  and a remediation each; a blocking finding exits `5`. See
+  [`docs/preflight.md`](docs/preflight.md).
 - **`plan`** is a pure function from a `ScanReport` to a `MigrationPlan`.
   Same scan in, same plan and same SHA-256 `planHash` out. The plan orders
   steps by risk (stateless first, no host-network first, etc.) and excludes
@@ -90,17 +98,25 @@ formula and a `kubectl agentmoat` krew plugin follow.
   and Jobs with an actionable reason: the Kubernetes API rejects in-place
   `runtimeClassName` patches for both (a running Pod's spec and a Job's
   template are immutable), so those workloads must be re-created instead.
-- **`apply`** is the only stage that mutates the cluster. It patches each pod
-  template with `runtimeClassName` and the matching `runtime=gvisor:NoSchedule`
-  toleration, stamps the namespace with `agentmoat.io/plan-hash`, emits a
-  Kubernetes Event for each step it actually mutates, and appends an audit
-  line for every step (dry-run included) to `~/.agentmoat/audit.jsonl`.
-  It defaults to `--dry-run=true`. Re-running an applied plan reports every
-  step as `already-applied` and exits 0 via the namespace annotation.
+- **`apply`** is the only stage that mutates the cluster. It runs the
+  preflight first and refuses to touch anything when the cluster cannot host
+  the plan (exit `5`, every step `skipped`, `--skip-preflight` to override).
+  Then it patches each pod template with `runtimeClassName` only: placement
+  comes from the RuntimeClass's `scheduling` block, which admission merges
+  into every pod (`plan --add-toleration` also patches the
+  `runtime=gvisor:NoSchedule` toleration in, for clusters whose RuntimeClass
+  lacks `scheduling.tolerations`). It stamps the namespace with
+  `agentmoat.io/plan-hash`, emits a Kubernetes Event for each step it
+  actually mutates, and appends an audit line for every step (dry-run
+  included) to `~/.agentmoat/audit.jsonl`. It defaults to `--dry-run=true`.
+  Re-running an applied plan reports every step as `already-applied` and
+  exits 0 via the namespace annotation.
 - **`rollback`** walks the same plan in reverse, removes `runtimeClassName`,
-  and clears the namespace annotation. It deliberately leaves the toleration
-  in place (a toleration without a matching taint is harmless, and removing a
-  specific toleration by JSON Patch index is fragile).
+  and clears the namespace annotation. A toleration added by an opt-in
+  apply is deliberately left in place (a toleration without a matching taint
+  is harmless, and removing a specific toleration by JSON Patch index is
+  fragile). Rollback runs no preflight: moving pods back to runc needs no
+  gVisor node.
 
 The manual alternative is a sequence of `kubectl get` to enumerate, hand
 classification against the gVisor docs, per-controller `kubectl patch` for
@@ -215,7 +231,7 @@ elided fields are marked `...`.
         "order": 1,
         "target": {"kind": "Deployment", "namespace": "default", "name": "web"},
         "status": "applied",
-        "patch": "{\"spec\":{\"template\":{\"spec\":{\"runtimeClassName\":\"gvisor\",\"tolerations\":[{\"key\":\"runtime\",\"operator\":\"Equal\",\"value\":\"gvisor\",\"effect\":\"NoSchedule\"}]}}}}"
+        "patch": "{\"spec\":{\"template\":{\"spec\":{\"runtimeClassName\":\"gvisor\"}}}}"
       }
     ]
   }
@@ -224,8 +240,14 @@ elided fields are marked `...`.
 
 ## Operational guarantees
 
-- **Read-only by default.** `scan` and `plan` never mutate. They are safe to
-  run against production from a CI job or a read-only kubeconfig.
+- **Read-only by default.** `scan`, `preflight`, and `plan` never mutate.
+  They are safe to run against production from a CI job or a read-only
+  kubeconfig.
+- **Fails loudly when the cluster cannot host the plan.** `apply` runs the
+  preflight before its first step, dry-run included. No RuntimeClass, a
+  RuntimeClass that steers pods nowhere, no Ready `runsc` node, or an EKS
+  Auto Mode cluster all block the apply with exit `5` and nothing mutated,
+  instead of producing pods that sit Pending forever.
 - **Dry-run by default.** `apply` and `rollback` default to `--dry-run=true`:
   the patches are computed and surfaced in the `StepResult.patch` field, but
   nothing is sent to the API server. Mutating requires explicit
@@ -246,7 +268,8 @@ elided fields are marked `...`.
   | 1    | Generic error (kubeconfig, network, malformed plan, etc). |
   | 2    | `scan` / `explain namespace` / `explain workload`: at least one `incompatible` workload. |
   | 3    | `apply` or `rollback`: partial outcome; idempotent re-run is safe. |
-  | 4    | `verify`: `runtimeClassName` mismatch and/or in-pod probe did not find gVisor. |
+  | 4    | `verify`: `runtimeClassName` mismatch, hosting node outside the RuntimeClass `nodeSelector`, and/or in-pod probe did not find gVisor. |
+  | 5    | `preflight` / `apply`: the cluster cannot host the RuntimeClass; `apply` mutated nothing. |
 
   Full table in [`docs/exit-codes.md`](docs/exit-codes.md).
 
@@ -298,6 +321,7 @@ make kind-down
 | Command              | Purpose                                                       |
 | -------------------- | ------------------------------------------------------------- |
 | `agentmoat scan`     | Enumerate workloads and classify gVisor compatibility. RO.    |
+| `agentmoat preflight`| Check that the RuntimeClass steers pods onto a Ready `runsc` node. RO. Exit 5 when not. |
 | `agentmoat plan`     | Produce a deterministic `MigrationPlan` from a scan. RO.      |
 | `agentmoat apply`    | Patch workloads per the plan. Default dry-run. Idempotent.    |
 | `agentmoat rollback` | Reverse a previously applied plan. Default dry-run.           |
@@ -325,6 +349,10 @@ make kind-down
 | `--scan`                   | `plan`       | (inline)    | Read a stored `ScanReport` from disk instead of scanning.               |
 | `--include-review`         | `plan`       | `false`     | Also include `review`-class workloads in the plan.                      |
 | `--runtime-class`          | `plan`       | `gvisor`    | RuntimeClass name to patch onto migrated workloads.                     |
+| `--add-toleration`         | `plan`       | `false`     | Also patch the `runtime=gvisor:NoSchedule` toleration into each pod template. Changes the plan hash. |
+| `--runtime-class`          | scan/preflight | `gvisor`  | RuntimeClass to inspect for cluster facts / the preflight.              |
+| `--no-cluster-facts`       | `scan`       | `false`     | Skip the node and RuntimeClass reads; omit `metadata.clusterFacts`.     |
+| `--skip-preflight`         | `apply`      | `false`     | Bypass the cluster preflight gate (not recommended).                    |
 | `--plan`                   | apply/rollback | required  | Path to a `MigrationPlan` JSON/YAML.                                    |
 | `--dry-run`                | apply/rollback | `true`    | Compute patches but do not mutate the cluster.                          |
 | `--no-events`              | apply/rollback | `false`   | Do not emit Kubernetes Events per mutation.                             |
@@ -350,10 +378,26 @@ keeps an audit trail, and it has a one-command rollback.
 **Is it safe to run against production?** `scan` and `plan` are strictly
 read-only. `apply` and `rollback` default to `--dry-run=true` and surface the
 exact strategic-merge patch in `StepResult.patch` before any mutation. A
-read-only kubeconfig is sufficient to run `scan` and `plan`: ready-to-bind
-RBAC for both modes ships under [`deploy/`](deploy/) as
-`clusterrole-readonly.yaml` (scan / plan / verify) and `clusterrole-apply.yaml`
-(apply / rollback).
+read-only kubeconfig is sufficient to run `scan`, `preflight`, and `plan`:
+ready-to-bind RBAC for both modes ships under [`deploy/`](deploy/) as
+`clusterrole-readonly.yaml` (scan / preflight / plan / verify) and
+`clusterrole-apply.yaml` (apply / rollback). The read-only role includes
+`get`/`list` on nodes and RuntimeClasses for the preflight; without them
+`scan` still works and simply omits `metadata.clusterFacts`.
+
+**How do I know the cluster can host gVisor pods at all?** Run
+`agentmoat preflight`. It checks that the RuntimeClass exists, that its
+`scheduling.nodeSelector` matches at least one Ready node whose taints it
+tolerates, and that those nodes are not EKS Auto Mode or Bottlerocket
+instances. `apply` runs the same check first and refuses to patch anything
+(exit `5`) when it fails, so a plan cannot produce pods that never schedule.
+
+**Does agentmoat work on EKS Auto Mode?** Not on Auto Mode's own nodes. AWS
+owns their Bottlerocket image and container runtime; software cannot be
+installed on them, so `runsc` can never be present. `preflight` reports
+`eks-auto-mode-nodes` and blocks `apply`. The supported path is a
+self-managed or Karpenter node group built from the agentmoat AL2023 AMI
+next to the Auto Mode pool; see [`docs/eks-deployment.md`](docs/eks-deployment.md).
 
 **What about workloads that need raw sockets, eBPF, or GPU passthrough?**
 The classifier marks them `incompatible`. The planner excludes them. The
@@ -384,9 +428,10 @@ image.
 Phase 0 (foundation), Phase 1 (read-only scan + classifier), Phase 2
 (planner + applier + rollback, with idempotency and audit), Phase 3
 (`agentmoat verify` with optional `--in-pod-probe`, plus `agentmoat
-explain`), and Phase 4 (the `agentmoat-mcp` MCP server: 7 tools over
+explain`), and Phase 4 (the `agentmoat-mcp` MCP server: 8 tools over
 stdio, see [`docs/mcp-integration.md`](docs/mcp-integration.md)) are all
 shipped and exercised end-to-end against a real gVisor kind cluster.
+`agentmoat preflight` and the apply gate landed after v0.1.0.
 
 Roadmap:
 
@@ -398,6 +443,7 @@ Roadmap:
 - [Architecture](docs/architecture.md): the Go library at the core; CLI as a thin shell.
 - [gVisor 101](docs/gvisor-101.md): Sentry, Gofer, platforms, and where the overhead lives.
 - [RuntimeClass 101](docs/runtimeclass-101.md): one-page intro to the `RuntimeClass` API.
+- [Preflight](docs/preflight.md): the finding IDs, what `apply` does with them, and EKS Auto Mode.
 - [Threat model](docs/threat-model.md): what gVisor stops that `runc` does not, with CVE references.
 - [Compatibility checklist](docs/compatibility-checklist.md): the full rule catalog and `--rules` override schema.
 - [Exit codes](docs/exit-codes.md): the deterministic exit codes by command.

@@ -20,8 +20,9 @@ import (
 // server is for. Keep it short; the per-tool descriptions carry the
 // detail.
 const serverInstructions = `agentmoat-mcp moves Kubernetes workloads from runc to gVisor (runsc).
-Read-only tools: scan_cluster, assess_workload, propose_plan, verify_migration, explain.
+Read-only tools: scan_cluster, preflight_cluster, assess_workload, propose_plan, verify_migration, explain.
 Mutating tools: apply_plan, rollback_plan (default dry_run=true; must set "dry_run": false to mutate).
+Call preflight_cluster before apply_plan: apply refuses to run (every step skipped) when the cluster has no Ready node that can host the RuntimeClass.
 Resources: agentmoat://compatibility-rules, agentmoat://known-gotchas.
 Prompt: audit-cluster-for-agentic-workloads (audit for LLM/MCP/agent workloads).`
 
@@ -44,8 +45,9 @@ func newServer(deps Deps) *server.MCPServer {
 		server.WithRecovery(),
 	)
 
-	// Tools (7). Each registerXxx call adds one tool definition + handler.
+	// Tools (8). Each registerXxx call adds one tool definition + handler.
 	registerScanCluster(srv, deps)
+	registerPreflightCluster(srv, deps)
 	registerAssessWorkload(srv, deps)
 	registerProposePlan(srv, deps)
 	registerApplyPlan(srv, deps)

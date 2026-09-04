@@ -135,6 +135,12 @@ func TestStatusBadge(t *testing.T) {
 		{status: "mismatch", wantPrefix: "⚠ ", wantText: "mismatch"},
 		{status: "error", wantPrefix: "✗ ", wantText: "error"},
 
+		// preflight readiness and finding severities
+		{status: "ready", wantPrefix: "✓ ", wantText: "ready"},
+		{status: "blocked", wantPrefix: "✗ ", wantText: "blocked"},
+		{status: "warn", wantPrefix: "⚠ ", wantText: "warn"},
+		{status: "info", wantPrefix: "• ", wantText: "info"},
+
 		// unknown: no symbol, no styling, just the raw text
 		{status: "totally-made-up", wantPrefix: "", wantText: "totally-made-up"},
 		{status: "", wantPrefix: "", wantText: ""},

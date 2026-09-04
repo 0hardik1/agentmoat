@@ -51,8 +51,10 @@ gVisor compatibility, plans and applies a migration to RuntimeClass gvisor,
 verifies the result, and rolls back on demand. It also embeds the gVisor
 educational docs so operators can read them without leaving the terminal.
 
-Subcommands ship: 'scan', 'plan', 'apply', 'rollback', 'verify', 'explain'.
-Every mutating command (apply, rollback) defaults to --dry-run=true.
+Subcommands ship: 'scan', 'preflight', 'plan', 'apply', 'rollback',
+'verify', 'explain'. Every mutating command (apply, rollback) defaults to
+--dry-run=true, and apply refuses to run when 'preflight' finds that no
+node can host the migration (exit 5).
 
 Documentation: see docs/ in the repo or run 'agentmoat explain <topic>'.`,
 		SilenceUsage:  true,
@@ -87,6 +89,7 @@ Documentation: see docs/ in the repo or run 'agentmoat explain <topic>'.`,
 
 	// Subcommands.
 	root.AddCommand(newScanCmd())
+	root.AddCommand(newPreflightCmd())
 	root.AddCommand(newPlanCmd())
 	root.AddCommand(newApplyCmd())
 	root.AddCommand(newRollbackCmd())
@@ -121,5 +124,6 @@ func Execute() int {
 }
 
 // exitCode is set by subcommands when they need a non-zero exit (e.g. the
-// scan command sets it to 2 when blocking compatibility issues are found).
+// scan command sets it to 2 when blocking compatibility issues are found,
+// preflight and apply set 5 when the cluster cannot host the migration).
 var exitCode int

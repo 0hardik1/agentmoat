@@ -46,6 +46,10 @@ func registerProposePlan(srv *server.MCPServer, deps Deps) {
 		),
 		mcp.WithString("runtime_class_name",
 			mcp.Description("RuntimeClass name to write into the migrated pod templates. Default 'gvisor' matches the bundled RuntimeClass.")),
+		mcp.WithBoolean("add_toleration",
+			mcp.Description("Also patch the runtime=gvisor:NoSchedule toleration into each pod template. Default false: placement comes from the RuntimeClass's scheduling block. Changes the planHash."),
+			mcp.DefaultBool(false),
+		),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
 
@@ -53,15 +57,16 @@ func registerProposePlan(srv *server.MCPServer, deps Deps) {
 		nsList := req.GetStringSlice("namespaces", nil)
 		opts := agentmoat.PlanOptions{
 			ScanOptions: agentmoat.ScanOptions{
-				KubeconfigPath: req.GetString("kubeconfig_path", ""),
-				Context:        req.GetString("context", ""),
-				Namespaces:     nsList,
-				AllNamespaces:  len(nsList) == 0,
-				IncludeSystem:  req.GetBool("include_system", false),
-				LabelSelector:  req.GetString("label_selector", ""),
-				RulesYAMLPath:  req.GetString("rules_yaml_path", ""),
-				Stderr:         deps.Stderr,
-				KubeClient:     deps.KubeClient,
+				KubeconfigPath:   req.GetString("kubeconfig_path", ""),
+				Context:          req.GetString("context", ""),
+				Namespaces:       nsList,
+				AllNamespaces:    len(nsList) == 0,
+				IncludeSystem:    req.GetBool("include_system", false),
+				LabelSelector:    req.GetString("label_selector", ""),
+				RulesYAMLPath:    req.GetString("rules_yaml_path", ""),
+				RuntimeClassName: req.GetString("runtime_class_name", ""),
+				Stderr:           deps.Stderr,
+				KubeClient:       deps.KubeClient,
 			},
 			// BatchSize / MaxParallel are deliberately NOT exposed as tool
 			// arguments: the v1 applier walks steps serially, so those
@@ -71,6 +76,7 @@ func registerProposePlan(srv *server.MCPServer, deps Deps) {
 			Planner: schema.PlannerOptions{
 				IncludeReview:    req.GetBool("include_review", false),
 				RuntimeClassName: req.GetString("runtime_class_name", ""),
+				AddToleration:    req.GetBool("add_toleration", false),
 			},
 			Stderr: deps.Stderr,
 		}
