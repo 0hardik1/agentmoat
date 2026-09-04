@@ -39,6 +39,20 @@ func Plan(ctx context.Context, opts PlanOptions) (*schema.MigrationPlan, error) 
 	}
 
 	report := opts.ScanReport
+	if report != nil && opts.ScanOptions.FactsPath != "" {
+		// A stored scan plus fresher facts (typically a probe report):
+		// swap the facts block so the warnings below describe the
+		// cluster as it is now. Classification inside the stored report
+		// is left alone; re-scan with --facts to refine verdicts. Copy
+		// the envelope so the caller's report is not mutated.
+		facts, err := loadClusterFacts(opts.ScanOptions.FactsPath)
+		if err != nil {
+			return nil, fmt.Errorf("plan: loading --facts: %w", err)
+		}
+		r := *report
+		r.Metadata.ClusterFacts = facts
+		report = &r
+	}
 	if report == nil {
 		// Inline scan. We pass the caller-supplied scan options through;
 		// the caller can also pre-set opts.ScanOptions.Stderr to silence.

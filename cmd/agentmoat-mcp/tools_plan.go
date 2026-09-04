@@ -50,6 +50,8 @@ func registerProposePlan(srv *server.MCPServer, deps Deps) {
 			mcp.Description("Also patch the runtime=gvisor:NoSchedule toleration into each pod template. Default false: placement comes from the RuntimeClass's scheduling block. Changes the planHash."),
 			mcp.DefaultBool(false),
 		),
+		mcp.WithString("facts_path",
+			mcp.Description("Path to a saved PreflightReport (probe_nvproxy output) or ScanReport. The inline scan classifies against its cluster facts (GPU workloads settle from the probed driver list) and the plan warnings come from it; with scan_report_path it replaces the stored facts for the warnings only.")),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
 
@@ -65,6 +67,7 @@ func registerProposePlan(srv *server.MCPServer, deps Deps) {
 				LabelSelector:    req.GetString("label_selector", ""),
 				RulesYAMLPath:    req.GetString("rules_yaml_path", ""),
 				RuntimeClassName: req.GetString("runtime_class_name", ""),
+				FactsPath:        req.GetString("facts_path", ""),
 				Stderr:           deps.Stderr,
 				KubeClient:       deps.KubeClient,
 			},

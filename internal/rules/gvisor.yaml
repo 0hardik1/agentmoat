@@ -57,7 +57,7 @@ overrides:
 
   - id: gpu-passthrough
     severity: warn
-    description: "Container requests an NVIDIA GPU resource (`nvidia.com/gpu` in requests or limits); gVisor's `nvproxy` only supports a subset of CUDA versions."
+    description: "Container requests an NVIDIA GPU resource (`nvidia.com/*` in requests or limits); gVisor's `nvproxy` supports T4, A100, A10G, L4, and H100 cards with an exact host-driver match, and no MIG. Cluster facts refine this verdict; see docs/gpu-nvproxy.md."
     remediationUrl: "https://gvisor.dev/docs/user_guide/gpu/"
     source: "https://gvisor.dev/docs/user_guide/gpu/"
 

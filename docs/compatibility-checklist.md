@@ -24,7 +24,7 @@ For the rule implementations, see [`pkg/classifier/builtin_rules.go`](../pkg/cla
 | Rule ID | What it detects | Why it warrants review |
 | --- | --- | --- |
 | `host-path-mount` | Any HostPath volume | Gofer must proxy every read/write; some mount semantics not preserved. |
-| `gpu-passthrough` | `nvidia.com/gpu` in container resources requests or limits | gVisor's `nvproxy` supports only a subset of CUDA versions. |
+| `gpu-passthrough` | Any `nvidia.com/*` resource (`nvidia.com/gpu`, `nvidia.com/gpu.shared`, `nvidia.com/mig-*`) in container requests or limits | gVisor's `nvproxy` supports T4, A100, A10G, L4, and H100 cards, needs an exact host-driver version match with the installed `runsc`, and does not support MIG. With cluster facts the verdict is refined: supported card and listed driver becomes `info` (compatible); unsupported card, MIG, or unlisted driver becomes `error`. A `nvidia.com/mig-*` request is always `error`. See [`gpu-nvproxy.md`](gpu-nvproxy.md). |
 | `fuse-mount` | CSI driver name containing "fuse" or `AGENTMOAT_USES_FUSE=true` | gVisor supports a subset of FUSE behavior. |
 | `io-uring` | Annotation `agentmoat.io/uses-iouring=true` | gVisor does not implement `io_uring`. |
 | `perf-events` | `CAP_PERFMON` or `CAP_SYS_ADMIN` | gVisor does not expose perf events. |

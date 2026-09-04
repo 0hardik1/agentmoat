@@ -33,6 +33,11 @@
 #                           pre-apply spec.
 #   6. `agentmoat explain`  smoke: list mode, known topic, unknown topic
 #                           (exit non-zero, stderr lists topics).
+#   7. `agentmoat probe nvproxy`  dry-run creates nothing; the real run
+#                           reads runsc's version and nvproxy driver list
+#                           from the kind worker through a one-shot pod.
+#                           GFD-style labels on the worker then drive the
+#                           gpu-passthrough verdict through `scan --facts`.
 #
 # Real gVisor execution: the kind worker is built from
 # kind/Dockerfile.gvisor-node and ships runsc + the containerd v2 shim.
@@ -111,6 +116,9 @@ E2E_REPLAY_ROLLBACK="$E2E_REPLAY_AGENT rollback --plan $E2E_ARTIFACT_REL/plan.js
 E2E_REPLAY_EXPLAIN="bin/agentmoat explain"
 E2E_REPLAY_EXPLAIN_NS="$E2E_REPLAY_AGENT explain namespace $NAMESPACE"
 E2E_REPLAY_EXPLAIN_WL="$E2E_REPLAY_AGENT explain workload ${NAMESPACE}/host-net"
+E2E_REPLAY_PROBE_DRY="$E2E_REPLAY_AGENT probe nvproxy"
+E2E_REPLAY_PROBE="$E2E_REPLAY_AGENT probe nvproxy --dry-run=false"
+E2E_REPLAY_SCAN_FACTS="$E2E_REPLAY_AGENT scan --namespace $NAMESPACE --facts $E2E_ARTIFACT_REL/probe-t4.json"
 
 # Toggled by the assertion helpers below; lets cleanup print a summary.
 FAIL_COUNT=0
@@ -631,7 +639,7 @@ set -e
 if (( EXPLAIN_BOGUS_EXIT == 0 )); then
   fail "explain bogus-topic should exit non-zero (got 0); output: $EXPLAIN_BOGUS"
 fi
-for want in runtimeclass gvisor threat-model performance compatibility preflight; do
+for want in runtimeclass gvisor threat-model performance compatibility preflight gpu; do
   if ! printf '%s' "$EXPLAIN_BOGUS" | grep -q "$want"; then
     fail "explain bogus-topic stderr missing topic '$want':\n$EXPLAIN_BOGUS"
   fi
@@ -730,6 +738,121 @@ if ! printf '%s' "$EXPLAIN_BAD" | grep -q '<namespace>/<name>'; then
   fail "explain workload bogus-ref error missing format hint:\n$EXPLAIN_BAD"
 fi
 e2e_step_pass "explain workload" "$E2E_REPLAY_EXPLAIN_WL"
+
+# -----------------------------------------------------------------------------
+# 9. GPU / nvproxy: probe dry-run, real probe, facts-driven classification.
+# -----------------------------------------------------------------------------
+#
+# The kind worker has no GPU, but it does ship runsc, so the probe pod runs
+# for real and reads the driver list. To exercise the classifier we then
+# label the worker the way GPU Feature Discovery would (card + driver), re-run
+# the probe, and scan with --facts pointing at that report: gpu-app turns
+# compatible. An unsupported card (V100) turns it incompatible. The labels
+# are removed at the end so a kept cluster stays clean. This runs last so
+# the earlier scan/plan counts are unaffected.
+
+WORKER_NODE=$("${KCTL[@]}" get nodes -l runtime=gvisor -o jsonpath='{.items[0].metadata.name}')
+[[ -n "$WORKER_NODE" ]] || fail "no node labeled runtime=gvisor"
+probe_pod_count() {
+  "${KCTL[@]}" get pods -A -l app.kubernetes.io/component=nvproxy-probe -o name 2>/dev/null | wc -l | tr -d ' '
+}
+
+e2e_step "probe nvproxy (dry-run): describe the pod, create nothing"
+agentmoat_table_and_json "$WORK_DIR/probe-dry.json" \
+  "${AGENT[@]}" probe nvproxy
+assert_eq "probe dry-run exit code" 0 "$AGENT_EXIT"
+assert_eq "probe dry-run kind" "PreflightReport" "$(jq -r '.kind' "$WORK_DIR/probe-dry.json")"
+assert_eq "probe dry-run metadata.probe.dryRun" "true" \
+  "$(jq -r '.metadata.probe.dryRun' "$WORK_DIR/probe-dry.json")"
+assert_eq "probe dry-run metadata.probe.node" "$WORKER_NODE" \
+  "$(jq -r '.metadata.probe.node' "$WORK_DIR/probe-dry.json")"
+assert_eq "probe dry-run probe finding" "nvproxy-probe-dry-run" \
+  "$(jq -r '[.spec.findings[].id | select(startswith("nvproxy-probe"))] | join(",")' "$WORK_DIR/probe-dry.json")"
+assert_eq "probe dry-run facts.gpu (no GPU nodes)" "null" \
+  "$(jq -r '.spec.facts.gpu' "$WORK_DIR/probe-dry.json")"
+assert_eq "probe dry-run pods created" 0 "$(probe_pod_count)"
+e2e_step_pass "probe nvproxy (dry-run)" "$E2E_REPLAY_PROBE_DRY"
+
+e2e_step "probe nvproxy --dry-run=false: read runsc version + driver list from $WORKER_NODE"
+agentmoat_table_and_json "$WORK_DIR/probe.json" \
+  "${AGENT[@]}" probe nvproxy --dry-run=false
+assert_eq "probe exit code" 0 "$AGENT_EXIT"
+assert_eq "probe metadata.probe.succeeded" "true" \
+  "$(jq -r '.metadata.probe.succeeded' "$WORK_DIR/probe.json")"
+assert_eq "probe metadata.probe.node" "$WORKER_NODE" \
+  "$(jq -r '.metadata.probe.node' "$WORK_DIR/probe.json")"
+RUNSC_VERSION=$(jq -r '.spec.facts.gpu.nvproxy.runscVersion' "$WORK_DIR/probe.json")
+if ! [[ "$RUNSC_VERSION" =~ ^release-[0-9]{8}\.[0-9]+$ ]]; then
+  fail "probe runscVersion '$RUNSC_VERSION' does not look like a gVisor release tag"
+fi
+DRIVER_COUNT=$(jq -r '.spec.facts.gpu.nvproxy.supportedDrivers | length' "$WORK_DIR/probe.json")
+if (( DRIVER_COUNT < 1 )); then
+  fail "probe supportedDrivers is empty"
+fi
+assert_eq "probe pod deleted afterwards" 0 "$(probe_pod_count)"
+e2e_step_pass "probe nvproxy" "$E2E_REPLAY_PROBE"
+
+FIRST_DRIVER=$(jq -r '.spec.facts.gpu.nvproxy.supportedDrivers[0]' "$WORK_DIR/probe.json")
+e2e_step "gpu facts: label $WORKER_NODE like GFD would (Tesla-T4, driver $FIRST_DRIVER), re-probe"
+"${KCTL[@]}" label node "$WORKER_NODE" --overwrite \
+  nvidia.com/gpu.product=Tesla-T4 nvidia.com/gpu.count=1 \
+  "nvidia.com/cuda.driver-version.full=$FIRST_DRIVER" >/dev/null
+agentmoat_table_and_json "$WORK_DIR/probe-t4.json" \
+  "${AGENT[@]}" probe nvproxy --dry-run=false
+assert_eq "probe (T4) exit code" 0 "$AGENT_EXIT"
+assert_eq "probe (T4) facts.gpu.nodes" 1 "$(jq -r '.spec.facts.gpu.nodes' "$WORK_DIR/probe-t4.json")"
+assert_eq "probe (T4) facts.gpu.matchingNodes" 1 "$(jq -r '.spec.facts.gpu.matchingNodes' "$WORK_DIR/probe-t4.json")"
+assert_eq "probe (T4) group product/support" "Tesla-T4,supported,supported" \
+  "$(jq -r '.spec.facts.gpu.groups[0] | [.product, .productSupport, .driverSupport] | join(",")' "$WORK_DIR/probe-t4.json")"
+assert_eq "probe (T4) gpu finding" "gpu-nvproxy-ready" \
+  "$(jq -r '[.spec.findings[].id | select(startswith("gpu-"))] | join(",")' "$WORK_DIR/probe-t4.json")"
+
+e2e_step "scan --facts probe-t4.json: gpu-app becomes compatible from the probed facts"
+agentmoat_table_and_json "$WORK_DIR/scan-facts.json" \
+  "${AGENT[@]}" scan --namespace "$NAMESPACE" --facts "$WORK_DIR/probe-t4.json"
+assert_eq "scan --facts exit code (host-net still incompatible)" 2 "$AGENT_EXIT"
+assert_eq "scan --facts gpu-app compatibility" "compatible" \
+  "$(jq -r '.spec.workloads[] | select(.name=="gpu-app") | .compatibility' "$WORK_DIR/scan-facts.json")"
+assert_eq "scan --facts gpu-app gpu-passthrough severity" "info" \
+  "$(jq -r '.spec.workloads[] | select(.name=="gpu-app") | .reasons[] | select(.ruleId=="gpu-passthrough") | .severity' "$WORK_DIR/scan-facts.json")"
+assert_eq "scan --facts summary.compatible" "$((E2E_COMPAT + 1))" \
+  "$(jq -r '.spec.summary.compatible' "$WORK_DIR/scan-facts.json")"
+assert_eq "scan --facts summary.needsReview" "$((E2E_REVIEW - 1))" \
+  "$(jq -r '.spec.summary.needsReview' "$WORK_DIR/scan-facts.json")"
+assert_eq "scan --facts records the probed nvproxy facts" "$RUNSC_VERSION" \
+  "$(jq -r '.metadata.clusterFacts.gpu.nvproxy.runscVersion' "$WORK_DIR/scan-facts.json")"
+
+e2e_step "scan (live facts, no probe): gpu-app stays review, driver unconfirmed"
+agentmoat_table_and_json "$WORK_DIR/scan-live-gpu.json" \
+  "${AGENT[@]}" scan --namespace "$NAMESPACE"
+assert_eq "scan (live) gpu-app compatibility" "review" \
+  "$(jq -r '.spec.workloads[] | select(.name=="gpu-app") | .compatibility' "$WORK_DIR/scan-live-gpu.json")"
+assert_eq "scan (live) gpu-app note says driver unconfirmed" "true" \
+  "$(jq -r '.spec.workloads[] | select(.name=="gpu-app") | .reasons[] | select(.ruleId=="gpu-passthrough") | .description | contains("has not been checked against runsc")' "$WORK_DIR/scan-live-gpu.json")"
+
+e2e_step "gpu facts: unsupported card (Tesla-V100) makes gpu-app incompatible and warns the plan"
+"${KCTL[@]}" label node "$WORKER_NODE" --overwrite nvidia.com/gpu.product=Tesla-V100-SXM2-16GB >/dev/null
+agentmoat_table_and_json "$WORK_DIR/scan-v100.json" \
+  "${AGENT[@]}" scan --namespace "$NAMESPACE"
+assert_eq "scan (V100) gpu-app compatibility" "incompatible" \
+  "$(jq -r '.spec.workloads[] | select(.name=="gpu-app") | .compatibility' "$WORK_DIR/scan-v100.json")"
+assert_eq "scan (V100) summary.incompatible" "$((E2E_INCOMPAT + 1))" \
+  "$(jq -r '.spec.summary.incompatible' "$WORK_DIR/scan-v100.json")"
+agentmoat_table_and_json "$WORK_DIR/preflight-v100.json" \
+  "${AGENT[@]}" preflight
+assert_eq "preflight (V100) exit code (GPU findings never block)" 0 "$AGENT_EXIT"
+assert_eq "preflight (V100) gpu finding" "gpu-product-unsupported" \
+  "$(jq -r '[.spec.findings[].id | select(startswith("gpu-"))] | join(",")' "$WORK_DIR/preflight-v100.json")"
+agentmoat_table_and_json "$WORK_DIR/plan-v100.json" \
+  "${AGENT[@]}" plan --scan "$WORK_DIR/scan-v100.json"
+assert_eq "plan (V100) exit code" 0 "$AGENT_EXIT"
+assert_eq "plan (V100) warning ids" "gpu-product-unsupported" \
+  "$(jq -r '[.spec.warnings[].id] | join(",")' "$WORK_DIR/plan-v100.json")"
+
+e2e_step "gpu facts: remove the simulated GFD labels from $WORKER_NODE"
+"${KCTL[@]}" label node "$WORKER_NODE" \
+  nvidia.com/gpu.product- nvidia.com/gpu.count- nvidia.com/cuda.driver-version.full- >/dev/null
+e2e_step_pass "gpu / nvproxy facts" "$E2E_REPLAY_SCAN_FACTS"
 
 # -----------------------------------------------------------------------------
 # Done. Cleanup runs from the EXIT trap.

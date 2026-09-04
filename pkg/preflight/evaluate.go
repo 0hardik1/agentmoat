@@ -47,6 +47,48 @@ const (
 	// FindingRuntimeClassNoOverhead: informational; overhead.podFixed is
 	// unset so the scheduler does not account for the Sentry's footprint.
 	FindingRuntimeClassNoOverhead = "runtimeclass-no-overhead"
+
+	// GPU findings (gpu.go). None of them blocks: the RuntimeClass can
+	// still host CPU workloads. They feed the classifier's gpu-passthrough
+	// refinement and the plan warnings.
+
+	// FindingGPUProductUnsupported (warn): GPU nodes carry a card nvproxy
+	// does not support.
+	FindingGPUProductUnsupported = "gpu-product-unsupported"
+
+	// FindingGPUProductUnknown (info): GPU nodes carry no GFD product
+	// label, so the card cannot be checked.
+	FindingGPUProductUnknown = "gpu-product-unknown"
+
+	// FindingGPUMIGEnabled (warn): GPU nodes slice their GPUs with MIG,
+	// which nvproxy does not support.
+	FindingGPUMIGEnabled = "gpu-mig-enabled"
+
+	// FindingGPUDriverUnsupported (warn): the probed runsc does not list
+	// the host driver on nodes whose card is otherwise supported.
+	FindingGPUDriverUnsupported = "gpu-driver-unsupported"
+
+	// FindingGPUDriverUnconfirmed (info): the card is supported but the
+	// driver list has not been probed yet.
+	FindingGPUDriverUnconfirmed = "gpu-driver-unconfirmed"
+
+	// FindingGPUNvproxyReady (info): card and driver both supported by the
+	// probed runsc.
+	FindingGPUNvproxyReady = "gpu-nvproxy-ready"
+
+	// Probe findings, produced by pkg/probe around the Evaluate output.
+
+	// FindingNvproxyProbeDryRun (info): the probe pod was described, not
+	// created.
+	FindingNvproxyProbeDryRun = "nvproxy-probe-dry-run"
+
+	// FindingNvproxyProbeSkipped (warn): the preflight has an error
+	// finding, so there is no node to run the probe pod on.
+	FindingNvproxyProbeSkipped = "nvproxy-probe-skipped"
+
+	// FindingNvproxyProbeFailed (warn): the pod did not complete or its
+	// output did not parse; the message carries the reason.
+	FindingNvproxyProbeFailed = "nvproxy-probe-failed"
 )
 
 // Evaluate derives findings from facts. Pure and deterministic: the output
@@ -60,7 +102,8 @@ func Evaluate(facts *schema.ClusterFacts) []schema.PreflightFinding {
 	out = append(out, runtimeClassFindings(facts)...)
 	out = append(out, taintFindings(facts)...)
 	out = append(out, platformFindings(facts)...)
-	sortFindings(out)
+	out = append(out, gpuFindings(facts)...)
+	SortFindings(out)
 	return out
 }
 
@@ -211,6 +254,98 @@ func platformFindings(f *schema.ClusterFacts) []schema.PreflightFinding {
 	return out
 }
 
+// gpuBuckets sorts GPU node groups by what stands between them and a
+// working nvproxy. Each bucket becomes at most one finding, listing every
+// group in it, so a cluster with three T4 driver versions yields one
+// gpu-driver-unsupported finding, not three.
+type gpuBuckets struct {
+	mig, productBad, productUnknown, driverBad, driverUnknown, ready []string
+}
+
+func bucketGPUGroups(gf *schema.GPUFacts) gpuBuckets {
+	var b gpuBuckets
+	for _, g := range gf.Groups {
+		desc := DescribeGPUGroup(g)
+		switch {
+		case g.MIG:
+			b.mig = append(b.mig, desc)
+		case g.ProductSupport == schema.SupportUnknown:
+			b.productUnknown = append(b.productUnknown, desc)
+		case g.ProductSupport == schema.SupportUnsupported:
+			b.productBad = append(b.productBad, desc)
+		case g.DriverSupport == schema.SupportSupported:
+			b.ready = append(b.ready, desc)
+		case g.DriverSupport == schema.SupportUnsupported:
+			b.driverBad = append(b.driverBad, desc)
+		default:
+			b.driverUnknown = append(b.driverUnknown, desc)
+		}
+	}
+	return b
+}
+
+// gpuFindings covers the GPU nodes. Nothing to say on a CPU-only cluster.
+// Severities stop at warn: a GPU problem never blocks the RuntimeClass for
+// everything else; it changes the gpu-passthrough verdict instead.
+func gpuFindings(f *schema.ClusterFacts) []schema.PreflightFinding {
+	if f.GPU == nil || f.GPU.Nodes == 0 {
+		return nil
+	}
+	b := bucketGPUGroups(f.GPU)
+	runsc := "runsc"
+	if f.GPU.Nvproxy != nil && f.GPU.Nvproxy.RunscVersion != "" {
+		runsc = "runsc " + f.GPU.Nvproxy.RunscVersion
+	}
+	var out []schema.PreflightFinding
+	if len(b.mig) > 0 {
+		out = append(out, schema.PreflightFinding{
+			ID: FindingGPUMIGEnabled, Severity: schema.SeverityWarn,
+			Message: "GPU nodes slice their GPUs with MIG (" + schema.GFDMIGStrategyLabel + " is not \"none\"); gVisor nvproxy does not support MIG: " +
+				strings.Join(b.mig, "; "),
+			Remediation: "keep MIG workloads on runc, or give the gVisor node group whole GPUs (mig.strategy=none)",
+		})
+	}
+	if len(b.productBad) > 0 {
+		out = append(out, schema.PreflightFinding{
+			ID: FindingGPUProductUnsupported, Severity: schema.SeverityWarn,
+			Message: "gVisor nvproxy does not support these GPU cards (supported: " + strings.Join(NvproxySupportedProducts, ", ") + "): " +
+				strings.Join(b.productBad, "; "),
+			Remediation: "keep workloads that need these cards on runc, or add gVisor GPU nodes with a supported card; see docs/gpu-nvproxy.md",
+		})
+	}
+	if len(b.driverBad) > 0 {
+		out = append(out, schema.PreflightFinding{
+			ID: FindingGPUDriverUnsupported, Severity: schema.SeverityWarn,
+			Message: runsc + " nvproxy does not list the host driver on: " + strings.Join(b.driverBad, "; ") +
+				"; supported drivers: " + strings.Join(f.GPU.Nvproxy.SupportedDrivers, ", "),
+			Remediation: "install one of the listed driver versions on the GPU nodes, or move to a runsc release that lists yours (docs/gvisor-version.md)",
+		})
+	}
+	if len(b.productUnknown) > 0 {
+		out = append(out, schema.PreflightFinding{
+			ID: FindingGPUProductUnknown, Severity: schema.SeverityInfo,
+			Message: "GPU nodes carry no GPU Feature Discovery labels (" + schema.GFDProductLabel + "), so the card and driver cannot be checked: " +
+				strings.Join(b.productUnknown, "; "),
+			Remediation: "install GPU Feature Discovery (part of the NVIDIA GPU Operator, or gfd.enabled=true in the device plugin chart)",
+		})
+	}
+	if len(b.driverUnknown) > 0 {
+		out = append(out, schema.PreflightFinding{
+			ID: FindingGPUDriverUnconfirmed, Severity: schema.SeverityInfo,
+			Message: "nvproxy supports the card, but the host driver has not been checked against the installed runsc: " +
+				strings.Join(b.driverUnknown, "; "),
+			Remediation: "run 'agentmoat probe nvproxy --dry-run=false' to read the supported driver list from runsc on a gVisor node",
+		})
+	}
+	if len(b.ready) > 0 {
+		out = append(out, schema.PreflightFinding{
+			ID: FindingGPUNvproxyReady, Severity: schema.SeverityInfo,
+			Message: runsc + " nvproxy supports the card and the host driver on: " + strings.Join(b.ready, "; "),
+		})
+	}
+	return out
+}
+
 // allOrSome is error when every candidate is affected (nothing can
 // schedule) and warn otherwise (some nodes still can).
 func allOrSome(affected, candidates int) schema.Severity {
@@ -247,8 +382,9 @@ func severityRank(s schema.Severity) int {
 	}
 }
 
-// sortFindings sorts by severity rank, then ID, in place.
-func sortFindings(findings []schema.PreflightFinding) {
+// SortFindings sorts by severity rank, then ID, in place. Exported so
+// pkg/probe can append its own findings and keep the report order.
+func SortFindings(findings []schema.PreflightFinding) {
 	sort.SliceStable(findings, func(i, j int) bool {
 		ri, rj := severityRank(findings[i].Severity), severityRank(findings[j].Severity)
 		if ri != rj {

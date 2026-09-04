@@ -11,7 +11,8 @@
 //
 //  1. ebpf                 (error) eBPF programs (Cilium, Tetragon, Falco).
 //  2. fuse-mount           (warn)  FUSE filesystem in use.
-//  3. gpu-passthrough      (warn)  nvidia.com/gpu resource requested.
+//  3. gpu-passthrough      (warn)  nvidia.com/* GPU resource requested;
+//     refined by cluster facts (card, driver, MIG).
 //  4. host-ipc             (error) hostIPC: true.
 //  5. host-network         (error) hostNetwork: true.
 //  6. host-path-mount      (warn)  hostPath volume.
@@ -32,6 +33,7 @@ package classifier
 import (
 	"strings"
 
+	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/scanner"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -111,11 +113,13 @@ func registerWarnRules(r *Registry) {
 		Match:          matchHostPathMount,
 	})
 	r.Register(Rule{
-		ID:             "gpu-passthrough",
-		Severity:       SeverityWarn,
-		Description:    "Container requests an NVIDIA GPU resource (`nvidia.com/gpu`); gVisor's `nvproxy` only supports a subset of CUDA versions.",
+		ID:       "gpu-passthrough",
+		Severity: SeverityWarn,
+		Description: "Container requests an NVIDIA GPU resource (`nvidia.com/*`); gVisor's `nvproxy` supports T4, A100, A10G, L4, and H100 cards, " +
+			"needs an exact host-driver version match with the installed runsc, and does not support MIG.",
 		RemediationURL: "https://gvisor.dev/docs/user_guide/gpu/",
 		Match:          matchGPUPassthrough,
+		Refine:         refineGPUPassthrough,
 	})
 	r.Register(Rule{
 		ID:             "fuse-mount",
@@ -222,7 +226,7 @@ func matchHostPathMount(w scanner.Workload) bool {
 	return false
 }
 
-// matchGPUPassthrough detects an `nvidia.com/gpu` resource request or limit
+// matchGPUPassthrough detects an `nvidia.com/*` resource request or limit
 // on any container.
 func matchGPUPassthrough(w scanner.Workload) bool {
 	for _, c := range allContainers(w.PodSpec) {
@@ -263,10 +267,13 @@ func matchPerfEvents(w scanner.Workload) bool {
 }
 
 // resourceListHasNvidia returns true if the resource list has any entry
-// whose name starts with `nvidia.com/gpu`.
+// whose name starts with `nvidia.com/`: whole GPUs (`nvidia.com/gpu`),
+// time-sliced shares (`nvidia.com/gpu.shared`), and MIG slices
+// (`nvidia.com/mig-1g.5gb`) are all GPU requests as far as nvproxy is
+// concerned.
 func resourceListHasNvidia(list corev1.ResourceList) bool {
 	for name := range list {
-		if strings.HasPrefix(string(name), "nvidia.com/gpu") {
+		if strings.HasPrefix(string(name), schema.NvidiaResourcePrefix) {
 			return true
 		}
 	}

@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/scanner"
 	"sigs.k8s.io/yaml"
 )
@@ -60,6 +61,24 @@ type Rule struct {
 	// Match is the rule predicate. It is called with the workload value
 	// (not a pointer) so rules cannot accidentally mutate scanner state.
 	Match func(w scanner.Workload) bool
+
+	// Refine, when set, lets a rule that matched adjust its verdict from
+	// the workload and the cluster facts (schema.ClusterFacts: nodes,
+	// RuntimeClass, GPUs, probed nvproxy drivers). It receives the rule's
+	// configured severity (after any YAML override) as base and returns
+	// ok=false to leave the verdict alone. facts may be nil: a rule may
+	// still refine from the workload alone (a MIG resource request, say).
+	// Only gpu-passthrough sets this today. Refine must stay pure and
+	// deterministic like Match.
+	Refine func(w scanner.Workload, facts *schema.ClusterFacts, base Severity) (Refinement, bool)
+}
+
+// Refinement is what Rule.Refine returns: the severity that replaces the
+// rule's configured one for this workload, and a note appended to the
+// Reason description saying which facts decided it.
+type Refinement struct {
+	Severity Severity
+	Note     string
 }
 
 // Registry is the in-memory set of rules used by Classify(). Built-in rules

@@ -36,6 +36,7 @@
 package explainer
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/0hardik1/agentmoat/docs"
@@ -327,30 +328,29 @@ func evidenceForHostPathMount(w scanner.Workload) schema.Evidence {
 	return ev
 }
 
-// evidenceForGPUPassthrough lists every container that requests an
-// nvidia.com/gpu resource, along with the requested quantity. We check
-// Limits first because that is the canonical place for extended
-// resource requests; the classifier accepts either Limits or Requests,
-// so we mirror that here.
+// evidenceForGPUPassthrough lists every nvidia.com/* resource each
+// container requests, with the actual resource name (nvidia.com/gpu,
+// nvidia.com/gpu.shared, nvidia.com/mig-1g.5gb, ...) and the quantity.
+// Limits come first because that is the canonical place for extended
+// resources; a name present in both lists is reported once, from Limits.
+// Mirrors matchGPUPassthrough in builtin_rules.go.
 func evidenceForGPUPassthrough(w scanner.Workload) schema.Evidence {
 	ev := schema.Evidence{}
 	for _, c := range allContainersOf(w.PodSpec) {
-		// Try Limits first, then Requests, since K8s extended resources
-		// are typically specified as Limits.
-		if q, ok := nvidiaGPUQuantity(c.Resources.Limits); ok {
-			ev.GPURequests = append(ev.GPURequests, schema.GPURequest{
-				Container: c.Name,
-				Resource:  "nvidia.com/gpu",
-				Quantity:  q,
-			})
-			continue
-		}
-		if q, ok := nvidiaGPUQuantity(c.Resources.Requests); ok {
-			ev.GPURequests = append(ev.GPURequests, schema.GPURequest{
-				Container: c.Name,
-				Resource:  "nvidia.com/gpu",
-				Quantity:  q,
-			})
+		seen := map[string]bool{}
+		for _, list := range []corev1.ResourceList{c.Resources.Limits, c.Resources.Requests} {
+			for _, name := range nvidiaResourceNames(list) {
+				if seen[name] {
+					continue
+				}
+				seen[name] = true
+				qty := list[corev1.ResourceName(name)]
+				ev.GPURequests = append(ev.GPURequests, schema.GPURequest{
+					Container: c.Name,
+					Resource:  name,
+					Quantity:  qty.String(),
+				})
+			}
 		}
 	}
 	return ev
@@ -512,15 +512,15 @@ func containersUsingVolume(spec corev1.PodSpec, volumeName string) []string {
 	return names
 }
 
-// nvidiaGPUQuantity returns the .String() of the first resource entry
-// in the list whose name starts with "nvidia.com/gpu". The boolean is
-// false when no such entry exists, letting callers fall through to the
-// other (Requests vs Limits) list.
-func nvidiaGPUQuantity(list corev1.ResourceList) (string, bool) {
-	for name, q := range list {
-		if strings.HasPrefix(string(name), "nvidia.com/gpu") {
-			return q.String(), true
+// nvidiaResourceNames returns the nvidia.com/* resource names in the
+// list, sorted, so evidence order does not depend on map iteration.
+func nvidiaResourceNames(list corev1.ResourceList) []string {
+	var names []string
+	for name := range list {
+		if strings.HasPrefix(string(name), schema.NvidiaResourcePrefix) {
+			names = append(names, string(name))
 		}
 	}
-	return "", false
+	sort.Strings(names)
+	return names
 }

@@ -83,7 +83,11 @@ formula and a `kubectl agentmoat` krew plugin follow.
   StatefulSet, DaemonSet, Job, and CronJob across the selected namespaces,
   classifies each one against the built-in rules, and emits a versioned
   `ScanReport`. It also records `metadata.clusterFacts`: whether the
-  RuntimeClass exists and how many Ready nodes its `nodeSelector` matches.
+  RuntimeClass exists, how many Ready nodes its `nodeSelector` matches, and
+  which GPU cards and drivers the GPU nodes carry. The classifier reads
+  those facts too: a GPU workload on a card gVisor's `nvproxy` supports,
+  with a driver the installed `runsc` lists, is `compatible`; one on an
+  unsupported card or a MIG-sliced node is `incompatible`.
 - **`preflight`** is read-only too. It answers "can a pod that requests
   this RuntimeClass schedule at all?": the RuntimeClass exists, its
   `scheduling.nodeSelector` matches at least one Ready node whose taints it
@@ -91,6 +95,12 @@ formula and a `kubectl agentmoat` krew plugin follow.
   instances (AWS-managed, immutable, no `runsc`). Findings have stable IDs
   and a remediation each; a blocking finding exits `5`. See
   [`docs/preflight.md`](docs/preflight.md).
+- **`probe nvproxy`** creates one short-lived pod on a gVisor node, reads
+  `runsc --version` and `runsc nvproxy list-supported-drivers` from the
+  host's `runsc` binary, and deletes the pod. That driver list exists
+  nowhere else, and it decides whether GPU workloads can move. Dry-run by
+  default like `apply`; save the report and hand it to `scan --facts`. See
+  [`docs/gpu-nvproxy.md`](docs/gpu-nvproxy.md).
 - **`plan`** is a pure function from a `ScanReport` to a `MigrationPlan`.
   Same scan in, same plan and same SHA-256 `planHash` out. The plan orders
   steps by risk (stateless first, no host-network first, etc.) and excludes
@@ -141,7 +151,7 @@ they appear in `--output json`, in `--rules` overrides, and in the
 | `ebpf`              | error    | Image hint (cilium, tetragon, falco) or `CAP_BPF`                      |
 | `kvm-nested`        | error    | `hostPath` mount of `/dev/kvm`                                         |
 | `host-path-mount`   | warn     | Any `hostPath` volume                                                  |
-| `gpu-passthrough`   | warn     | `nvidia.com/gpu` resource request or limit                             |
+| `gpu-passthrough`   | warn     | `nvidia.com/*` resource request or limit; refined to `info` or `error` from the GPU nodes' card, driver, and MIG facts |
 | `fuse-mount`        | warn     | CSI driver name containing `fuse`, or `AGENTMOAT_USES_FUSE=true`       |
 | `io-uring`          | warn     | Annotation `agentmoat.io/uses-iouring=true`                            |
 | `perf-events`       | warn     | `CAP_PERFMON` or `CAP_SYS_ADMIN`                                       |
@@ -251,7 +261,8 @@ elided fields are marked `...`.
 - **Dry-run by default.** `apply` and `rollback` default to `--dry-run=true`:
   the patches are computed and surfaced in the `StepResult.patch` field, but
   nothing is sent to the API server. Mutating requires explicit
-  `--dry-run=false`.
+  `--dry-run=false`. `probe nvproxy`, the only other verb that creates
+  anything (one pod, deleted afterwards), follows the same rule.
 - **Idempotent.** Every `apply` writes the plan hash to the affected
   namespace as `agentmoat.io/plan-hash`. Re-running the same plan against
   the same cluster reports every step as `already-applied` and exits 0.
@@ -269,7 +280,7 @@ elided fields are marked `...`.
   | 2    | `scan` / `explain namespace` / `explain workload`: at least one `incompatible` workload. |
   | 3    | `apply` or `rollback`: partial outcome; idempotent re-run is safe. |
   | 4    | `verify`: `runtimeClassName` mismatch, hosting node outside the RuntimeClass `nodeSelector`, and/or in-pod probe did not find gVisor. |
-  | 5    | `preflight` / `apply`: the cluster cannot host the RuntimeClass; `apply` mutated nothing. |
+  | 5    | `preflight` / `probe` / `apply`: the cluster cannot host the RuntimeClass; `apply` mutated nothing. |
 
   Full table in [`docs/exit-codes.md`](docs/exit-codes.md).
 
@@ -322,6 +333,7 @@ make kind-down
 | -------------------- | ------------------------------------------------------------- |
 | `agentmoat scan`     | Enumerate workloads and classify gVisor compatibility. RO.    |
 | `agentmoat preflight`| Check that the RuntimeClass steers pods onto a Ready `runsc` node. RO. Exit 5 when not. |
+| `agentmoat probe nvproxy` | Read the nvproxy supported-driver list from `runsc` on a gVisor node via a one-shot pod. Default dry-run. |
 | `agentmoat plan`     | Produce a deterministic `MigrationPlan` from a scan. RO.      |
 | `agentmoat apply`    | Patch workloads per the plan. Default dry-run. Idempotent.    |
 | `agentmoat rollback` | Reverse a previously applied plan. Default dry-run.           |
@@ -352,6 +364,10 @@ make kind-down
 | `--add-toleration`         | `plan`       | `false`     | Also patch the `runtime=gvisor:NoSchedule` toleration into each pod template. Changes the plan hash. |
 | `--runtime-class`          | scan/preflight | `gvisor`  | RuntimeClass to inspect for cluster facts / the preflight.              |
 | `--no-cluster-facts`       | `scan`       | `false`     | Skip the node and RuntimeClass reads; omit `metadata.clusterFacts`.     |
+| `--facts`                  | scan/plan/explain | (live)   | Load cluster facts from a saved `PreflightReport` (`probe nvproxy` output) or `ScanReport` instead of reading the cluster. |
+| `--dry-run`                | `probe nvproxy` | `true`   | Describe the probe pod without creating it.                             |
+| `--probe-namespace`        | `probe nvproxy` | `default` | Namespace for the probe pod (must allow `hostPath` under PSA; see `deploy/nvproxy-probe.yaml`). |
+| `--image` / `--runsc-path` / `--timeout` | `probe nvproxy` | `busybox:1.36.1` / `/usr/local/bin/runsc` / `2m` | Probe pod image, host path of `runsc`, wait budget. |
 | `--skip-preflight`         | `apply`      | `false`     | Bypass the cluster preflight gate (not recommended).                    |
 | `--plan`                   | apply/rollback | required  | Path to a `MigrationPlan` JSON/YAML.                                    |
 | `--dry-run`                | apply/rollback | `true`    | Compute patches but do not mutate the cluster.                          |
@@ -399,12 +415,21 @@ installed on them, so `runsc` can never be present. `preflight` reports
 self-managed or Karpenter node group built from the agentmoat AL2023 AMI
 next to the Auto Mode pool; see [`docs/eks-deployment.md`](docs/eks-deployment.md).
 
-**What about workloads that need raw sockets, eBPF, or GPU passthrough?**
+**What about workloads that need raw sockets or eBPF?**
 The classifier marks them `incompatible`. The planner excludes them. The
 `reasons[]` field on each `WorkloadResult` names the rule that fired and
 links to the relevant gVisor doc, so the recommendation is concrete: either
 leave the workload on `runc` (and put it on a non-gVisor node pool) or
-adopt the gVisor option that supports it (`--net-raw`, `nvproxy`).
+adopt the gVisor option that supports it (`--net-raw`).
+
+**And GPU workloads?** gVisor runs CUDA through `nvproxy`, which supports
+T4, A100, A10G, L4, and H100 cards, needs an exact host-driver match with
+the installed `runsc`, and does not support MIG. `scan` reads the GPU nodes'
+card and driver from GPU Feature Discovery labels, and `agentmoat probe
+nvproxy --dry-run=false` reads the driver list from `runsc` itself through a
+one-shot pod. With both, a GPU workload on supported hardware is
+`compatible` and lands in the plan; one on a V100, a MIG slice, or an
+unlisted driver is `incompatible`. See [`docs/gpu-nvproxy.md`](docs/gpu-nvproxy.md).
 
 **Does agentmoat install anything in-cluster?** No CRDs, no webhooks, no
 controllers. It patches pod templates and reads/writes one namespace
@@ -428,10 +453,11 @@ image.
 Phase 0 (foundation), Phase 1 (read-only scan + classifier), Phase 2
 (planner + applier + rollback, with idempotency and audit), Phase 3
 (`agentmoat verify` with optional `--in-pod-probe`, plus `agentmoat
-explain`), and Phase 4 (the `agentmoat-mcp` MCP server: 8 tools over
+explain`), and Phase 4 (the `agentmoat-mcp` MCP server: 9 tools over
 stdio, see [`docs/mcp-integration.md`](docs/mcp-integration.md)) are all
 shipped and exercised end-to-end against a real gVisor kind cluster.
-`agentmoat preflight` and the apply gate landed after v0.1.0.
+`agentmoat preflight`, the apply gate, and `agentmoat probe nvproxy` landed
+after v0.1.0.
 
 Roadmap:
 
@@ -444,6 +470,7 @@ Roadmap:
 - [gVisor 101](docs/gvisor-101.md): Sentry, Gofer, platforms, and where the overhead lives.
 - [RuntimeClass 101](docs/runtimeclass-101.md): one-page intro to the `RuntimeClass` API.
 - [Preflight](docs/preflight.md): the finding IDs, what `apply` does with them, and EKS Auto Mode.
+- [GPU workloads and nvproxy](docs/gpu-nvproxy.md): supported cards, the driver probe, and how `gpu-passthrough` is decided.
 - [Threat model](docs/threat-model.md): what gVisor stops that `runc` does not, with CVE references.
 - [Compatibility checklist](docs/compatibility-checklist.md): the full rule catalog and `--rules` override schema.
 - [Exit codes](docs/exit-codes.md): the deterministic exit codes by command.

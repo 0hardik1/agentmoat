@@ -30,6 +30,7 @@ import (
 // docs/<file>.md.
 var topicFiles = map[string]string{
 	"compatibility": "compatibility-checklist.md",
+	"gpu":           "gpu-nvproxy.md",
 	"gvisor":        "gvisor-101.md",
 	"performance":   "performance.md",
 	"preflight":     "preflight.md",

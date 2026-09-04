@@ -20,6 +20,7 @@ func TestNewServer_RegistersAllTools(t *testing.T) {
 		"assess_workload",
 		"explain",
 		"preflight_cluster",
+		"probe_nvproxy",
 		"propose_plan",
 		"rollback_plan",
 		"scan_cluster",

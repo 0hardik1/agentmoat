@@ -144,3 +144,68 @@ func TestAdditiveFieldsPresentWhenSet(t *testing.T) {
 		}
 	}
 }
+
+func TestGPUFactsRoundTripAndOmitEmpty(t *testing.T) {
+	// A CPU-only cluster serializes exactly as before the GPU addition.
+	plain, _ := json.Marshal(ClusterFacts{})
+	if strings.Contains(string(plain), `"gpu"`) {
+		t.Fatalf("ClusterFacts without GPU nodes must omit gpu: %s", plain)
+	}
+	meta, _ := json.Marshal(PreflightMetadata{})
+	if strings.Contains(string(meta), `"probe"`) {
+		t.Fatalf("PreflightMetadata without a probe must omit probe: %s", meta)
+	}
+
+	in := ClusterFacts{GPU: &GPUFacts{
+		Nodes: 3, MatchingNodes: 2, MIGNodes: 1,
+		Groups: []GPUNodeGroup{
+			{Product: "Tesla-T4", Driver: "535.183.06", Nodes: 2, MatchingNodes: 2,
+				ProductSupport: SupportSupported, DriverSupport: SupportSupported},
+			{MIG: true, Nodes: 1, ProductSupport: SupportUnknown, DriverSupport: SupportUnknown},
+		},
+		Nvproxy: &NvproxyFacts{RunscVersion: "release-20260817.0", SupportedDrivers: []string{"535.183.06"},
+			Node: "gv-1", ProbedAt: "2026-09-04T00:00:00Z"},
+	}}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"gpu":`, `"groups":`, `"productSupport":"supported"`, `"nvproxy":`, `"supportedDrivers":`, `"mig":true`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("serialized GPU facts missing %s: %s", key, data)
+		}
+	}
+	var out ClusterFacts
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(in, out) {
+		t.Fatalf("round trip mismatch:\n in %+v\nout %+v", in, out)
+	}
+}
+
+func TestProbeMetadataRoundTrip(t *testing.T) {
+	in := PreflightMetadata{RuntimeClassName: "gvisor", Probe: &ProbeMetadata{
+		DryRun: true, Namespace: "default", PodName: "agentmoat-nvproxy-probe", Node: "gv-1",
+		Image: "busybox:1.36.1", RunscPath: "/usr/local/bin/runsc",
+	}}
+	data, _ := json.Marshal(in)
+	var out PreflightMetadata
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(in, out) {
+		t.Fatalf("round trip mismatch: %+v vs %+v", in, out)
+	}
+	if !strings.Contains(string(data), `"succeeded":false`) {
+		t.Fatalf("succeeded must always serialize so a dry run reads as not-run: %s", data)
+	}
+}
+
+func TestNvidiaConstants(t *testing.T) {
+	if GFDProductLabel != "nvidia.com/gpu.product" || GFDDriverVersionLabel != "nvidia.com/cuda.driver-version.full" ||
+		GFDMIGStrategyLabel != "nvidia.com/mig.strategy" || NvidiaGPUResource != "nvidia.com/gpu" ||
+		NvidiaMIGResourcePrefix != "nvidia.com/mig-" {
+		t.Fatalf("NVIDIA label constants drifted from the GFD/device-plugin names")
+	}
+}

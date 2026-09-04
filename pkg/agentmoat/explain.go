@@ -159,13 +159,22 @@ func explainNamespace(ctx context.Context, opts ExplainOptions) (*schema.Explain
 		workloads = filtered
 	}
 
+	// Same cluster facts as scan, so the deep explanation of a GPU
+	// workload carries the same refined verdict the scan table shows.
+	facts, err := resolveClusterFacts(ctx, client, factsSource{
+		RuntimeClassName: scanOpts.RuntimeClassName, SkipClusterFacts: scanOpts.SkipClusterFacts, FactsPath: scanOpts.FactsPath,
+	}, stderr)
+	if err != nil {
+		return nil, err
+	}
+
 	// Classify and explain each surviving workload in scanner order.
 	// scanner.Enumerate already sorts by (namespace, kind, name) so the
 	// output is deterministic without a re-sort.
 	rules := registry.Rules()
 	explanations := make([]schema.WorkloadExplanation, 0, len(workloads))
 	for _, w := range workloads {
-		v := classifier.Classify(w, registry)
+		v := classifier.ClassifyWithFacts(w, registry, facts)
 		expl, err := explainer.ExplainWorkload(w, v, rules)
 		if err != nil {
 			// ExplainWorkload returns nil for missing prose; an actual

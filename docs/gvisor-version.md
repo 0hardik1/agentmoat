@@ -86,3 +86,12 @@ make kind-down && make e2e
 
 Every mention of the tag that `bump-gvisor-version.sh` does not know about is
 reported as a warning. Add new files to its `FILES` list when that happens.
+
+Two things the script cannot bump for you, both in the release notes of the
+new tag:
+
+- the NVIDIA card list nvproxy supports (`NvproxySupportedProducts` in
+  `pkg/preflight/gpu.go`; see [`gpu-nvproxy.md`](gpu-nvproxy.md));
+- the supported driver list, which is compiled into `runsc` and which
+  `agentmoat probe nvproxy` reads from the nodes, so it needs no code change
+  but does need the nodes re-imaged before the probe reports the new list.

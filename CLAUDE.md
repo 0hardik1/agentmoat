@@ -14,10 +14,11 @@ not duplicate them.
 `agentmoat` is a Go CLI plus an MCP server that moves Kubernetes
 workloads from `runc` to gVisor (`runsc`). The pipeline is
 `scan -> preflight -> plan -> apply -> rollback -> verify -> explain`
-(Phases 0-3, shipped). The CLI binary and the MCP binary are intentionally thin shells
-over a single library at `pkg/agentmoat`; both surfaces call the same
-orchestrator functions (`Scan`, `Plan`, `Apply`, `Rollback`, `Verify`,
-`Explain`) so they cannot drift. See
+(Phases 0-3, shipped), plus `probe nvproxy` for GPU clusters. The CLI binary
+and the MCP binary are intentionally thin shells over a single library at
+`pkg/agentmoat`; both surfaces call the same orchestrator functions (`Scan`,
+`Preflight`, `Probe`, `Plan`, `Apply`, `Rollback`, `Verify`, `Explain`) so
+they cannot drift. See
 [`docs/architecture.md`](docs/architecture.md) for the diagram and the
 package map.
 
@@ -44,7 +45,7 @@ them green locally before pushing.
 ## Repository layout (where to look)
 
 - `cmd/agentmoat/` and `cmd/agentmoat-mcp/`: thin shells. CLI uses Cobra;
-  the MCP binary serves 8 tools over stdio (Phase 4, shipped). Add new
+  the MCP binary serves 9 tools over stdio (Phase 4, shipped). Add new
   subcommands here as `<verb>.go` next to the existing files; global flags
   live in `root.go`.
 - `pkg/agentmoat/`: orchestrator. One public function per verb
@@ -52,13 +53,21 @@ them green locally before pushing.
 - `pkg/scanner/`: cluster enumeration via `client-go`. Returns canonical
   `[]scanner.Workload`.
 - `pkg/classifier/`: pure-function rule engine. `Classify(w, registry)`
-  returns a `Verdict`. Built-in rules in `builtin_rules.go`; YAML
+  returns a `Verdict`; `ClassifyWithFacts` adds `schema.ClusterFacts` so a
+  rule's `Refine` hook can move its severity (only `gpu-passthrough` does,
+  in `gpu_refine.go`). Built-in rules in `builtin_rules.go`; YAML
   overrides in `internal/rules/gvisor.yaml`.
 - `pkg/preflight/`: reads one RuntimeClass and the node list into
   `schema.ClusterFacts` (`Collect`), turns facts into findings with stable
   IDs (`Evaluate`, pure), and wraps both (`Run`). `apply` calls it as a gate
   and refuses to run on an error finding (exit 5); `scan` stores the facts
-  and `plan` derives warnings from them. See `docs/preflight.md`.
+  and `plan` derives warnings from them. `gpu.go` adds the GPU inventory
+  from GPU Feature Discovery labels. See `docs/preflight.md`.
+- `pkg/probe/`: the nvproxy probe. Creates one pod on a gVisor node that
+  runs the host `runsc` (hostPath, read-only, non-root, under runc), parses
+  `runsc --version` and `runsc nvproxy list-supported-drivers`, deletes the
+  pod. Dry-run by default. Output is a `PreflightReport`; `scan --facts`
+  reads it. See `docs/gpu-nvproxy.md`.
 - `pkg/planner/`: pure function from `ScanReport` to `MigrationPlan`.
   Same scan in, same plan and same SHA-256 `planHash` out. Don't break
   determinism.
@@ -131,10 +140,10 @@ them green locally before pushing.
   `runtimeClassName` check, optional `--in-pod-probe`) and `explain`
   (embedded docs plus `explain namespace` / `explain workload` deep scans)
   are wired in `cmd/agentmoat/` and exercised by `make e2e`.
-- **Phase 4** (MCP server): shipped. `cmd/agentmoat-mcp/` serves 8 tools
-  over stdio (`scan_cluster`, `preflight_cluster`, `assess_workload`,
-  `propose_plan`, `apply_plan`, `rollback_plan`, `verify_migration`,
-  `explain`). See
+- **Phase 4** (MCP server): shipped. `cmd/agentmoat-mcp/` serves 9 tools
+  over stdio (`scan_cluster`, `preflight_cluster`, `probe_nvproxy`,
+  `assess_workload`, `propose_plan`, `apply_plan`, `rollback_plan`,
+  `verify_migration`, `explain`). See
   [`docs/mcp-integration.md`](docs/mcp-integration.md).
 - **Phase 5+**: EKS recipe, additional Packer variants.
 
@@ -147,8 +156,8 @@ When the phase shifts, update this section.
   (it is the only check that exercises the real client-go path against a
   cluster).
 - **Do** ask before mutating a real cluster from any command other than
-  `apply --dry-run=false` and `rollback --dry-run=false`. The dry-run
-  default is load-bearing.
+  `apply --dry-run=false`, `rollback --dry-run=false`, and
+  `probe nvproxy --dry-run=false`. The dry-run default is load-bearing.
 - **Don't** push to `origin` without being asked. Local branches and
   commits are fine; pushing publishes them.
 - **Don't** add a new top-level dependency casually. `go.mod` is short
@@ -164,6 +173,7 @@ Read the relevant doc:
 - Rule catalog and `--rules` override schema: [`docs/compatibility-checklist.md`](docs/compatibility-checklist.md)
 - Exit codes: [`docs/exit-codes.md`](docs/exit-codes.md)
 - Preflight findings and the apply gate: [`docs/preflight.md`](docs/preflight.md)
+- GPU workloads, nvproxy support, the driver probe: [`docs/gpu-nvproxy.md`](docs/gpu-nvproxy.md)
 - gVisor primer: [`docs/gvisor-101.md`](docs/gvisor-101.md)
 - RuntimeClass primer: [`docs/runtimeclass-101.md`](docs/runtimeclass-101.md)
 - Threat model and CVE backdrop: [`docs/threat-model.md`](docs/threat-model.md)

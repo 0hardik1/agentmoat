@@ -108,16 +108,23 @@ func Scan(ctx context.Context, opts ScanOptions) (*schema.ScanReport, error) {
 	}
 
 	// 5. Cluster facts. Two cheap cluster-scoped reads (one RuntimeClass,
-	// the node list). They ride along in the report so `plan --scan`
-	// can warn about a cluster with no gVisor node without touching the
-	// API itself. Failure here never fails the scan: see facts.go.
-	if !opts.SkipClusterFacts {
-		report.Metadata.ClusterFacts = collectClusterFacts(ctx, client, opts.RuntimeClassName, stderr)
+	// the node list), or a saved report when --facts was given. They ride
+	// along in the report so `plan --scan` can warn about a cluster with
+	// no gVisor node without touching the API itself, and they feed the
+	// classifier below (gpu-passthrough refines against the GPU nodes and
+	// the probed nvproxy driver list). Cluster read failures never fail
+	// the scan: see facts.go.
+	facts, err := resolveClusterFacts(ctx, client, factsSource{
+		RuntimeClassName: opts.RuntimeClassName, SkipClusterFacts: opts.SkipClusterFacts, FactsPath: opts.FactsPath,
+	}, stderr)
+	if err != nil {
+		return nil, err
 	}
+	report.Metadata.ClusterFacts = facts
 
 	results := make([]schema.WorkloadResult, 0, len(workloads))
 	for _, w := range workloads {
-		v := classifier.Classify(w, registry)
+		v := classifier.ClassifyWithFacts(w, registry, facts)
 		results = append(results, schema.WorkloadResult{
 			Kind:           w.Kind,
 			Namespace:      w.Namespace,

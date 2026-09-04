@@ -43,6 +43,57 @@ const (
 	BottlerocketOSImagePrefix = "Bottlerocket OS"
 )
 
+// NVIDIA markers the GPU facts read. GPU Feature Discovery (GFD, part of
+// the NVIDIA GPU Operator and of the device plugin Helm chart) publishes
+// the card model and the host driver version as node labels; the device
+// plugin advertises the GPUs as an extended resource. gVisor's nvproxy
+// supports a short list of cards and needs an exact host-driver match, so
+// these labels are what decide whether a GPU workload can move.
+const (
+	// GFDProductLabel is the card model as GFD writes it, with spaces
+	// replaced by dashes: "Tesla-T4", "NVIDIA-A10G", "NVIDIA-H100-80GB-HBM3".
+	GFDProductLabel = "nvidia.com/gpu.product"
+
+	// GFDCountLabel is the number of physical GPUs on the node.
+	GFDCountLabel = "nvidia.com/gpu.count"
+
+	// GFDDriverVersionLabel is the full host driver version ("535.183.06")
+	// on GFD 0.15 and newer.
+	GFDDriverVersionLabel = "nvidia.com/cuda.driver-version.full"
+
+	// GFDDriverMajorLabel, GFDDriverMinorLabel, GFDDriverRevLabel are the
+	// three-part form older GFD releases publish; they are joined with
+	// dots when the full label is absent.
+	GFDDriverMajorLabel = "nvidia.com/cuda.driver.major"
+	GFDDriverMinorLabel = "nvidia.com/cuda.driver.minor"
+	GFDDriverRevLabel   = "nvidia.com/cuda.driver.rev"
+
+	// GFDMIGStrategyLabel is "none", "single", or "mixed". Anything other
+	// than "none" means the node slices its GPUs with MIG, which nvproxy
+	// does not support.
+	GFDMIGStrategyLabel = "nvidia.com/mig.strategy"
+
+	// NvidiaGPUResource is the extended resource the device plugin
+	// advertises for whole GPUs. NvidiaResourcePrefix covers it together
+	// with the shared (`nvidia.com/gpu.shared`) and MIG
+	// (`nvidia.com/mig-1g.5gb`) variants; NvidiaMIGResourcePrefix is the
+	// MIG subset.
+	NvidiaGPUResource       = "nvidia.com/gpu"
+	NvidiaResourcePrefix    = "nvidia.com/"
+	NvidiaMIGResourcePrefix = "nvidia.com/mig-"
+)
+
+// SupportStatus is the three-way answer to "does gVisor nvproxy support
+// this?". Unknown means the facts needed to decide were not available
+// (no GFD label, or the driver list has not been probed yet).
+type SupportStatus string
+
+const (
+	SupportSupported   SupportStatus = "supported"
+	SupportUnsupported SupportStatus = "unsupported"
+	SupportUnknown     SupportStatus = "unknown"
+)
+
 // PreflightReport is the top-level envelope of `agentmoat preflight`.
 type PreflightReport struct {
 	APIVersion string            `json:"apiVersion" yaml:"apiVersion"`
@@ -70,6 +121,38 @@ type PreflightMetadata struct {
 	// RuntimeClassName is the RuntimeClass the facts and findings describe
 	// ("gvisor" unless --runtime-class was passed).
 	RuntimeClassName string `json:"runtimeClassName" yaml:"runtimeClassName"`
+
+	// Probe is set when the report came from `agentmoat probe nvproxy`,
+	// which extends the preflight with a one-shot pod that reads the runsc
+	// binary on a gVisor node. Nil for a plain preflight.
+	Probe *ProbeMetadata `json:"probe,omitempty" yaml:"probe,omitempty"`
+}
+
+// ProbeMetadata records what the nvproxy probe did (or, in dry-run, what
+// it would have done). The pod is created and deleted by the probe; these
+// fields are how an operator audits it afterwards.
+type ProbeMetadata struct {
+	// DryRun is true when no pod was created. The other fields then
+	// describe the pod the probe would create.
+	DryRun bool `json:"dryRun" yaml:"dryRun"`
+
+	// Namespace and PodName identify the probe pod.
+	Namespace string `json:"namespace" yaml:"namespace"`
+	PodName   string `json:"podName"   yaml:"podName"`
+
+	// Node is the node the pod was pinned to: a Ready node matching the
+	// RuntimeClass nodeSelector, preferring one that has GPUs.
+	Node string `json:"node,omitempty" yaml:"node,omitempty"`
+
+	// Image is the container image; RunscPath is the host path of the
+	// runsc binary the pod mounts read-only.
+	Image     string `json:"image"     yaml:"image"`
+	RunscPath string `json:"runscPath" yaml:"runscPath"`
+
+	// Succeeded is true when the pod ran to completion and its output
+	// parsed. False in dry-run and when the probe failed (see the
+	// nvproxy-probe-failed finding for why).
+	Succeeded bool `json:"succeeded" yaml:"succeeded"`
 }
 
 // PreflightSpec is the payload of a PreflightReport: what was observed
@@ -117,6 +200,12 @@ type ClusterFacts struct {
 	RuntimeClass RuntimeClassFacts `json:"runtimeClass" yaml:"runtimeClass"`
 	Nodes        NodeFacts         `json:"nodes"        yaml:"nodes"`
 	Platform     PlatformFacts     `json:"platform"     yaml:"platform"`
+
+	// GPU describes the cluster's NVIDIA GPU nodes and, after `agentmoat
+	// probe nvproxy` has run, the driver versions the installed runsc
+	// supports. Nil when no node advertises a GPU and no probe ran. The
+	// classifier reads this to refine the gpu-passthrough verdict.
+	GPU *GPUFacts `json:"gpu,omitempty" yaml:"gpu,omitempty"`
 }
 
 // RuntimeClassFacts describes the RuntimeClass object the migration
@@ -183,6 +272,73 @@ type PlatformFacts struct {
 	// KarpenterNodes is informational: Karpenter-provisioned nodes are
 	// fine as long as their NodeClass uses an AMI that ships runsc.
 	KarpenterNodes int `json:"karpenterNodes" yaml:"karpenterNodes"`
+}
+
+// GPUFacts is the GPU inventory. A node counts as a GPU node when it
+// advertises the nvidia.com/gpu extended resource or carries the GFD
+// product label. Nodes are grouped by (product, driver, MIG) because that
+// triple is exactly what decides nvproxy support.
+type GPUFacts struct {
+	// Nodes is the number of GPU nodes; MatchingNodes how many of them
+	// match the RuntimeClass nodeSelector (only those can host a gVisor
+	// GPU pod).
+	Nodes         int `json:"nodes"         yaml:"nodes"`
+	MatchingNodes int `json:"matchingNodes" yaml:"matchingNodes"`
+
+	// MIGNodes counts GPU nodes whose GFD MIG strategy is not "none".
+	MIGNodes int `json:"migNodes" yaml:"migNodes"`
+
+	// Groups lists the distinct (product, driver, MIG) combinations,
+	// sorted by product then driver, each with its node counts and the
+	// support verdicts. Empty only when Nodes is 0.
+	Groups []GPUNodeGroup `json:"groups,omitempty" yaml:"groups,omitempty"`
+
+	// Nvproxy is what `agentmoat probe nvproxy` read from the runsc
+	// binary on a gVisor node. Nil until the probe has run; the driver
+	// verdict in every group is then "unknown".
+	Nvproxy *NvproxyFacts `json:"nvproxy,omitempty" yaml:"nvproxy,omitempty"`
+}
+
+// GPUNodeGroup is one (product, driver, MIG) combination and the nodes
+// that share it.
+type GPUNodeGroup struct {
+	// Product is the GFD gpu.product label value. Empty when the nodes
+	// advertise nvidia.com/gpu but carry no GFD labels.
+	Product string `json:"product,omitempty" yaml:"product,omitempty"`
+
+	// Driver is the host driver version from the GFD labels, "" when
+	// unknown.
+	Driver string `json:"driver,omitempty" yaml:"driver,omitempty"`
+
+	// MIG is true when the nodes slice their GPUs with MIG.
+	MIG bool `json:"mig" yaml:"mig"`
+
+	// Nodes and MatchingNodes are the group's node counts, the latter
+	// restricted to nodes matching the RuntimeClass nodeSelector.
+	Nodes         int `json:"nodes"         yaml:"nodes"`
+	MatchingNodes int `json:"matchingNodes" yaml:"matchingNodes"`
+
+	// ProductSupport says whether nvproxy supports the card (decided from
+	// the compiled-in list of supported models); DriverSupport whether
+	// the installed runsc lists the driver (decided from Nvproxy, so
+	// "unknown" until the probe has run).
+	ProductSupport SupportStatus `json:"productSupport" yaml:"productSupport"`
+	DriverSupport  SupportStatus `json:"driverSupport"  yaml:"driverSupport"`
+}
+
+// NvproxyFacts is what the probe pod read from the runsc binary.
+type NvproxyFacts struct {
+	// RunscVersion is the `runsc --version` release string
+	// ("release-20260817.0").
+	RunscVersion string `json:"runscVersion" yaml:"runscVersion"`
+
+	// SupportedDrivers is the output of `runsc nvproxy
+	// list-supported-drivers`, one host driver version per entry, sorted.
+	SupportedDrivers []string `json:"supportedDrivers" yaml:"supportedDrivers"`
+
+	// Node is where the probe ran; ProbedAt when (RFC3339).
+	Node     string `json:"node"     yaml:"node"`
+	ProbedAt string `json:"probedAt" yaml:"probedAt"`
 }
 
 // PlanWarning is a plan-level caution derived from the ScanReport's

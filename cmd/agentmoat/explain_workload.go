@@ -77,6 +77,7 @@ func runExplainWorkload(cmd *cobra.Command, args []string) error {
 			IncludeSystem:  flagIncludeSystem,
 			LabelSelector:  flagLabelSelector,
 			RulesYAMLPath:  flagRulesYAML,
+			FactsPath:      flagExplainFactsPath,
 			Stderr:         stderr,
 		},
 	}

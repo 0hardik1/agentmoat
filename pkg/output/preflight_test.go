@@ -216,3 +216,62 @@ func TestRenderVerifyReportTable_NodeColumn(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderPreflightReportTable_GPUAndProbe(t *testing.T) {
+	t.Parallel()
+	r := samplePreflightReport()
+	r.Spec.Summary = schema.PreflightSummary{Ready: true, Total: 1, Info: 1}
+	r.Spec.Facts.Platform = schema.PlatformFacts{}
+	r.Spec.Facts.Nodes = schema.NodeFacts{Total: 4, Ready: 4, MatchingSelector: 2, MatchingAndReady: 2}
+	r.Spec.Facts.GPU = &schema.GPUFacts{
+		Nodes: 3, MatchingNodes: 2, MIGNodes: 1,
+		Groups: []schema.GPUNodeGroup{
+			{Product: "Tesla-T4", Driver: "535.183.06", Nodes: 2, MatchingNodes: 2,
+				ProductSupport: schema.SupportSupported, DriverSupport: schema.SupportSupported},
+			{MIG: true, Nodes: 1, ProductSupport: schema.SupportUnknown, DriverSupport: schema.SupportUnknown},
+		},
+		Nvproxy: &schema.NvproxyFacts{RunscVersion: "release-20260817.0", SupportedDrivers: []string{"535.183.06", "550.54.15"}, Node: "gv-1"},
+	}
+	r.Metadata.Probe = &schema.ProbeMetadata{Namespace: "default", PodName: "agentmoat-nvproxy-probe", Node: "gv-1",
+		Image: "busybox:1.36.1", RunscPath: "/usr/local/bin/runsc", Succeeded: true}
+	r.Spec.Findings = []schema.PreflightFinding{{ID: "gpu-nvproxy-ready", Severity: schema.SeverityInfo, Message: "runsc supports"}}
+
+	out := renderToString(t, r)
+	for _, want := range []string{
+		"probe: default/agentmoat-nvproxy-probe ran on node gv-1",
+		"GPU: nodes=3  matching-selector=2  mig=1  nvproxy=runsc release-20260817.0 (2 supported drivers)",
+		"Tesla-T4  driver=535.183.06  nodes=2 (matching 2)  card=supported  driver-support=supported",
+		"(no GFD labels)  driver=unknown  nodes=1 (matching 0)  mig=yes  card=unknown  driver-support=unknown",
+		"gpu-nvproxy-ready",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\nfull output:\n%s", want, out)
+		}
+	}
+
+	// Dry run: chip says so, GPU line says not probed.
+	r.Metadata.Probe = &schema.ProbeMetadata{DryRun: true, Namespace: "default", PodName: "agentmoat-nvproxy-probe", Node: "gv-1"}
+	r.Spec.Facts.GPU.Nvproxy = nil
+	out = renderToString(t, r)
+	for _, want := range []string{
+		"probe: dry-run (would create default/agentmoat-nvproxy-probe on node gv-1)",
+		"nvproxy=(not probed; run 'agentmoat probe nvproxy')",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry-run output missing %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+func TestDescribeProbe(t *testing.T) {
+	cases := map[string]*schema.ProbeMetadata{
+		"dry-run (not scheduled: preflight not ready)": {DryRun: true},
+		"skipped (preflight not ready)":                {},
+		"failed on node n1 (see findings)":             {Node: "n1"},
+	}
+	for want, pm := range cases {
+		if got := describeProbe(pm); got != want {
+			t.Errorf("describeProbe(%+v) = %q, want %q", pm, got, want)
+		}
+	}
+}
