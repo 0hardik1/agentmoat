@@ -255,7 +255,9 @@ elided fields are marked `...`.
 [`packer/eks-gvisor-al2023.pkr.hcl`](packer/eks-gvisor-al2023.pkr.hcl) builds
 an EKS-optimized AL2023 AMI with `runsc` and the containerd v2 shim
 preinstalled, the containerd drop-in pre-staged, and the systrap platform
-pinned (KVM is unavailable on EKS instances).
+pinned (KVM is unavailable on EKS instances). The gVisor release is pinned
+and refreshed weekly by an automated PR; see
+[`docs/gvisor-version.md`](docs/gvisor-version.md).
 
 ```bash
 cd packer
@@ -283,7 +285,7 @@ execute under `runsc`. Honors `CLUSTER_NAME` and `KEEP_CLUSTER=1` for
 iteration.
 
 ```bash
-make kind-up          # idempotent; rebuilds the image only when missing
+make kind-up          # idempotent; rebuilds the image when missing or built for another gVisor release
 make e2e              # full scan -> plan -> apply -> rollback against the cluster
 KEEP_CLUSTER=1 make e2e
 make kind-down

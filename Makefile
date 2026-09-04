@@ -49,7 +49,7 @@ BIN_DIR := ./bin
 
 # Declare every target as phony. None of these targets produce a file at the
 # literal name of the target, so Make should always run the recipe.
-.PHONY: help build test lint tidy clean version check-gvisor-version kind-build kind-up kind-down e2e scan mcp-smoke
+.PHONY: help build test lint tidy clean version check-gvisor-version check-gvisor-latest kind-build kind-up kind-down e2e scan mcp-smoke
 
 help: ## Print this help message (default target).
 	@# The awk pattern below scans this Makefile for lines of the form
@@ -77,6 +77,12 @@ test: ## Run unit tests with race detector and coverage.
 
 check-gvisor-version: ## Verify pinned gVisor release tags resolve and packer/kind defaults match.
 	@./scripts/check-gvisor-version.sh
+
+check-gvisor-latest: ## Like check-gvisor-version, and fail (exit 2) if a newer gVisor release is published.
+	@# The weekly gvisor-drift.yml workflow runs this and opens a bump PR.
+	@# Locally it answers "am I behind?" without touching any file; to
+	@# bump, run ./scripts/bump-gvisor-version.sh <tag>.
+	@./scripts/check-gvisor-version.sh --latest
 
 lint: ## Run golangci-lint against the whole module.
 	@# Configuration lives in .golangci.yml at the repo root. Run this before

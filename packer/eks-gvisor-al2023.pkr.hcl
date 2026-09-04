@@ -13,10 +13,10 @@
 // Build:
 //   packer init   .
 //   packer validate .
-//   packer build  -var 'k8s_version=1.31' -var 'gvisor_version=20250811.0' .
+//   packer build  -var 'k8s_version=1.31' -var 'gvisor_version=20260817.0' .
 //
 // gVisor download URLs use the point-release tag ${yyyymmdd}.${rc} (e.g.
-// 20250811.0), not the `runsc --version` prefix "release-". See
+// 20260817.0), not the `runsc --version` prefix "release-". See
 // https://gvisor.dev/docs/user_guide/install/ and scripts/check-gvisor-version.sh.
 //
 // The resulting AMI:
@@ -44,8 +44,8 @@ variable "k8s_version" {
 
 variable "gvisor_version" {
   type        = string
-  default     = "20250811.0"
-  description = "gVisor point-release tag for download URLs (${yyyymmdd}.${rc}, e.g. 20250811.0). Must match kind/scripts GVISOR_VERSION. runsc --version prints a release- prefix; omit that here. See https://gvisor.dev/docs/user_guide/install/."
+  default     = "20260817.0"
+  description = "gVisor point-release tag for download URLs (${yyyymmdd}.${rc}, e.g. 20260817.0). Must match kind/scripts GVISOR_VERSION. runsc --version prints a release- prefix; omit that here. See https://gvisor.dev/docs/user_guide/install/."
 }
 
 variable "region" {
@@ -129,6 +129,11 @@ build {
   sources = ["source.amazon-ebs.eks_gvisor_al2023"]
 
   // 1. Install runsc + the containerd shim, with SHA512 verification.
+  //
+  // gVisor's install guide prefers its Debian package where available. AL2023
+  // is RPM/dnf based and gVisor publishes no RPM, so the pinned release
+  // artifacts are the only supported path here. The pin is kept current by
+  // .github/workflows/gvisor-drift.yml (see docs/gvisor-version.md).
   provisioner "shell" {
     inline_shebang = "/bin/bash -eo pipefail"
     inline = [

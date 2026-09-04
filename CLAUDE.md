@@ -32,7 +32,9 @@ invocation more than twice, prefer extending a target.
 | `make test`       | `go test -race -cover ./...`. Race detector is non-negotiable here (concurrent K8s + MCP code). |
 | `make lint`       | `golangci-lint run ./...` against [`.golangci.yml`](.golangci.yml). CI runs the same command. |
 | `make tidy`       | `go mod tidy`. Run after any import change. |
-| `make kind-up`    | Builds the gVisor-enabled kind worker image and creates the local cluster. Idempotent. |
+| `make check-gvisor-version` | Asserts the gVisor release pin agrees across packer/kind/scripts and that all release artifacts exist. CI runs it on every PR. |
+| `make check-gvisor-latest`  | Same, plus exit 2 when a newer gVisor release is published. The weekly `gvisor-drift.yml` workflow runs this and opens a bump PR; see `docs/gvisor-version.md`. |
+| `make kind-up`    | Builds the gVisor-enabled kind worker image and creates the local cluster. Idempotent; an existing cluster is reused as is, so run `make kind-down` first after a gVisor pin bump. |
 | `make e2e`        | Builds, brings up kind, runs scan/plan/apply/rollback end-to-end against a real `runsc` runtime, tears down. Honors `KEEP_CLUSTER=1`. |
 | `make kind-down`  | Tear down the kind cluster from `make kind-up`. |
 

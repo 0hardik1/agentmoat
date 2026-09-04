@@ -9,14 +9,17 @@
 # it would otherwise try to pull from Docker Hub and fail).
 #
 # Idempotent: if an image with $IMG_TAG already exists locally for the
-# host arch, the script exits 0 without rebuilding. Use REBUILD=1 to
-# force a rebuild even if the tag is present.
+# host arch AND was built for the requested GVISOR_VERSION (read from the
+# org.agentmoat.gvisor-version label the Dockerfile stamps), the script
+# exits 0 without rebuilding. A different arch or gVisor version triggers a
+# rebuild, so a pin bump is never masked by the tag cache. Use REBUILD=1 to
+# force a rebuild regardless.
 #
 # Environment overrides:
 #
 #   IMG_TAG          image ref (default: agentmoat-kind-gvisor:dev).
 #                    Must match kind/cluster.yaml's nodes[].image.
-#   GVISOR_VERSION   gVisor release tag (default: 20250811.0).
+#   GVISOR_VERSION   gVisor release tag (default: 20260817.0).
 #   KIND_NODE_VERSION
 #                    upstream kindest/node base (default: v1.32.5).
 #   REBUILD          set to 1 to force docker build even if image exists.
@@ -32,7 +35,7 @@
 set -euo pipefail
 
 IMG_TAG="${IMG_TAG:-agentmoat-kind-gvisor:dev}"
-GVISOR_VERSION="${GVISOR_VERSION:-20250811.0}"
+GVISOR_VERSION="${GVISOR_VERSION:-20260817.0}"
 KIND_NODE_VERSION="${KIND_NODE_VERSION:-v1.32.5}"
 REBUILD="${REBUILD:-0}"
 LOAD_CLUSTER="${LOAD_CLUSTER:-}"
@@ -56,15 +59,22 @@ case "$host_arch" in
   *) echo "error: unsupported host arch '$host_arch'" >&2; exit 1 ;;
 esac
 
-# Skip if image already exists for the right platform, unless REBUILD=1.
-# `docker image inspect` exits non-zero if the tag is missing.
+# Skip if an image already exists for the right platform and the right
+# gVisor version, unless REBUILD=1. `docker image inspect` exits non-zero if
+# the tag is missing. Images built before the label existed report an empty
+# version and are rebuilt once.
+GVISOR_LABEL="org.agentmoat.gvisor-version"
 if [[ "$REBUILD" != "1" ]] && docker image inspect "$IMG_TAG" >/dev/null 2>&1; then
   existing_arch=$(docker image inspect "$IMG_TAG" --format '{{.Architecture}}')
-  if [[ "$existing_arch" == "${build_platform#linux/}" ]]; then
-    echo "image '$IMG_TAG' already present ($existing_arch); skip build (REBUILD=1 to override)."
-  else
+  existing_gvisor=$(docker image inspect "$IMG_TAG" --format "{{ index .Config.Labels \"$GVISOR_LABEL\" }}")
+  if [[ "$existing_arch" != "${build_platform#linux/}" ]]; then
     echo "image '$IMG_TAG' present but wrong arch ($existing_arch != ${build_platform#linux/}); rebuilding."
     REBUILD=1
+  elif [[ "$existing_gvisor" != "$GVISOR_VERSION" ]]; then
+    echo "image '$IMG_TAG' present but built for gVisor '${existing_gvisor:-unknown}' (want $GVISOR_VERSION); rebuilding."
+    REBUILD=1
+  else
+    echo "image '$IMG_TAG' already present ($existing_arch, gVisor $existing_gvisor); skip build (REBUILD=1 to override)."
   fi
 fi
 
