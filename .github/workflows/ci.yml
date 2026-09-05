@@ -55,7 +55,7 @@ jobs:
       # for readability. CI is not security-critical enough to warrant sha
       # pins, and we re-evaluate when the major bumps.
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # setup-go@v5 installs the requested Go version and enables the module
       # and build caches keyed by go.sum. No separate actions/cache step
@@ -105,7 +105,7 @@ jobs:
         os: [ubuntu-latest]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go ${{ matrix.go-version }}
         uses: actions/setup-go@v5
@@ -129,7 +129,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Verify pinned gVisor release
         run: make check-gvisor-version

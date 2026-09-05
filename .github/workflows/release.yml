@@ -55,7 +55,7 @@ jobs:
       # from the previous tag to HEAD. A shallow clone would silently produce
       # an empty changelog. This is the #1 GoReleaser footgun.
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
