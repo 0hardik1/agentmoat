@@ -44,6 +44,10 @@ fi
 
 # Short-circuit if the cluster is already up. `kind get clusters` is one
 # line per cluster name; grep with anchors avoids substring matches.
+#
+# Note: an existing cluster keeps whatever node image it was created with.
+# After a gVisor pin bump (docs/gvisor-version.md), run `make kind-down`
+# first so the next `make kind-up` boots the freshly built image.
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
   echo "kind cluster '$CLUSTER_NAME' already exists; reusing."
   exit 0

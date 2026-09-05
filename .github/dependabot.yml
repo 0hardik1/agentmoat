@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# agentmoat: Dependabot configuration
+# ---------------------------------------------------------------------------
+#
+# Two ecosystems are watched, both weekly on Monday so bumps arrive in one
+# batch rather than trickling in all week:
+#
+#   * github-actions: the `uses:` pins in .github/workflows/*.yml. Action
+#     majors move rarely, but when they do (golangci-lint-action v6 -> v7 for
+#     the v2 config format, for example) a stale pin silently breaks CI.
+#   * gomod: go.mod dependencies. The k8s.io/* and sigs.k8s.io/* modules are
+#     grouped because client-go, api, and apimachinery must move together;
+#     a PR that bumps only one of them does not compile.
+#
+# Dependabot does not understand the gVisor release pin (it is a URL path
+# fragment in a Dockerfile, a shell script, and a Packer template). That pin
+# is watched by .github/workflows/gvisor-drift.yml instead.
+# ---------------------------------------------------------------------------
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(ci)"
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      kubernetes:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"

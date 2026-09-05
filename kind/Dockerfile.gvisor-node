@@ -17,7 +17,7 @@
 #
 #   docker buildx build \
 #     --platform "linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
-#     --build-arg GVISOR_VERSION=20250811.0 \
+#     --build-arg GVISOR_VERSION=20260817.0 \
 #     --build-arg KIND_NODE_VERSION=v1.32.5 \
 #     -t agentmoat-kind-gvisor:dev \
 #     -f kind/Dockerfile.gvisor-node kind/
@@ -43,12 +43,19 @@
 ARG KIND_NODE_VERSION=v1.32.5
 FROM kindest/node:${KIND_NODE_VERSION}
 
-# Pinned to a tested gVisor release. To bump, follow the publication at
-# https://github.com/google/gvisor/releases and re-verify both archs upload
+# Pinned to a tested gVisor release. Bump with scripts/bump-gvisor-version.sh,
+# which rewrites every copy of the pin and verifies that both archs publish
 # `runsc`, `runsc.sha512`, `containerd-shim-runsc-v1`, and
 # `containerd-shim-runsc-v1.sha512` under
 # https://storage.googleapis.com/gvisor/releases/release/<tag>/<arch>/.
-ARG GVISOR_VERSION=20250811.0
+# The weekly gvisor-drift.yml workflow opens that PR automatically; see
+# docs/gvisor-version.md.
+ARG GVISOR_VERSION=20260817.0
+
+# Record the baked gVisor release on the image. scripts/build-gvisor-node.sh
+# compares this label with the requested GVISOR_VERSION and rebuilds when
+# they differ, so a pin bump is never silently ignored by the tag cache.
+LABEL org.agentmoat.gvisor-version="${GVISOR_VERSION}"
 
 # docker buildx sets TARGETARCH to amd64|arm64; gVisor's release paths use
 # x86_64|aarch64. We translate inside the RUN below.
@@ -59,6 +66,13 @@ ARG TARGETARCH
 # the local check (the SHA file's path is also bound to a specific
 # release/arch, so an attacker would have to compromise the GCS bucket
 # for both files to slip a bad binary through).
+#
+# Why not gVisor's apt repository: kindest/node is Debian-based, so apt
+# would work, but this image must be reproducible. `apt-get install runsc`
+# resolves to whatever is newest at build time, which makes two builds of
+# the same commit install different binaries. The pinned artifact URL plus
+# the checksum keeps the build deterministic; the drift workflow keeps the
+# pin fresh.
 RUN set -eux; \
     case "${TARGETARCH:-$(dpkg --print-architecture 2>/dev/null || echo unknown)}" in \
         amd64) GVISOR_ARCH=x86_64 ;; \

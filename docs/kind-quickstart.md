@@ -1,24 +1,83 @@
 # kind quickstart
 
-> Status: STUB. Filled in alongside Phase 1's e2e suite.
+`make e2e` runs the whole pipeline against a real gVisor runtime inside a
+local [kind](https://kind.sigs.k8s.io/) cluster. This page is the manual
+version of what that target does, for when you want to poke at the cluster
+yourself.
 
-## Planned table of contents
+## Prerequisites
 
-1. Why kind (local Linux VM under Docker Desktop, easy CI integration)
-2. Building the custom gVisor-enabled kind node image (`kind/Dockerfile.gvisor-node`)
-3. Bringing up the cluster (`scripts/kind-up.sh`)
-4. Applying the RuntimeClass (`kubectl apply -f deploy/runtimeclass.yaml`)
-5. Labelling the kind node `runtime=gvisor`
-6. Running `agentmoat scan` against the local cluster
-7. Tearing down (`scripts/kind-down.sh`)
+- Docker (Docker Desktop on macOS is fine; kind runs inside its Linux VM).
+- `kind` and `kubectl` on your PATH.
+- `jq` (the e2e assertions use it).
 
-## Known caveats (to be expanded)
+## 1. Build the gVisor worker image
 
-- gVisor inside a Docker container has known seccomp friction. The kind
-  config will grant `SYS_PTRACE` and turn on `unconfined` seccomp on the
-  node container only (not the workloads).
-- On macOS, kind runs inside the Linux VM that Docker Desktop manages.
-  `systrap` works there; KVM does not. (This matches the EKS constraint.)
+```bash
+make kind-build
+```
 
-For Phase 0 + Phase 1 (today), there is no kind tooling in the repo yet.
-You can still run `agentmoat scan` against any reachable kubeconfig.
+This builds [`kind/Dockerfile.gvisor-node`](../kind/Dockerfile.gvisor-node):
+the upstream `kindest/node` image plus `/usr/local/bin/runsc`, the containerd
+v2 shim, and `/etc/containerd/runsc.toml` (platform pinned to `systrap`, since
+KVM is unavailable inside Docker). The gVisor release is pinned; see
+[`gvisor-version.md`](gvisor-version.md). The build is skipped when an image
+with the same tag and the same baked gVisor version already exists.
+
+## 2. Create the cluster
+
+```bash
+make kind-up
+```
+
+[`kind/cluster.yaml`](../kind/cluster.yaml) describes a stock control-plane
+plus one worker running the image above. The worker carries the label
+`runtime=gvisor`, and `containerdConfigPatches` registers a runtime handler
+named `gvisor` on every node. The target is idempotent: an existing cluster
+named `agentmoat-e2e` is reused, even after a pin bump, so run
+`make kind-down` first when you need the new node image.
+
+## 3. Install the RuntimeClass and some workloads
+
+```bash
+kubectl apply -f test/e2e/manifests/runtimeclass.yaml
+kubectl apply -f test/e2e/manifests/workloads.yaml
+```
+
+The e2e RuntimeClass uses `handler: gvisor` and a `scheduling.nodeSelector` of
+`runtime: gvisor`, so any pod that carries `runtimeClassName: gvisor` is
+admitted with that selector and lands on the worker.
+
+## 4. Run the pipeline
+
+```bash
+./bin/agentmoat scan -n agentmoat-e2e
+./bin/agentmoat plan -n agentmoat-e2e -o json > plan.json
+./bin/agentmoat apply --plan plan.json                 # dry-run by default
+./bin/agentmoat apply --plan plan.json --dry-run=false
+./bin/agentmoat verify --plan plan.json --in-pod-probe
+./bin/agentmoat rollback --plan plan.json --dry-run=false
+```
+
+Or let the harness do all of it, with assertions:
+
+```bash
+make e2e                # creates, tests, and deletes the cluster
+KEEP_CLUSTER=1 make e2e # keep it around for inspection
+```
+
+## 5. Tear down
+
+```bash
+make kind-down
+```
+
+## Caveats
+
+- kind launches node containers with `--privileged`, which is what lets
+  `runsc` use the systrap platform without extra flags.
+- The control-plane node has the `gvisor` handler registered but no `runsc`
+  binary. The RuntimeClass nodeSelector is what keeps gVisor pods off it.
+- The worker is not tainted, so pre-migration workloads (which carry no
+  toleration) still schedule. On a real cluster you may taint gVisor nodes;
+  put the matching toleration in `RuntimeClass.scheduling.tolerations`.

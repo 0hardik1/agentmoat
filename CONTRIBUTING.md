@@ -23,6 +23,9 @@ make test
 
 # Run the linters configured in .golangci.yml.
 make lint
+
+# Verify the pinned gVisor release (three files must agree; artifacts must exist).
+make check-gvisor-version
 ```
 
 The Makefile targets are the source of truth: if you find yourself running a

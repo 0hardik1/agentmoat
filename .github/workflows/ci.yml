@@ -8,7 +8,7 @@
 #   * pull_request: every PR runs lint and tests before review. This is the
 #     main gate for contributor changes.
 #
-# Jobs (both run in parallel; they have no inter-job dependencies):
+# Jobs (all run in parallel; they have no inter-job dependencies):
 #   * `lint`: runs golangci-lint against the whole module. Uses the official
 #     `golangci/golangci-lint-action@v7`, which understands the .golangci.yml
 #     at the repo root.
@@ -16,6 +16,11 @@
 #     a single dimension today (go-version: 1.26 on ubuntu-latest) but is
 #     written as a matrix so we can add more Go versions or OSes later
 #     without restructuring the workflow.
+#   * `gvisor-pin`: runs scripts/check-gvisor-version.sh, which asserts the
+#     three gVisor release pins agree and that all eight release artifacts
+#     exist in the bucket. It does NOT fail on drift (a newer release); that
+#     is the weekly gvisor-drift.yml workflow's job, so a PR never turns red
+#     because gVisor shipped that morning.
 #
 # Caching:
 #   * actions/setup-go@v5 transparently caches the module cache (~/go/pkg/mod)
@@ -67,10 +72,11 @@ jobs:
           # behaviour is obvious to readers of this file.
           cache: true
 
-      # golangci-lint-action@v7 wraps the golangci-lint binary, handles its
-      # own caching for the analyzer state, and respects .golangci.yml.
-      # v7 is required for golangci-lint v2; v6 only understood the v1 wire
-      # format.
+      # golangci-lint-action wraps the golangci-lint binary, handles its own
+      # caching for the analyzer state, and respects .golangci.yml. The
+      # action major must understand golangci-lint v2 config (version: "2");
+      # v7 is the first that does. Dependabot proposes major bumps of this
+      # action; read the changelog before merging one.
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
@@ -112,3 +118,18 @@ jobs:
       # packages early. Coverage uploading is added in a later phase.
       - name: Run unit tests
         run: go test -race -cover ./...
+
+  # --------------------------- gvisor-pin ---------------------------------
+  # Guards the gVisor release pin: the three defaults must agree and every
+  # release artifact the Dockerfile and Packer template download must exist.
+  # Pure shell + curl; no Go toolchain needed. Drift against the newest
+  # release is deliberately NOT checked here (see gvisor-drift.yml).
+  gvisor-pin:
+    name: gVisor pin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify pinned gVisor release
+        run: make check-gvisor-version
