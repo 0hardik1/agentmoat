@@ -61,7 +61,7 @@ jobs:
       # and build caches keyed by go.sum. No separate actions/cache step
       # needed.
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # Matches the toolchain in go.mod. golangci-lint refuses to lint a
           # module that targets a Go version newer than the one it was built
@@ -108,7 +108,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go ${{ matrix.go-version }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go-version }}
           cache: true
