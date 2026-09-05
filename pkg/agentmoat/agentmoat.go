@@ -35,7 +35,10 @@ var Version = "dev"
 //  2. Build the classifier registry (built-in rules + optional YAML overrides).
 //  3. Enumerate workloads via pkg/scanner.
 //  4. Classify each workload via pkg/classifier.
-//  5. Assemble a versioned schema.ScanReport and return it.
+//  5. Collect cluster facts (RuntimeClass + nodes) via pkg/preflight so
+//     the report records whether any node can host the plan. Optional:
+//     skipped on request, degraded to nil when RBAC denies node reads.
+//  6. Assemble a versioned schema.ScanReport and return it.
 //
 // The caller is responsible for rendering the report (CLI uses pkg/output).
 func Scan(ctx context.Context, opts ScanOptions) (*schema.ScanReport, error) {
@@ -102,6 +105,14 @@ func Scan(ctx context.Context, opts ScanOptions) (*schema.ScanReport, error) {
 		Cluster:          kube.CurrentContext(opts.KubeconfigPath, opts.Context),
 		Namespaces:       enumOpts.Namespaces, // nil when the scan was cluster-wide
 		AgentmoatVersion: Version,
+	}
+
+	// 5. Cluster facts. Two cheap cluster-scoped reads (one RuntimeClass,
+	// the node list). They ride along in the report so `plan --scan`
+	// can warn about a cluster with no gVisor node without touching the
+	// API itself. Failure here never fails the scan: see facts.go.
+	if !opts.SkipClusterFacts {
+		report.Metadata.ClusterFacts = collectClusterFacts(ctx, client, opts.RuntimeClassName, stderr)
 	}
 
 	results := make([]schema.WorkloadResult, 0, len(workloads))

@@ -19,16 +19,23 @@
 //
 //   - Choosing a patch type per direction:
 //
-//     Apply    -> Strategic Merge Patch. Tolerations merge by key (the
-//     strategic-merge-key for v1.Toleration is "key"), so we
-//     can add ours without duplicating an existing entry.
+//     Apply    -> Strategic Merge Patch. By default the patch sets only
+//     runtimeClassName: placement (nodeSelector + tolerations)
+//     is the RuntimeClass's job, merged into the pod at
+//     admission, and `agentmoat preflight` checks that the
+//     RuntimeClass actually steers pods to runsc nodes. When
+//     the plan opted in (PlanStep.AddToleration, from
+//     `agentmoat plan --add-toleration`) the patch also adds
+//     the runtime=gvisor:NoSchedule toleration. Tolerations
+//     merge by key (the strategic-merge-key for v1.Toleration
+//     is "key"), so that never duplicates an existing entry.
 //     Rollback -> JSON Merge Patch (RFC 7396). Setting
-//     `runtimeClassName: null` deletes the field. We do not
-//     remove the toleration on rollback: an untainted node
-//     does not select on it, so it is harmless. Removing
-//     the *specific* toleration via JSON Patch indices is
-//     fragile because the list may have been re-ordered by
-//     other admission controllers since apply.
+//     `runtimeClassName: null` deletes the field. A toleration
+//     added by an opt-in apply is left in place: an untainted
+//     node does not select on it, so it is harmless, and
+//     removing the *specific* toleration via JSON Patch
+//     indices is fragile because the list may have been
+//     re-ordered by other admission controllers since apply.
 //
 // Why patches and not full-object updates
 //

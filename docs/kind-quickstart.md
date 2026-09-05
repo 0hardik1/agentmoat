@@ -51,6 +51,7 @@ admitted with that selector and lands on the worker.
 ## 4. Run the pipeline
 
 ```bash
+./bin/agentmoat preflight                              # exit 0: the worker can host gVisor pods
 ./bin/agentmoat scan -n agentmoat-e2e
 ./bin/agentmoat plan -n agentmoat-e2e -o json > plan.json
 ./bin/agentmoat apply --plan plan.json                 # dry-run by default

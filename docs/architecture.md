@@ -16,6 +16,7 @@
                     |  pkg/agentmoat     |   <-- the Go library, importable
                     |    scanner/        |
                     |    classifier/     |
+                    |    preflight/      |
                     |    planner/        |
                     |    applier/        |
                     |    verifier/       |
@@ -30,8 +31,8 @@
 ## Why a Go library at the core
 
 Both the CLI and the MCP server are thin shells over `pkg/agentmoat`. The
-library exposes `Scan`, `Plan`, `Apply`, `Verify`, `Rollback`, and
-`Explain`. Anyone who wants to embed agentmoat in their own operator,
+library exposes `Scan`, `Preflight`, `Plan`, `Apply`, `Verify`, `Rollback`,
+and `Explain`. Anyone who wants to embed agentmoat in their own operator,
 controller, or SDK can `import` the package and call those functions
 directly. No shell-out, no subprocess plumbing.
 
@@ -66,12 +67,13 @@ Jobs, Pods). This pattern matches the K8s-tooling ecosystem (`kube-bench`,
 | --- | --- |
 | `cmd/agentmoat` | CLI entrypoint (cobra). Thin shell over `pkg/agentmoat`. |
 | `cmd/agentmoat-mcp` | MCP-over-stdio server. Thin shell over `pkg/agentmoat`. |
-| `pkg/agentmoat` | Orchestration: `Scan`, `Plan`, `Apply`, `Verify`, `Rollback`, `Explain`. |
+| `pkg/agentmoat` | Orchestration: `Scan`, `Preflight`, `Plan`, `Apply`, `Verify`, `Rollback`, `Explain`. |
 | `pkg/scanner` | Cluster enumeration via client-go; produces `Workload` values. |
 | `pkg/classifier` | Pure-function rule engine; produces `Verdict` values. |
+| `pkg/preflight` | Reads the RuntimeClass and nodes into `ClusterFacts`; pure `Evaluate` turns facts into findings. Gates `apply`. |
 | `pkg/planner` | Migration plan generation from a `ScanReport`. |
 | `pkg/applier` | Pod-template patching with `runtimeClassName`. |
-| `pkg/verifier` | Compares live pods' `runtimeClassName` to the plan; optional in-pod probe. |
+| `pkg/verifier` | Compares live pods' `runtimeClassName` and hosting nodes to the plan; optional in-pod probe. |
 | `pkg/explainer` | Educational text for `agentmoat explain`. |
 | `pkg/output` | Renderers (table / JSON / YAML). |
 | `internal/kube` | client-go construction helpers. |

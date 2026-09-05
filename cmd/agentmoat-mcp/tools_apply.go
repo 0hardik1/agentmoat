@@ -25,7 +25,7 @@ import (
 
 // applyPlanDescription documents the safety gate next to the schema so
 // inspectors (humans and LLMs) cannot miss it.
-const applyPlanDescription = "Apply a MigrationPlan to the cluster. SAFETY: defaults to dry-run; you MUST pass \"dry_run\": false explicitly to mutate the cluster. Returns an ApplyResult with per-step status (applied | already-applied | failed)."
+const applyPlanDescription = "Apply a MigrationPlan to the cluster. SAFETY: defaults to dry-run; you MUST pass \"dry_run\": false explicitly to mutate the cluster. Runs the cluster preflight first (see preflight_cluster) and refuses to proceed on an error finding: the result then has metadata.preflight.ready=false, every step skipped, and spec.preflightFindings explaining why; nothing is mutated. Returns an ApplyResult with per-step status (applied | already-applied | skipped | failed)."
 
 const rollbackPlanDescription = "Rollback a previously-applied MigrationPlan. SAFETY: same dry-run default as apply_plan; you MUST pass \"dry_run\": false explicitly to mutate. Removes runtimeClassName and clears the namespace plan-hash annotation."
 
@@ -81,6 +81,10 @@ func registerApplyPlan(srv *server.MCPServer, deps Deps) {
 	opts := append([]mcp.ToolOption{
 		mcp.WithDescription(applyPlanDescription),
 		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithBoolean("skip_preflight",
+			mcp.Description("Bypass the cluster preflight gate. Default false. Only set true when an operator has confirmed the cluster can host the RuntimeClass despite the findings."),
+			mcp.DefaultBool(false),
+		),
 	}, commonApplyToolOptions()...)
 	tool := mcp.NewTool("apply_plan", opts...)
 
@@ -100,6 +104,7 @@ func registerApplyPlan(srv *server.MCPServer, deps Deps) {
 			DryRun:         dryRun,
 			EmitEvents:     req.GetBool("emit_events", true),
 			AuditEnabled:   req.GetBool("audit_enabled", true),
+			SkipPreflight:  req.GetBool("skip_preflight", false),
 			Stderr:         deps.Stderr,
 			KubeClient:     deps.KubeClient,
 		}

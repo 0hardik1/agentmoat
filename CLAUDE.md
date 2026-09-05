@@ -13,8 +13,8 @@ not duplicate them.
 
 `agentmoat` is a Go CLI plus an MCP server that moves Kubernetes
 workloads from `runc` to gVisor (`runsc`). The pipeline is
-`scan -> plan -> apply -> rollback -> verify -> explain` (Phases 0-3,
-shipped). The CLI binary and the MCP binary are intentionally thin shells
+`scan -> preflight -> plan -> apply -> rollback -> verify -> explain`
+(Phases 0-3, shipped). The CLI binary and the MCP binary are intentionally thin shells
 over a single library at `pkg/agentmoat`; both surfaces call the same
 orchestrator functions (`Scan`, `Plan`, `Apply`, `Rollback`, `Verify`,
 `Explain`) so they cannot drift. See
@@ -44,7 +44,7 @@ them green locally before pushing.
 ## Repository layout (where to look)
 
 - `cmd/agentmoat/` and `cmd/agentmoat-mcp/`: thin shells. CLI uses Cobra;
-  the MCP binary serves 7 tools over stdio (Phase 4, shipped). Add new
+  the MCP binary serves 8 tools over stdio (Phase 4, shipped). Add new
   subcommands here as `<verb>.go` next to the existing files; global flags
   live in `root.go`.
 - `pkg/agentmoat/`: orchestrator. One public function per verb
@@ -54,6 +54,11 @@ them green locally before pushing.
 - `pkg/classifier/`: pure-function rule engine. `Classify(w, registry)`
   returns a `Verdict`. Built-in rules in `builtin_rules.go`; YAML
   overrides in `internal/rules/gvisor.yaml`.
+- `pkg/preflight/`: reads one RuntimeClass and the node list into
+  `schema.ClusterFacts` (`Collect`), turns facts into findings with stable
+  IDs (`Evaluate`, pure), and wraps both (`Run`). `apply` calls it as a gate
+  and refuses to run on an error finding (exit 5); `scan` stores the facts
+  and `plan` derives warnings from them. See `docs/preflight.md`.
 - `pkg/planner/`: pure function from `ScanReport` to `MigrationPlan`.
   Same scan in, same plan and same SHA-256 `planHash` out. Don't break
   determinism.
@@ -61,7 +66,8 @@ them green locally before pushing.
   merge patch with `runtimeClassName`, namespace plan-hash annotation,
   event emission, audit log append.
 - `pkg/verifier/` and `pkg/explainer/`: Phase 3 (shipped). `verify` checks
-  that live pods match the plan; `explain` renders the embedded docs and
+  that live pods match the plan and run on nodes the RuntimeClass
+  `nodeSelector` selects; `explain` renders the embedded docs and
   per-workload evidence.
 - `pkg/output/`: table / JSON / YAML renderers. The renderer dispatches
   on concrete type with a switch; extend it when adding a new schema type.
@@ -92,7 +98,7 @@ them green locally before pushing.
    `already-applied` and exits 0. Preserve this on any new apply path.
 7. **Deterministic exit codes.** Documented in
    [`docs/exit-codes.md`](docs/exit-codes.md). New commands pick from the
-   existing codes (0/1/2/3/4) or add a new one to that table, do not
+   existing codes (0/1/2/3/4/5) or add a new one to that table, do not
    silently invent codes.
 8. **Schema stability.** `agentmoat.io/v1alpha1` is the active wire
    version. Add fields, do not rename or remove without bumping. Update
@@ -125,9 +131,10 @@ them green locally before pushing.
   `runtimeClassName` check, optional `--in-pod-probe`) and `explain`
   (embedded docs plus `explain namespace` / `explain workload` deep scans)
   are wired in `cmd/agentmoat/` and exercised by `make e2e`.
-- **Phase 4** (MCP server): shipped. `cmd/agentmoat-mcp/` serves 7 tools
-  over stdio (`scan_cluster`, `assess_workload`, `propose_plan`,
-  `apply_plan`, `rollback_plan`, `verify_migration`, `explain`). See
+- **Phase 4** (MCP server): shipped. `cmd/agentmoat-mcp/` serves 8 tools
+  over stdio (`scan_cluster`, `preflight_cluster`, `assess_workload`,
+  `propose_plan`, `apply_plan`, `rollback_plan`, `verify_migration`,
+  `explain`). See
   [`docs/mcp-integration.md`](docs/mcp-integration.md).
 - **Phase 5+**: EKS recipe, additional Packer variants.
 
@@ -156,6 +163,7 @@ Read the relevant doc:
 - Architecture and package map: [`docs/architecture.md`](docs/architecture.md)
 - Rule catalog and `--rules` override schema: [`docs/compatibility-checklist.md`](docs/compatibility-checklist.md)
 - Exit codes: [`docs/exit-codes.md`](docs/exit-codes.md)
+- Preflight findings and the apply gate: [`docs/preflight.md`](docs/preflight.md)
 - gVisor primer: [`docs/gvisor-101.md`](docs/gvisor-101.md)
 - RuntimeClass primer: [`docs/runtimeclass-101.md`](docs/runtimeclass-101.md)
 - Threat model and CVE backdrop: [`docs/threat-model.md`](docs/threat-model.md)

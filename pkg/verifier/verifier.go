@@ -30,6 +30,18 @@
 //   - For a "Pod" PlanStep we Get the pod directly. A NotFound is the
 //     verdict-bearing error; we report it and move on.
 //
+// Node placement (placement.go)
+//
+//   - After the spec-level check passes, the verifier reads the
+//     RuntimeClass's scheduling.nodeSelector and the nodes the step's pods
+//     run on. A hosting node whose labels do not satisfy the selector
+//     demotes the step to mismatch: the spec says gVisor but the pod is on
+//     a node the RuntimeClass never meant it for (typically because the
+//     RuntimeClass has no selector, which `agentmoat preflight` reports).
+//     The check is API-only and never fails verify by itself: when the
+//     identity cannot read nodes or RuntimeClasses, NodePlacement.Checked
+//     is false and the step keeps its spec-level status.
+//
 // In-pod probe semantics
 //
 //   - When opts.InPodProbe is true AND the spec-level check would have
@@ -54,7 +66,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
@@ -139,9 +150,16 @@ func Verify(ctx context.Context, opts Options) (*schema.VerifyReport, error) {
 		probe = newDefaultExecRunner(opts.Client, opts.Config)
 	}
 
+	deps := stepDeps{
+		client:    opts.Client,
+		doProbe:   opts.InPodProbe,
+		exec:      probe,
+		placement: newPlacementChecker(opts.Client),
+		stderr:    stderr,
+	}
 	results := make([]schema.VerifyResult, 0, len(opts.Plan.Spec.Steps))
 	for _, step := range opts.Plan.Spec.Steps {
-		results = append(results, verifyStep(ctx, opts.Client, step, opts.InPodProbe, probe, stderr))
+		results = append(results, verifyStep(ctx, deps, step))
 	}
 
 	report.Spec = schema.VerifySpec{
@@ -169,7 +187,7 @@ func validate(opts Options) error {
 // the API client: same inputs (modulo cluster state) -> same outputs.
 // Errors here become per-step Status="error" rows; Verify never returns
 // a non-nil Go error from this path.
-func verifyStep(ctx context.Context, client kubernetes.Interface, step schema.PlanStep, doProbe bool, exec ExecRunner, stderr io.Writer) schema.VerifyResult {
+func verifyStep(ctx context.Context, deps stepDeps, step schema.PlanStep) schema.VerifyResult {
 	// Expected = what the plan asked for; fall back to the project's
 	// default RuntimeClass name when the step left it empty. The applier
 	// uses the same fallback so the comparison is consistent on both ends.
@@ -185,14 +203,14 @@ func verifyStep(ctx context.Context, client kubernetes.Interface, step schema.Pl
 	}
 
 	// Resolve the live pods that this step's target governs.
-	pods, err := resolvePods(ctx, client, step.Target)
+	pods, err := resolvePods(ctx, deps.client, step.Target)
 	if err != nil {
 		result.Status = schema.VerifyStatusError
 		// We surface the underlying error so an operator running with
 		// --verbose sees the API server's reason (NotFound, Forbidden,
 		// etc.) rather than a generic "could not resolve" string.
 		result.Message = err.Error()
-		_, _ = fmt.Fprintf(stderr, "verify error: %s/%s %s: %v\n",
+		_, _ = fmt.Fprintf(deps.stderr, "verify error: %s/%s %s: %v\n",
 			step.Target.Kind, step.Target.Namespace, step.Target.Name, err)
 		return result
 	}
@@ -234,12 +252,24 @@ func verifyStep(ctx context.Context, client kubernetes.Interface, step schema.Pl
 		result.Status = schema.VerifyStatusMismatch
 	}
 
+	// Node placement: only on the ok path (a wrong spec already has its
+	// verdict). A hosting node outside the RuntimeClass nodeSelector means
+	// the pod is not where gVisor lives, so the step becomes a mismatch.
+	if result.Status == schema.VerifyStatusOK && deps.placement != nil {
+		np := deps.placement.check(ctx, expected, pods)
+		result.NodePlacement = np
+		if np.Checked && len(np.Mismatched) > 0 {
+			result.Status = schema.VerifyStatusMismatch
+			result.Message = np.Message
+		}
+	}
+
 	// In-pod probe: only run when we are still on the ok path. A workload
 	// whose spec is already wrong does not need the probe to declare
 	// failure, and we save the operator one exec call per misconfigured
 	// step.
-	if doProbe && result.Status == schema.VerifyStatusOK {
-		applyProbeResult(ctx, exec, pods, &result)
+	if deps.doProbe && result.Status == schema.VerifyStatusOK {
+		applyProbeResult(ctx, deps.exec, pods, &result)
 	}
 
 	return result

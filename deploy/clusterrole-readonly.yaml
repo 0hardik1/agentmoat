@@ -1,8 +1,9 @@
-# agentmoat: read-only RBAC for `scan`, `plan`, `explain`, and `verify`.
+# agentmoat: read-only RBAC for `scan`, `preflight`, `plan`, `explain`, and
+# `verify`.
 #
 # `scan` and `plan` only ever GET/LIST/WATCH workloads and namespaces; they
-# never mutate. `explain` and `verify` (without --in-pod-probe) are read-only
-# too. Bind this ClusterRole to the identity agentmoat runs as to back the
+# never mutate. `preflight`, `explain`, and `verify` (without --in-pod-probe)
+# are read-only too. Bind this ClusterRole to the identity agentmoat runs as to back the
 # README's promise that "a read-only kubeconfig is sufficient to run scan and
 # plan." For `apply`/`rollback`, use deploy/clusterrole-apply.yaml instead.
 #
@@ -31,6 +32,18 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]
+  # Nodes + RuntimeClasses (cluster-scoped, read-only): `preflight` and the
+  # `apply` gate check that the RuntimeClass exists and steers pods onto a
+  # Ready node that can run runsc; `scan` records the same facts in
+  # metadata.clusterFacts (and degrades gracefully without this rule);
+  # `verify` compares the pods' hosting nodes against the RuntimeClass
+  # nodeSelector.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get", "list"]
 ---
 # Example wiring: a ServiceAccount plus a ClusterRoleBinding. Adjust the
 # namespace/name to your environment, or bind to a human user/group instead.

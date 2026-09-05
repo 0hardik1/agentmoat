@@ -7,6 +7,9 @@
 //
 //   - resolving the source (in-memory ScanReport vs running a Scan).
 //   - stamping the produced MigrationPlan with the agentmoat binary version.
+//   - attaching Spec.Warnings derived from the scan's ClusterFacts (see
+//     warnings.go). The planner itself stays a pure function of workloads
+//     and options; warnings never enter the plan hash.
 //
 // Both the CLI and the MCP server call into this so the resulting
 // MigrationPlan is identical regardless of operator surface.
@@ -43,6 +46,11 @@ func Plan(ctx context.Context, opts PlanOptions) (*schema.MigrationPlan, error) 
 		if scanOpts.Stderr == nil {
 			scanOpts.Stderr = stderr
 		}
+		// Collect facts for the RuntimeClass the plan will target, so the
+		// warnings below describe the right object.
+		if scanOpts.RuntimeClassName == "" {
+			scanOpts.RuntimeClassName = opts.Planner.RuntimeClassName
+		}
 		r, err := Scan(ctx, scanOpts)
 		if err != nil {
 			return nil, fmt.Errorf("plan: inline scan: %w", err)
@@ -62,9 +70,17 @@ func Plan(ctx context.Context, opts PlanOptions) (*schema.MigrationPlan, error) 
 		plan.Metadata.AgentmoatVersion = Version
 	}
 
+	// Cluster warnings ride on the plan but not in its hash: the same
+	// workloads hash the same whether or not the cluster was ready when
+	// the scan ran. Apply re-checks the live cluster regardless.
+	plan.Spec.Warnings = planWarnings(report.Metadata.ClusterFacts, plan.Spec.Options.RuntimeClassName)
+
 	_, _ = fmt.Fprintf(stderr, "planned %d steps (%d workloads excluded)\n",
 		plan.Spec.Summary.Included,
 		plan.Spec.Summary.Excluded,
 	)
+	if n := len(plan.Spec.Warnings); n > 0 {
+		_, _ = fmt.Fprintf(stderr, "plan: %d cluster warning(s); the cluster may not be able to host this plan yet (run 'agentmoat preflight')\n", n)
+	}
 	return plan, nil
 }

@@ -3,17 +3,29 @@
 #
 # What this exercises
 #
+#   0. `agentmoat preflight` against the kind cluster: ready (exit 0) for
+#                           the shipped RuntimeClass; exit 5 with a stable
+#                           finding id for a missing RuntimeClass and for
+#                           one without a nodeSelector.
 #   1. `agentmoat scan`     against the kind API server (exit 2 path, JSON
-#                           output, summary counts, per-workload kinds).
+#                           output, summary counts, per-workload kinds,
+#                           metadata.clusterFacts recorded).
 #   2. `agentmoat plan`     over the stored ScanReport (deterministic
-#                           ordering, eight compatible steps, PlanHash present).
-#   3. `agentmoat apply`    in dry-run mode (default), then again with
+#                           ordering, eight compatible steps, PlanHash
+#                           present, no toleration, no cluster warnings).
+#   3. `agentmoat apply`    in dry-run mode (default; patch carries only
+#                           runtimeClassName), then again with
 #                           --dry-run=false (real strategic-merge patch),
-#                           then a third time to prove idempotency.
+#                           then a third time to prove idempotency. A plan
+#                           targeting the selector-less RuntimeClass is
+#                           refused (exit 5, nothing patched) unless
+#                           --skip-preflight is passed.
 #   4. `agentmoat verify --in-pod-probe`  confirms each patched workload
 #                           actually runs on runsc by exec-ing a probe
 #                           inside the pod and grepping dmesg / proc for
-#                           gVisor markers. Run three times: after real
+#                           gVisor markers, and that every hosting node
+#                           matches the RuntimeClass nodeSelector
+#                           (nodePlacement). Run three times: after real
 #                           apply, after idempotent re-apply (still all
 #                           ok), and after rollback (expect mismatch=8
 #                           and exit 4).
@@ -82,13 +94,16 @@ E2E_COMPAT_STATEFULSETS=(cache)
 
 # Copy-paste replay commands printed in the final SUMMARY table. Paths are
 # relative to the repo root; artifacts land in .agentmoat-e2e/ on exit.
-# Preflight stays multiline (several kubectl steps); the rest are one line
+# Setup stays multiline (several kubectl steps); the rest are one line
 # so the summary table stays compact.
 E2E_REPLAY_AGENT="bin/agentmoat"
-E2E_REPLAY_PREFLIGHT=$'make kind-up\nkubectl apply -f test/e2e/manifests/runtimeclass.yaml\nkubectl create namespace '"$NAMESPACE"$' \\\n  --dry-run=client -o yaml | kubectl apply -f -\nkubectl -n '"$NAMESPACE"$' apply -f test/e2e/manifests/workloads.yaml'
+E2E_REPLAY_SETUP=$'make kind-up\nkubectl apply -f test/e2e/manifests/runtimeclass.yaml \\\n  -f test/e2e/manifests/runtimeclass-noselector.yaml\nkubectl create namespace '"$NAMESPACE"$' \\\n  --dry-run=client -o yaml | kubectl apply -f -\nkubectl -n '"$NAMESPACE"$' apply -f test/e2e/manifests/workloads.yaml'
+E2E_REPLAY_PREFLIGHT="$E2E_REPLAY_AGENT preflight"
+E2E_REPLAY_PREFLIGHT_NEG="$E2E_REPLAY_AGENT preflight --runtime-class gvisor-noselector"
 E2E_REPLAY_SCAN="$E2E_REPLAY_AGENT scan --namespace $NAMESPACE"
 E2E_REPLAY_PLAN="$E2E_REPLAY_AGENT plan --scan $E2E_ARTIFACT_REL/scan.json"
 E2E_REPLAY_APPLY_DRY="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --no-audit"
+E2E_REPLAY_APPLY_BLOCKED="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan-noselector.json --no-audit"
 E2E_REPLAY_APPLY="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
 E2E_REPLAY_VERIFY_PROBE="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json --in-pod-probe"
 E2E_REPLAY_VERIFY="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json"
@@ -160,7 +175,7 @@ cleanup() {
 trap cleanup EXIT
 
 # -----------------------------------------------------------------------------
-# 0. Pre-flight: binary + cluster + manifests.
+# 0. Setup: binary + cluster + manifests.
 # -----------------------------------------------------------------------------
 
 e2e_title
@@ -181,8 +196,12 @@ e2e_infra "bringing up kind cluster '$CLUSTER_NAME'..."
 # kubelet does its first pull. Be generous.
 "${KCTL[@]}" wait --for=condition=Ready node --all --timeout=180s
 
-e2e_infra "creating namespace '$NAMESPACE' and applying RuntimeClass + workloads..."
+e2e_infra "creating namespace '$NAMESPACE' and applying RuntimeClasses + workloads..."
 "${KCTL[@]}" apply -f "$MANIFEST_DIR/runtimeclass.yaml"
+# A second, deliberately selector-less RuntimeClass for the negative
+# preflight and blocked-apply checks below. Nothing in workloads.yaml
+# requests it.
+"${KCTL[@]}" apply -f "$MANIFEST_DIR/runtimeclass-noselector.yaml"
 "${KCTL[@]}" create namespace "$NAMESPACE" --dry-run=client -o yaml | "${KCTL[@]}" apply -f -
 "${KCTL[@]}" -n "$NAMESPACE" apply -f "$MANIFEST_DIR/workloads.yaml"
 
@@ -197,7 +216,48 @@ done
 # (the scanner only needs to see the spec). A 30s grace gives the pod
 # a chance to register before we scan.
 "${KCTL[@]}" -n "$NAMESPACE" wait --for=condition=PodScheduled pod/host-net --timeout=30s || true
+e2e_step_pass "setup" "$E2E_REPLAY_SETUP"
+
+# -----------------------------------------------------------------------------
+# 0b. preflight: the shipped RuntimeClass steers pods to the gVisor worker.
+# -----------------------------------------------------------------------------
+#
+# kind/cluster.yaml labels the worker runtime=gvisor and
+# test/e2e/manifests/runtimeclass.yaml selects on it, so the positive case
+# must see exactly one matching Ready node. The two negative cases use a
+# RuntimeClass name that does not exist and the selector-less RuntimeClass
+# applied in setup; both must exit 5 with the documented finding id
+# (docs/preflight.md).
+
+e2e_step "preflight: expect ready, exit 0"
+agentmoat_table_and_json "$WORK_DIR/preflight.json" \
+  "${AGENT[@]}" preflight
+assert_eq "preflight exit code" 0 "$AGENT_EXIT"
+assert_eq "preflight kind" "PreflightReport" "$(jq -r '.kind' "$WORK_DIR/preflight.json")"
+assert_eq "preflight summary.ready" "true" "$(jq -r '.spec.summary.ready' "$WORK_DIR/preflight.json")"
+assert_eq "preflight summary.error" 0 "$(jq -r '.spec.summary.error' "$WORK_DIR/preflight.json")"
+assert_eq "preflight facts.runtimeClass.found" "true" \
+  "$(jq -r '.spec.facts.runtimeClass.found' "$WORK_DIR/preflight.json")"
+assert_eq "preflight facts.nodes.matchingAndReady" 1 \
+  "$(jq -r '.spec.facts.nodes.matchingAndReady' "$WORK_DIR/preflight.json")"
 e2e_step_pass "preflight" "$E2E_REPLAY_PREFLIGHT"
+
+e2e_step "preflight (missing RuntimeClass): expect exit 5, runtimeclass-missing"
+agentmoat_table_and_json "$WORK_DIR/preflight-missing.json" \
+  "${AGENT[@]}" preflight --runtime-class gvisor-missing
+assert_eq "preflight (missing) exit code" 5 "$AGENT_EXIT"
+assert_eq "preflight (missing) summary.ready" "false" \
+  "$(jq -r '.spec.summary.ready' "$WORK_DIR/preflight-missing.json")"
+assert_eq "preflight (missing) finding ids" "runtimeclass-missing" \
+  "$(jq -r '.spec.findings | map(.id) | join(",")' "$WORK_DIR/preflight-missing.json")"
+
+e2e_step "preflight (RuntimeClass without nodeSelector): expect exit 5, runtimeclass-no-node-selector"
+agentmoat_table_and_json "$WORK_DIR/preflight-noselector.json" \
+  "${AGENT[@]}" preflight --runtime-class gvisor-noselector
+assert_eq "preflight (no selector) exit code" 5 "$AGENT_EXIT"
+assert_eq "preflight (no selector) error finding ids" "runtimeclass-no-node-selector" \
+  "$(jq -r '.spec.findings | map(select(.severity=="error") | .id) | join(",")' "$WORK_DIR/preflight-noselector.json")"
+e2e_step_pass "preflight (negative)" "$E2E_REPLAY_PREFLIGHT_NEG"
 
 # -----------------------------------------------------------------------------
 # 1. scan: expect exit 2 (host-net is incompatible) and the right counts.
@@ -239,6 +299,13 @@ REVIEW_NAMES=$(jq -r '.spec.workloads | map(select(.compatibility=="review") | .
 assert_eq "scan review workloads" \
   "fuse-app,gpu-app,hostpath-app" \
   "$REVIEW_NAMES"
+
+# Cluster facts ride along in the report so a plan built from it can warn
+# about a cluster that cannot host the migration (see 2 below).
+assert_eq "scan clusterFacts.runtimeClass.found" "true" \
+  "$(jq -r '.metadata.clusterFacts.runtimeClass.found' "$WORK_DIR/scan.json")"
+assert_eq "scan clusterFacts.nodes.matchingAndReady" 1 \
+  "$(jq -r '.metadata.clusterFacts.nodes.matchingAndReady' "$WORK_DIR/scan.json")"
 e2e_step_pass "scan" "$E2E_REPLAY_SCAN"
 
 # -----------------------------------------------------------------------------
@@ -274,6 +341,20 @@ assert_eq "plan spec.steps length" "$E2E_COMPAT" "$PLAN_STEP_COUNT"
 "${AGENT[@]}" plan --scan "$WORK_DIR/scan.json" --output json >"$WORK_DIR/plan2.json"
 PLAN_HASH_2=$(jq -r '.metadata.planHash' "$WORK_DIR/plan2.json")
 assert_eq "plan determinism (re-run hash)" "$PLAN_HASH" "$PLAN_HASH_2"
+
+# Placement is the RuntimeClass's job: no step injects the toleration, and
+# a ready cluster produces no plan-level warnings.
+assert_eq "plan steps addToleration values" "false" \
+  "$(jq -r '.spec.steps | map(.addToleration) | unique | join(",")' "$WORK_DIR/plan.json")"
+assert_eq "plan spec.warnings length" 0 \
+  "$(jq -r '.spec.warnings // [] | length' "$WORK_DIR/plan.json")"
+
+# A plan that targets the selector-less RuntimeClass: the scan's facts
+# describe "gvisor", so the planner flags the mismatch. Used by 3b below.
+"${AGENT[@]}" plan --scan "$WORK_DIR/scan.json" --runtime-class gvisor-noselector --output json \
+  >"$WORK_DIR/plan-noselector.json"
+assert_eq "plan (noselector) warning ids" "cluster-facts-runtime-class-mismatch" \
+  "$(jq -r '.spec.warnings // [] | map(.id) | join(",")' "$WORK_DIR/plan-noselector.json")"
 e2e_step_pass "plan" "$E2E_REPLAY_PLAN"
 
 # -----------------------------------------------------------------------------
@@ -290,6 +371,14 @@ DRY_FAILED=$(jq -r '.spec.summary.failed' "$WORK_DIR/apply-dry.json")
 assert_eq "apply dry-run metadata.dryRun" "true" "$DRY_RUN_FLAG"
 assert_eq "apply dry-run summary.applied" "$E2E_COMPAT" "$DRY_APPLIED"
 assert_eq "apply dry-run summary.failed" 0 "$DRY_FAILED"
+assert_eq "apply dry-run metadata.preflight.ready" "true" \
+  "$(jq -r '.metadata.preflight.ready' "$WORK_DIR/apply-dry.json")"
+
+# The patch sets runtimeClassName and nothing else: placement comes from
+# the RuntimeClass's scheduling block at admission time.
+PATCHES_WITH_TOLERATIONS=$(jq -r '[.spec.steps[].patch | select(contains("tolerations"))] | length' \
+  "$WORK_DIR/apply-dry.json")
+assert_eq "apply dry-run patches carrying tolerations" 0 "$PATCHES_WITH_TOLERATIONS"
 
 # Spec must still be unmutated.
 WEB_RT=$("${KCTL[@]}" -n "$NAMESPACE" get deployment web -o jsonpath='{.spec.template.spec.runtimeClassName}')
@@ -297,6 +386,39 @@ CACHE_RT=$("${KCTL[@]}" -n "$NAMESPACE" get statefulset cache -o jsonpath='{.spe
 assert_eq "Deployment/web runtimeClassName after dry-run" "" "$WEB_RT"
 assert_eq "StatefulSet/cache runtimeClassName after dry-run" "" "$CACHE_RT"
 e2e_step_pass "apply (dry-run)" "$E2E_REPLAY_APPLY_DRY"
+
+# -----------------------------------------------------------------------------
+# 3b. apply blocked by preflight: the selector-less RuntimeClass plan.
+# -----------------------------------------------------------------------------
+#
+# Even with --dry-run=false the orchestrator must refuse: exit 5, every
+# step skipped, nothing patched, findings in the result. --skip-preflight
+# is the documented override; in dry-run it previews the patches as usual.
+
+e2e_step "apply (blocked): plan targets a RuntimeClass with no nodeSelector, expect exit 5"
+agentmoat_table_and_json "$WORK_DIR/apply-blocked.json" \
+  "${AGENT[@]}" apply --plan "$WORK_DIR/plan-noselector.json" --dry-run=false --no-audit
+assert_eq "apply (blocked) exit code" 5 "$AGENT_EXIT"
+assert_eq "apply (blocked) metadata.preflight.ready" "false" \
+  "$(jq -r '.metadata.preflight.ready' "$WORK_DIR/apply-blocked.json")"
+assert_eq "apply (blocked) summary.skipped" "$E2E_COMPAT" \
+  "$(jq -r '.spec.summary.skipped' "$WORK_DIR/apply-blocked.json")"
+assert_eq "apply (blocked) summary.applied" 0 \
+  "$(jq -r '.spec.summary.applied' "$WORK_DIR/apply-blocked.json")"
+assert_eq "apply (blocked) step statuses" "skipped" \
+  "$(jq -r '.spec.steps | map(.status) | unique | join(",")' "$WORK_DIR/apply-blocked.json")"
+assert_eq "apply (blocked) error finding ids" "runtimeclass-no-node-selector" \
+  "$(jq -r '.spec.preflightFindings | map(select(.severity=="error") | .id) | join(",")' "$WORK_DIR/apply-blocked.json")"
+WEB_RT=$("${KCTL[@]}" -n "$NAMESPACE" get deployment web -o jsonpath='{.spec.template.spec.runtimeClassName}')
+assert_eq "Deployment/web runtimeClassName after blocked apply" "" "$WEB_RT"
+
+"${AGENT[@]}" apply --plan "$WORK_DIR/plan-noselector.json" --skip-preflight --no-audit --output json \
+  >"$WORK_DIR/apply-skip-preflight.json"
+assert_eq "apply (--skip-preflight, dry-run) summary.applied" "$E2E_COMPAT" \
+  "$(jq -r '.spec.summary.applied' "$WORK_DIR/apply-skip-preflight.json")"
+assert_eq "apply (--skip-preflight) metadata.preflight" "null" \
+  "$(jq -r '.metadata.preflight' "$WORK_DIR/apply-skip-preflight.json")"
+e2e_step_pass "apply (blocked by preflight)" "$E2E_REPLAY_APPLY_BLOCKED"
 
 # -----------------------------------------------------------------------------
 # 4. apply (real): patches land; pods carry runtimeClassName=gvisor.
@@ -370,6 +492,16 @@ PROBE_DETECTED_COUNT=$(jq -r \
   '[.spec.results[].probe | select(.!=null) | select(.detected==true)] | length' \
   "$WORK_DIR/verify-after-apply.json")
 assert_eq "verify probe detected count (post-apply)" "$E2E_COMPAT" "$PROBE_DETECTED_COUNT"
+# Every pod runs on the labeled worker, so node placement is checked and
+# clean for every step.
+NP_CHECKED_COUNT=$(jq -r \
+  '[.spec.results[].nodePlacement | select(.!=null) | select(.checked==true)] | length' \
+  "$WORK_DIR/verify-after-apply.json")
+assert_eq "verify nodePlacement checked count (post-apply)" "$E2E_COMPAT" "$NP_CHECKED_COUNT"
+NP_MISMATCHED=$(jq -r \
+  '[.spec.results[].nodePlacement.mismatched // [] | length] | add' \
+  "$WORK_DIR/verify-after-apply.json")
+assert_eq "verify nodePlacement mismatched total (post-apply)" 0 "$NP_MISMATCHED"
 e2e_step_pass "verify (post-apply)" "$E2E_REPLAY_VERIFY_PROBE"
 
 # -----------------------------------------------------------------------------
@@ -499,7 +631,7 @@ set -e
 if (( EXPLAIN_BOGUS_EXIT == 0 )); then
   fail "explain bogus-topic should exit non-zero (got 0); output: $EXPLAIN_BOGUS"
 fi
-for want in runtimeclass gvisor threat-model performance compatibility; do
+for want in runtimeclass gvisor threat-model performance compatibility preflight; do
   if ! printf '%s' "$EXPLAIN_BOGUS" | grep -q "$want"; then
     fail "explain bogus-topic stderr missing topic '$want':\n$EXPLAIN_BOGUS"
   fi

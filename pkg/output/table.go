@@ -183,6 +183,11 @@ func renderMigrationPlanTable(plan *schema.MigrationPlan, w io.Writer, useColor 
 		}
 	}
 
+	// Cluster warnings (from the scan's ClusterFacts). Silent when none.
+	if err := renderPlanWarnings(s, plan.Spec.Warnings, w); err != nil {
+		return err
+	}
+
 	// Excluded workloads section. Only printed when there is something to
 	// show; an "always show" blank section would just be visual noise.
 	if len(plan.Spec.Excluded) > 0 {
@@ -250,6 +255,12 @@ func renderApplyResultTable(res *schema.ApplyResult, w io.Writer, action string,
 		fmt.Sprintf("dry-run: %v", res.Metadata.DryRun),
 	}
 	if _, err := fmt.Fprintln(w, s.Muted.Render(strings.Join(chips, "   "))); err != nil {
+		return err
+	}
+
+	// PREFLIGHT block: only apply carries one (rollback never runs the
+	// preflight, so its Metadata.Preflight is nil and this prints nothing).
+	if err := renderApplyPreflightBlock(s, res.Metadata.Preflight, res.Spec.PreflightFindings, w); err != nil {
 		return err
 	}
 
@@ -383,8 +394,10 @@ func summarizeReasons(reasons []schema.Reason) string {
 }
 
 // renderVerifyReportTable is the VerifyReport-specific view: per-step verdict
-// against the live cluster. One row per step; the Probe column tells the
-// operator at a glance whether the in-pod gVisor probe ran and what it found.
+// against the live cluster. One row per step; the PROBE column tells the
+// operator at a glance whether the in-pod gVisor probe ran and what it found,
+// and the NODE column whether the hosting nodes match the RuntimeClass
+// nodeSelector.
 func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor bool) error {
 	s := NewStyles(useColor)
 	sum := report.Spec.Summary
@@ -428,7 +441,7 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 	var tr trackingTruncator
 
 	// "#" right-aligned.
-	headers := []string{"#", "STATUS", "KIND/NS/NAME", "EXPECTED", "ACTUAL", "PROBE", "MESSAGE"}
+	headers := []string{"#", "STATUS", "KIND/NS/NAME", "EXPECTED", "ACTUAL", "PROBE", "NODE", "MESSAGE"}
 	t := newBaseTable(s, headers, map[int]bool{0: true})
 	for _, r := range report.Spec.Results {
 		t.Row(
@@ -438,6 +451,7 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 			r.Expected,
 			displayActual(r.Actual),
 			summarizeProbe(r.Probe),
+			summarizeNodePlacement(r.NodePlacement),
 			tr.cell(r.Message, maxFreeformWidth),
 		)
 	}

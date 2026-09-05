@@ -1,6 +1,7 @@
-// Package output renders an agentmoat report (a ScanReport, MigrationPlan,
-// ApplyResult, or RollbackResult) into one of three formats: a human-friendly
-// columnar table, a stable JSON document, or a stable YAML document.
+// Package output renders an agentmoat report (a ScanReport, PreflightReport,
+// MigrationPlan, ApplyResult, RollbackResult, VerifyReport, or
+// ExplainDocument) into one of three formats: a human-friendly columnar
+// table, a stable JSON document, or a stable YAML document.
 //
 // Why this is its own package
 //
@@ -105,6 +106,8 @@ func renderTableAny(doc any, w io.Writer, useColor bool) error {
 		return renderRollbackResultTable(d, w, useColor)
 	case *schema.VerifyReport:
 		return renderVerifyReportTable(d, w, useColor)
+	case *schema.PreflightReport:
+		return renderPreflightReportTable(d, w, useColor)
 	case *schema.ExplainDocument:
 		return renderExplainDocumentTable(d, w, useColor)
 	default:

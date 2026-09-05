@@ -595,7 +595,8 @@ func TestRenderVerifyReportTable(t *testing.T) {
 		"#", "STATUS", // headers
 		"KIND/NS/NAME",       //
 		"EXPECTED", "ACTUAL", //
-		"PROBE", "MESSAGE", //
+		"PROBE", "NODE", //
+		"MESSAGE",             //
 		"Deployment/ns-a/web", // row data
 		"StatefulSet/ns-b/cache",
 		"(empty)",    // displayActual for the mismatch row

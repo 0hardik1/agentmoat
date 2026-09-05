@@ -52,6 +52,18 @@ type ScanOptions struct {
 	// path). The classifier loads this on top of the built-in rule set.
 	RulesYAMLPath string
 
+	// RuntimeClassName names the RuntimeClass whose scheduling block the
+	// scan inspects for ReportMetadata.ClusterFacts (nodes matching its
+	// nodeSelector, taints, EKS Auto Mode markers). Empty means
+	// schema.DefaultRuntimeClassName. It does not affect classification.
+	RuntimeClassName string
+
+	// SkipClusterFacts turns off the node + RuntimeClass inventory. The
+	// scan already degrades to "no facts" (with a stderr warning) when
+	// the identity lacks get/list on nodes and runtimeclasses, so this
+	// switch is for operators who do not want a node list issued at all.
+	SkipClusterFacts bool
+
 	// Stderr is the writer used for human-readable progress messages
 	// (counts, timings, "scanning namespace X..."). Defaults to os.Stderr
 	// in cmd/. Set to io.Discard to silence.
@@ -106,6 +118,17 @@ type ApplyOptions struct {
 	// mutation. Default true.
 	AuditEnabled bool
 
+	// SkipPreflight bypasses the cluster preflight Apply runs before it
+	// touches any step (pkg/preflight: the RuntimeClass exists, steers
+	// pods to at least one Ready runsc node, and no EKS Auto Mode or
+	// Bottlerocket dead end). Default false. A blocked preflight returns
+	// an ApplyResult with every step skipped, Metadata.Preflight.Ready
+	// false, and no mutation; the CLI exits 5. The gate runs in dry-run
+	// too, so a preview cannot look greener than the real thing.
+	// Rollback ignores this field: moving pods back to runc needs no
+	// gVisor node, so it never runs the preflight.
+	SkipPreflight bool
+
 	// Stderr is the writer for progress messages.
 	Stderr io.Writer
 
@@ -118,6 +141,25 @@ type ApplyOptions struct {
 // RollbackOptions is the rollback-side counterpart of ApplyOptions. Fields
 // kept identical so callers can copy-paste between commands.
 type RollbackOptions = ApplyOptions
+
+// PreflightOptions configures pkg/agentmoat.Preflight, the read-only
+// "can this cluster host the migration at all?" check. It reads one
+// RuntimeClass and the node list; it never touches workloads.
+type PreflightOptions struct {
+	// KubeconfigPath and Context are the same as ScanOptions.
+	KubeconfigPath string
+	Context        string
+
+	// RuntimeClassName is the RuntimeClass to inspect. Empty means
+	// schema.DefaultRuntimeClassName ("gvisor").
+	RuntimeClassName string
+
+	// Stderr is the writer for progress messages.
+	Stderr io.Writer
+
+	// KubeClient is an optional pre-built Kubernetes client. See ScanOptions.
+	KubeClient kubernetes.Interface
+}
 
 // VerifyOptions configures pkg/agentmoat.Verify. Verify is read-only: it
 // loads a previously-applied MigrationPlan from disk, contacts the cluster,

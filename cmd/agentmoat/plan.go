@@ -38,6 +38,7 @@ var (
 	flagPlanScanPath      string
 	flagPlanIncludeReview bool
 	flagPlanRuntimeClass  string
+	flagPlanAddToleration bool
 )
 
 func newPlanCmd() *cobra.Command {
@@ -53,6 +54,16 @@ The plan source is either an inline scan (default) or a stored ScanReport
 on disk (--scan). Either way, the planner is a pure function: the same
 input always produces the same plan and the same plan hash.
 
+Each step patches only runtimeClassName. Placement is the RuntimeClass's
+job: its scheduling.nodeSelector and tolerations are merged into every pod
+at admission. Pass --add-toleration only when your RuntimeClass lacks
+scheduling.tolerations and your gVisor nodes carry the
+runtime=gvisor:NoSchedule taint; it changes the plan hash.
+
+When the scan recorded cluster facts, the plan lists warnings (no matching
+Ready node, EKS Auto Mode nodes, ...) under spec.warnings. They do not
+change the steps or the hash; 'agentmoat apply' re-checks the live cluster.
+
 plan is strictly read-only.`,
 		RunE: runPlan,
 	}
@@ -62,6 +73,8 @@ plan is strictly read-only.`,
 		"include workloads classified 'review' in the plan (default: only 'compatible')")
 	cmd.Flags().StringVar(&flagPlanRuntimeClass, "runtime-class", "gvisor",
 		"RuntimeClass name to patch onto migrated workloads")
+	cmd.Flags().BoolVar(&flagPlanAddToleration, "add-toleration", false,
+		"also patch the runtime=gvisor:NoSchedule toleration into each pod template (changes the plan hash)")
 	return cmd
 }
 
@@ -84,18 +97,20 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 
 	opts := agentmoat.PlanOptions{
 		ScanOptions: agentmoat.ScanOptions{
-			KubeconfigPath: flagKubeconfig,
-			Context:        flagContext,
-			Namespaces:     flagNamespaces,
-			AllNamespaces:  flagAllNamespaces || len(flagNamespaces) == 0,
-			IncludeSystem:  flagIncludeSystem,
-			LabelSelector:  flagLabelSelector,
-			RulesYAMLPath:  flagRulesYAML,
-			Stderr:         stderr,
+			KubeconfigPath:   flagKubeconfig,
+			Context:          flagContext,
+			Namespaces:       flagNamespaces,
+			AllNamespaces:    flagAllNamespaces || len(flagNamespaces) == 0,
+			IncludeSystem:    flagIncludeSystem,
+			LabelSelector:    flagLabelSelector,
+			RulesYAMLPath:    flagRulesYAML,
+			RuntimeClassName: flagPlanRuntimeClass,
+			Stderr:           stderr,
 		},
 		Planner: schema.PlannerOptions{
 			IncludeReview:    flagPlanIncludeReview,
 			RuntimeClassName: flagPlanRuntimeClass,
+			AddToleration:    flagPlanAddToleration,
 		},
 		Stderr: stderr,
 	}
