@@ -40,6 +40,8 @@ func registerScanCluster(srv *server.MCPServer, deps Deps) {
 			mcp.Description("Skip the node and RuntimeClass reads; the report omits metadata.clusterFacts. Default false."),
 			mcp.DefaultBool(false),
 		),
+		mcp.WithString("facts_path",
+			mcp.Description("Path to a saved PreflightReport (from probe_nvproxy or preflight_cluster) or ScanReport whose cluster facts replace the live reads. This is how the nvproxy driver list reaches the classifier; GPU workloads are then classified against the real card and driver support.")),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
 
@@ -55,6 +57,7 @@ func registerScanCluster(srv *server.MCPServer, deps Deps) {
 			RulesYAMLPath:    req.GetString("rules_yaml_path", ""),
 			RuntimeClassName: req.GetString("runtime_class_name", ""),
 			SkipClusterFacts: req.GetBool("no_cluster_facts", false),
+			FactsPath:        req.GetString("facts_path", ""),
 			Stderr:           deps.Stderr,
 			KubeClient:       deps.KubeClient,
 		}

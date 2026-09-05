@@ -52,6 +52,7 @@ admitted with that selector and lands on the worker.
 
 ```bash
 ./bin/agentmoat preflight                              # exit 0: the worker can host gVisor pods
+./bin/agentmoat probe nvproxy --dry-run=false          # one pod, reads runsc's nvproxy driver list, deleted after
 ./bin/agentmoat scan -n agentmoat-e2e
 ./bin/agentmoat plan -n agentmoat-e2e -o json > plan.json
 ./bin/agentmoat apply --plan plan.json                 # dry-run by default

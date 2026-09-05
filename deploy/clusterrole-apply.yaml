@@ -7,6 +7,9 @@
 #   - get + list Nodes and RuntimeClasses (the preflight gate apply runs first),
 #   - create pods/exec, ONLY if you use `verify --in-pod-probe`.
 #
+# `agentmoat probe nvproxy` (creates and deletes one pod) is NOT covered here;
+# its namespaced Role lives in deploy/nvproxy-probe.yaml.
+#
 # Grant this only to the identity that runs `apply`/`rollback --dry-run=false`.
 # For scan / plan / explain / verify-without-probe, prefer the narrower
 # deploy/clusterrole-readonly.yaml.

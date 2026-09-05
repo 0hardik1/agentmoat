@@ -11,6 +11,7 @@ package agentmoat
 
 import (
 	"io"
+	"time"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/verifier"
@@ -62,7 +63,19 @@ type ScanOptions struct {
 	// scan already degrades to "no facts" (with a stderr warning) when
 	// the identity lacks get/list on nodes and runtimeclasses, so this
 	// switch is for operators who do not want a node list issued at all.
+	// Facts also feed the classifier (gpu-passthrough refinement), so
+	// skipping them also turns that refinement off.
 	SkipClusterFacts bool
+
+	// FactsPath, when non-empty, loads ClusterFacts from a saved
+	// PreflightReport (spec.facts) or ScanReport (metadata.clusterFacts)
+	// instead of reading the cluster. This is how the driver list from
+	// `agentmoat probe nvproxy --dry-run=false --output json` reaches the
+	// classifier: the probe creates a pod, the scan must not, so the scan
+	// reads the probe's report. A file that cannot be read or has no
+	// facts is an error (the operator asked for it). Takes precedence
+	// over SkipClusterFacts.
+	FactsPath string
 
 	// Stderr is the writer used for human-readable progress messages
 	// (counts, timings, "scanning namespace X..."). Defaults to os.Stderr
@@ -223,6 +236,48 @@ type AssessWorkloadOptions struct {
 	// RulesYAMLPath, when non-empty, layers a YAML override file on top
 	// of the built-in classifier rules. Same semantics as ScanOptions.
 	RulesYAMLPath string
+
+	// RuntimeClassName, SkipClusterFacts, and FactsPath control the
+	// cluster facts the classifier refines against. Same semantics as
+	// the ScanOptions fields of the same names: facts are best-effort
+	// from the cluster unless FactsPath names a saved report.
+	RuntimeClassName string
+	SkipClusterFacts bool
+	FactsPath        string
+
+	// Stderr is the writer for progress messages.
+	Stderr io.Writer
+
+	// KubeClient is an optional pre-built Kubernetes client. See ScanOptions.
+	KubeClient kubernetes.Interface
+}
+
+// ProbeOptions configures pkg/agentmoat.Probe, the nvproxy probe: a
+// one-shot pod that reads the runsc binary on a gVisor node and reports
+// which NVIDIA host driver versions its nvproxy supports. It is the only
+// verb besides apply and rollback that creates anything, so it follows the
+// same convention: DryRun defaults to true in cmd/ and the MCP tool, and
+// a caller must set it to false explicitly to create the pod.
+type ProbeOptions struct {
+	// KubeconfigPath and Context are the same as ScanOptions.
+	KubeconfigPath string
+	Context        string
+
+	// RuntimeClassName selects the node pool the pod is pinned to. Empty
+	// means schema.DefaultRuntimeClassName.
+	RuntimeClassName string
+
+	// Namespace, Image, RunscPath, and Timeout default to the pkg/probe
+	// constants (default, busybox:1.36.1, /usr/local/bin/runsc, 2m) when
+	// zero.
+	Namespace string
+	Image     string
+	RunscPath string
+	Timeout   time.Duration
+
+	// DryRun, when true, creates nothing and reports the pod that would
+	// have been created.
+	DryRun bool
 
 	// Stderr is the writer for progress messages.
 	Stderr io.Writer

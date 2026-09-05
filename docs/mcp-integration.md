@@ -31,21 +31,22 @@ byte-identical: same Go struct, same `json:` tags, same APIVersion
 
 ## 3. Tools, resources, prompts
 
-### Tools (8)
+### Tools (9)
 
 | Tool                | Orchestrator                  | Mutating | Notes                                                                |
 |---------------------|-------------------------------|----------|----------------------------------------------------------------------|
-| `scan_cluster`      | `agentmoat.Scan`              | no       | Returns a `ScanReport` (with `metadata.clusterFacts`; `no_cluster_facts` skips them). |
+| `scan_cluster`      | `agentmoat.Scan`              | no       | Returns a `ScanReport` (with `metadata.clusterFacts`; `no_cluster_facts` skips them, `facts_path` loads them from a saved report). |
 | `preflight_cluster` | `agentmoat.Preflight`         | no       | Returns a `PreflightReport`. `spec.summary.ready=false` means `apply_plan` will refuse to run. |
-| `assess_workload`   | `agentmoat.AssessWorkload`    | no       | Returns a `WorkloadResult` for one named workload.                   |
-| `propose_plan`      | `agentmoat.Plan`              | no       | Same scan in -> same `planHash`. Accepts `scan_report_path` to reuse a saved scan; `add_toleration` opts into the pod toleration. |
+| `probe_nvproxy`     | `agentmoat.Probe`             | YES      | Creates and deletes one pod on a gVisor node to read the `runsc` nvproxy driver list. Defaults to dry-run; `"dry_run": false` runs it. Returns a `PreflightReport` with `spec.facts.gpu.nvproxy`. |
+| `assess_workload`   | `agentmoat.AssessWorkload`    | no       | Returns a `WorkloadResult` for one named workload. Accepts `facts_path`. |
+| `propose_plan`      | `agentmoat.Plan`              | no       | Same scan in -> same `planHash`. Accepts `scan_report_path` to reuse a saved scan, `facts_path` for the facts, `add_toleration` for the pod toleration. |
 | `apply_plan`        | `agentmoat.Apply`             | YES      | Defaults to dry-run. Must set `"dry_run": false` explicitly to mutate. Runs the preflight first; `skip_preflight` bypasses it. |
 | `rollback_plan`     | `agentmoat.Rollback`          | YES      | Same dry-run gate as `apply_plan`.                                   |
 | `verify_migration`  | `agentmoat.Verify`            | no       | Set `in_pod_probe=true` to also exec a /proc-and-uname probe.        |
 | `explain`           | `agentmoat.Explain`           | no       | Offline; reads the embedded docs.                                    |
 
-**Safety gate.** The mutating tools (`apply_plan`, `rollback_plan`)
-inspect the raw JSON-RPC arguments for the `dry_run` field. The handler
+**Safety gate.** The mutating tools (`apply_plan`, `rollback_plan`,
+`probe_nvproxy`) inspect the raw JSON-RPC arguments for the `dry_run` field. The handler
 distinguishes "field omitted" from "field set to `false`":
 
 - field absent OR `"dry_run": true` -> dry-run (no cluster mutation).
@@ -62,6 +63,14 @@ nothing is mutated. An agent should call `preflight_cluster` first, show the
 operator the remediation text, and only pass `"skip_preflight": true` when
 the operator has confirmed the cluster can host the RuntimeClass anyway.
 See [`preflight.md`](preflight.md) for the finding ids.
+
+**GPU workloads.** `gpu-passthrough` is refined from cluster facts (card,
+driver, MIG). The driver list lives only in the `runsc` binary, so the flow
+is: `probe_nvproxy` with `"dry_run": false` (one pod, created and deleted),
+save the returned JSON to a file, then pass its path as `facts_path` to
+`scan_cluster` / `assess_workload` / `propose_plan`. The verdict is then
+`compatible` on supported hardware and `incompatible` on an unsupported
+card, a MIG slice, or an unlisted driver. See [`gpu-nvproxy.md`](gpu-nvproxy.md).
 
 ### Resources (2, read-only)
 

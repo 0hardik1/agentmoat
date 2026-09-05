@@ -16,12 +16,17 @@
 // Reasons are sorted by RuleID because rules are independent: there is no
 // natural execution order, and consumers (humans and tools) want stable
 // output to diff against.
+//
+// ClassifyWithFacts adds one input, schema.ClusterFacts, and stays pure:
+// the facts are data the caller read earlier (scan) or loaded from a file
+// (--facts). Same workload, same facts, same verdict.
 package classifier
 
 import (
 	"fmt"
 	"sort"
 
+	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/scanner"
 )
 
@@ -43,6 +48,20 @@ import (
 // Overhead is set from the highest-severity info-class rule that fires
 // (network-throughput, syscall-heavy), else empty.
 func Classify(w scanner.Workload, registry *Registry) Verdict {
+	return ClassifyWithFacts(w, registry, nil)
+}
+
+// ClassifyWithFacts is Classify with cluster facts. Rules that define
+// Refine (today: gpu-passthrough) may raise or lower their severity from
+// what the cluster actually has, for example "the GPU nodes carry T4s and
+// the installed runsc lists their driver" (warn -> info) or "every GPU node
+// is a MIG-sliced A100" (warn -> error). The note explaining the decision
+// is appended to the Reason description so it shows up in scan output.
+//
+// facts may be nil, in which case Refine still runs (it may refine from
+// the workload alone) but sees no cluster data. Still pure: facts are an
+// input, not I/O.
+func ClassifyWithFacts(w scanner.Workload, registry *Registry, facts *schema.ClusterFacts) Verdict {
 	var (
 		reasons      []Reason
 		hasError     bool
@@ -57,15 +76,24 @@ func Classify(w scanner.Workload, registry *Registry) Verdict {
 		if !rule.Match(w) {
 			continue
 		}
+		severity, description := rule.Severity, rule.Description
+		if rule.Refine != nil {
+			if ref, ok := rule.Refine(w, facts, rule.Severity); ok {
+				severity = ref.Severity
+				if ref.Note != "" {
+					description = description + " " + ref.Note
+				}
+			}
+		}
 		reasons = append(reasons, Reason{
 			RuleID:         rule.ID,
-			Severity:       rule.Severity,
-			Description:    rule.Description,
+			Severity:       severity,
+			Description:    description,
 			RemediationURL: rule.RemediationURL,
 		})
 
 		// Track the worst severity seen so far.
-		switch rule.Severity {
+		switch severity {
 		case SeverityError:
 			hasError = true
 		case SeverityWarn:

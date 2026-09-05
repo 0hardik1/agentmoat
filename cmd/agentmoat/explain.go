@@ -75,10 +75,17 @@ matters.`,
 	// (--kubeconfig, --context, -l, --rules, --include-system) so the
 	// kubectl muscle memory carries over. Their positional argument is
 	// the source of truth for namespace selection; -n is ignored.
+	// --facts is shared by both (persistent) and ignored in topic mode.
+	cmd.PersistentFlags().StringVar(&flagExplainFactsPath, "facts", "",
+		"deep mode: load cluster facts from a saved PreflightReport or ScanReport (e.g. 'probe nvproxy' output) instead of reading the cluster")
 	cmd.AddCommand(newExplainNamespaceCmd())
 	cmd.AddCommand(newExplainWorkloadCmd())
 	return cmd
 }
+
+// flagExplainFactsPath is the --facts value shared by the deep-mode
+// subcommands. See ScanOptions.FactsPath.
+var flagExplainFactsPath string
 
 func runExplain(cmd *cobra.Command, args []string) error {
 	format, err := output.Parse(flagOutput)

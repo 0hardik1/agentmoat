@@ -3,7 +3,7 @@
 // Collect turns two API reads (one RuntimeClass, the node list) into
 // schema.ClusterFacts. Everything derived here is a count or a sorted list,
 // so the same cluster state always yields the same facts and the same
-// findings.
+// findings. The GPU inventory (gpu.go) rides on the same node list.
 package preflight
 
 import (
@@ -59,7 +59,26 @@ func Collect(ctx context.Context, client kubernetes.Interface, runtimeClassName 
 		return nil, fmt.Errorf("preflight: listing nodes: %w", err)
 	}
 	fillNodeFacts(facts, nodes.Items, tolerations)
+	facts.GPU = collectGPU(nodes.Items, selectorOf(facts))
+	RefreshGPUSupport(facts)
 	return facts, nil
+}
+
+// selectorOf turns the RuntimeClass nodeSelector into a label selector,
+// nil when the RuntimeClass has none (nothing matches then; Evaluate
+// reports the missing selector as the error).
+func selectorOf(facts *schema.ClusterFacts) labels.Selector {
+	if len(facts.RuntimeClass.NodeSelector) == 0 {
+		return nil
+	}
+	return labels.SelectorFromSet(labels.Set(facts.RuntimeClass.NodeSelector))
+}
+
+// MatchesRuntimeClass reports whether the node satisfies the RuntimeClass
+// nodeSelector recorded in facts. False when there is no selector.
+func MatchesRuntimeClass(facts *schema.ClusterFacts, n *corev1.Node) bool {
+	sel := selectorOf(facts)
+	return sel != nil && sel.Matches(labels.Set(n.Labels))
 }
 
 // runtimeClassFacts projects a RuntimeClass object down to the wire shape.
@@ -92,16 +111,13 @@ func runtimeClassFacts(rc *nodev1.RuntimeClass) schema.RuntimeClassFacts {
 // scheduler applies to the merged nodeSelector; with no selector nothing
 // matches, and Evaluate reports the missing selector as the error.
 func fillNodeFacts(facts *schema.ClusterFacts, nodes []corev1.Node, rcTolerations []corev1.Toleration) {
-	var sel labels.Selector
-	if len(facts.RuntimeClass.NodeSelector) > 0 {
-		sel = labels.SelectorFromSet(labels.Set(facts.RuntimeClass.NodeSelector))
-	}
+	sel := selectorOf(facts)
 
 	nf := &facts.Nodes
 	for i := range nodes {
 		n := &nodes[i]
 		nf.Total++
-		ready := nodeIsReady(n)
+		ready := NodeIsReady(n)
 		if ready {
 			nf.Ready++
 		}
@@ -146,8 +162,8 @@ func countPlatform(pf *schema.PlatformFacts, n *corev1.Node, matches bool) {
 	}
 }
 
-// nodeIsReady reports whether the node's Ready condition is True.
-func nodeIsReady(n *corev1.Node) bool {
+// NodeIsReady reports whether the node's Ready condition is True.
+func NodeIsReady(n *corev1.Node) bool {
 	for _, c := range n.Status.Conditions {
 		if c.Type == corev1.NodeReady {
 			return c.Status == corev1.ConditionTrue

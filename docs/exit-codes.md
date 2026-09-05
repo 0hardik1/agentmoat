@@ -10,7 +10,7 @@ and AI agents can branch on it.
 | `2` | Compatibility issues found. At least one workload was classified as `incompatible`. | `agentmoat scan`, `agentmoat explain namespace`, `agentmoat explain workload` |
 | `3` | Partial outcome. Some steps succeeded and others failed; idempotent re-run is safe. | `agentmoat apply`, `agentmoat rollback` |
 | `4` | Verify failed. Live pods do not match the plan's expected `runtimeClassName`, the hosting nodes fall outside the RuntimeClass `nodeSelector`, and/or (with `--in-pod-probe`) the in-container probe did not find gVisor markers. | `agentmoat verify` |
-| `5` | Cluster not ready. The preflight found an error: no RuntimeClass, a RuntimeClass with no `scheduling.nodeSelector`, no Ready node matching it, untolerated taints on every matching node, or only EKS Auto Mode / Bottlerocket nodes. For `apply`, every step is reported `skipped` and nothing was mutated. | `agentmoat preflight`, `agentmoat apply` |
+| `5` | Cluster not ready. The preflight found an error: no RuntimeClass, a RuntimeClass with no `scheduling.nodeSelector`, no Ready node matching it, untolerated taints on every matching node, or only EKS Auto Mode / Bottlerocket nodes. For `apply`, every step is reported `skipped` and nothing was mutated. For `probe nvproxy`, the probe pod was not created. | `agentmoat preflight`, `agentmoat probe nvproxy`, `agentmoat apply` |
 
 ## Verify exit code 4 in detail
 
@@ -36,6 +36,14 @@ When it fails, the ApplyResult carries `metadata.preflight.ready: false`,
 every step has `status: skipped`, and `spec.preflightFindings` explains why.
 Nothing was mutated, so there is no partial state to roll back.
 `--skip-preflight` bypasses the gate. `rollback` never runs it.
+
+`agentmoat probe nvproxy` runs the preflight first and exits `5` for the
+same reason: with no Ready node that can host the RuntimeClass there is
+nowhere to run the probe pod, and the report says so with
+`nvproxy-probe-skipped`. A probe pod that ran but failed (image pull,
+timeout, no `runsc` at the path) is a warning finding
+(`nvproxy-probe-failed`) and exit `0`, because the preflight itself passed.
+GPU findings are never errors, so they never produce exit `5`.
 
 ## Why these exact codes
 

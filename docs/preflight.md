@@ -38,7 +38,7 @@ Two cluster-scoped, read-only calls:
 | Read | Used for |
 | --- | --- |
 | `get runtimeclasses/<name>` (`node.k8s.io`) | handler, `scheduling.nodeSelector`, `scheduling.tolerations`, `overhead.podFixed` |
-| `list nodes` | Ready condition, labels (selector match, EKS Auto Mode, Karpenter), taints, `nodeInfo.osImage` (Bottlerocket) |
+| `list nodes` | Ready condition, labels (selector match, EKS Auto Mode, Karpenter), taints, `nodeInfo.osImage` (Bottlerocket), GPU Feature Discovery labels and `nvidia.com/*` capacity (GPU facts) |
 
 Both are in [`deploy/clusterrole-readonly.yaml`](../deploy/clusterrole-readonly.yaml)
 and [`deploy/clusterrole-apply.yaml`](../deploy/clusterrole-apply.yaml).
@@ -59,6 +59,18 @@ carries them under `spec.findings[].id`. Only `error` findings block.
 | `eks-auto-mode-nodes` | error when all candidates, warn when some | Candidate nodes are EKS Auto Mode managed instances (`eks.amazonaws.com/compute-type=auto`). AWS owns their Bottlerocket image and runtime; runsc cannot be installed. | Add a self-managed or Karpenter node group from the agentmoat AL2023 AMI, labeled to match the selector. See [`eks-deployment.md`](eks-deployment.md). |
 | `bottlerocket-nodes` | error when all candidates, warn when some | Candidate nodes run Bottlerocket outside Auto Mode. It ships no runsc and its root filesystem is immutable. | Use the agentmoat AL2023 AMI for the gVisor node group. |
 | `runtimeclass-no-overhead` | info | `overhead.podFixed` is unset, so the scheduler does not account for the Sentry's footprint. | Consider `overhead.podFixed` (the shipped manifest uses `memory: 140Mi`, `cpu: 250m`). |
+| `gpu-product-unsupported` | warn | GPU nodes carry a card gVisor `nvproxy` does not support (supported: T4, A100, A10G, L4, H100). | Keep those workloads on runc, or add gVisor GPU nodes with a supported card. |
+| `gpu-product-unknown` | info | GPU nodes carry no GPU Feature Discovery labels, so the card and driver cannot be checked. | Install GFD (NVIDIA GPU Operator, or `gfd.enabled=true` in the device plugin chart). |
+| `gpu-mig-enabled` | warn | GPU nodes slice their GPUs with MIG; `nvproxy` does not support MIG. | Use whole-GPU nodes (`mig.strategy=none`) for workloads that move to gVisor. |
+| `gpu-driver-unsupported` | warn | The probed `runsc` does not list the host driver on nodes whose card is supported. | Install a listed driver version, or move to a `runsc` release that lists yours. |
+| `gpu-driver-unconfirmed` | info | Supported card, but the driver has not been checked against `runsc`. | Run `agentmoat probe nvproxy --dry-run=false`. |
+| `gpu-nvproxy-ready` | info | Card and driver both supported by the probed `runsc`. | None. |
+| `nvproxy-probe-dry-run` | info | `probe nvproxy` described its pod and created nothing. | Re-run with `--dry-run=false`. |
+| `nvproxy-probe-skipped` | warn | The preflight has an error finding, so there was no node to run the probe pod on. | Fix the error findings first. |
+| `nvproxy-probe-failed` | warn | The probe pod did not complete or its output did not parse. | The message names the cause (image pull, timeout, `runsc` path). |
+
+GPU and probe findings never block. They refine the `gpu-passthrough`
+verdict and appear as plan warnings; see [`gpu-nvproxy.md`](gpu-nvproxy.md).
 
 "Candidate nodes" are the nodes matching the RuntimeClass nodeSelector when
 there are any, else every node in the cluster (so a RuntimeClass-less Auto
@@ -74,9 +86,16 @@ info, then by ID, so the same cluster state renders identically.
   `spec.preflightFindings`, and the CLI exits `5`. Nothing is mutated.
   `--skip-preflight` bypasses the gate. `rollback` never runs it: moving pods
   back to runc needs no gVisor node.
+- **`agentmoat probe nvproxy`**: runs the preflight, then (unless
+  `--dry-run`, the default) creates one pod on a matching node to read the
+  `runsc` nvproxy driver list, and returns the same PreflightReport with
+  `metadata.probe` and `spec.facts.gpu.nvproxy` filled in.
 - **`agentmoat scan`**: records the same facts under
   `metadata.clusterFacts` (best-effort: without node RBAC the scan still
-  succeeds and omits them; `--no-cluster-facts` skips the reads).
+  succeeds and omits them; `--no-cluster-facts` skips the reads;
+  `--facts <file>` loads them from a saved PreflightReport or ScanReport
+  instead). The classifier reads them too: `gpu-passthrough` is refined
+  from the GPU facts.
 - **`agentmoat plan`**: turns the scan's facts into `spec.warnings` (error
   and warn findings, plus `cluster-facts-runtime-class-mismatch` when the
   scan inspected a different RuntimeClass than the plan targets). Warnings do
@@ -86,7 +105,8 @@ info, then by ID, so the same cluster state renders identically.
   outside the selector demotes the step to `mismatch`. Without node RBAC the
   result says `checked: false` and the step keeps its spec-level status.
 - **MCP**: `preflight_cluster` returns the same PreflightReport; `apply_plan`
-  runs the gate and accepts `skip_preflight`.
+  runs the gate and accepts `skip_preflight`; `probe_nvproxy` is the probe;
+  `scan_cluster`, `assess_workload`, and `propose_plan` accept `facts_path`.
 
 ## Example
 
@@ -146,3 +166,7 @@ Kubernetes cannot tell agentmoat whether the nodes' containerd actually
 registers the handler the RuntimeClass names, or whether the `runsc` binary
 on those nodes works. `agentmoat verify --in-pod-probe` is the runtime check
 for that: it execs into a migrated pod and looks for gVisor's markers.
+
+Nor can it tell which NVIDIA driver versions that `runsc` can proxy: the
+list is compiled into the binary. `agentmoat probe nvproxy` reads it by
+running the binary on a node; see [`gpu-nvproxy.md`](gpu-nvproxy.md).

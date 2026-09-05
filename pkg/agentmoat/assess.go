@@ -9,7 +9,8 @@
 //  1. Build (or accept) a Kubernetes client.
 //  2. Build the classifier registry (built-ins + optional YAML overrides).
 //  3. Fetch the workload via scanner.GetByRef.
-//  4. Classify it via classifier.Classify.
+//  4. Resolve the cluster facts (best-effort node read, or --facts file)
+//     and classify via classifier.ClassifyWithFacts.
 //  5. Return the verdict as schema.WorkloadResult so the MCP tool body is
 //     directly JSON-serializable.
 //
@@ -72,7 +73,16 @@ func AssessWorkload(ctx context.Context, opts AssessWorkloadOptions) (*schema.Wo
 		return nil, fmt.Errorf("assess: %w", err)
 	}
 
-	verdict := classifier.Classify(workload, registry)
+	// Same facts as scan, so a single-workload verdict never disagrees
+	// with the cluster-wide one for the same object.
+	facts, err := resolveClusterFacts(ctx, client, factsSource{
+		RuntimeClassName: opts.RuntimeClassName, SkipClusterFacts: opts.SkipClusterFacts, FactsPath: opts.FactsPath,
+	}, stderr)
+	if err != nil {
+		return nil, fmt.Errorf("assess: %w", err)
+	}
+
+	verdict := classifier.ClassifyWithFacts(workload, registry, facts)
 	return &schema.WorkloadResult{
 		Kind:           workload.Kind,
 		Namespace:      workload.Namespace,

@@ -24,6 +24,7 @@ import (
 var (
 	flagScanRuntimeClass   string
 	flagScanNoClusterFacts bool
+	flagScanFactsPath      string
 )
 
 func newScanCmd() *cobra.Command {
@@ -45,6 +46,13 @@ never run runsc. 'agentmoat plan --scan' turns them into warnings. Facts
 need get/list on nodes and runtimeclasses; without that permission the scan
 still succeeds and just omits them (--no-cluster-facts skips the reads).
 
+Facts also refine one verdict: gpu-passthrough. GPU nodes are read from GPU
+Feature Discovery labels (card model, driver, MIG); a workload on a card
+gVisor nvproxy supports, with a driver the installed runsc lists, is
+compatible, while an unsupported card or MIG is incompatible. The driver
+list comes from 'agentmoat probe nvproxy --dry-run=false --output json';
+pass that file with --facts and the scan reads it instead of the cluster.
+
 scan is strictly read-only and never mutates cluster state.`,
 		RunE: runScan,
 	}
@@ -52,6 +60,8 @@ scan is strictly read-only and never mutates cluster state.`,
 		"RuntimeClass name to inspect for metadata.clusterFacts")
 	cmd.Flags().BoolVar(&flagScanNoClusterFacts, "no-cluster-facts", false,
 		"do not read nodes and the RuntimeClass; omit metadata.clusterFacts")
+	cmd.Flags().StringVar(&flagScanFactsPath, "facts", "",
+		"load cluster facts from a saved PreflightReport or ScanReport (e.g. the output of 'probe nvproxy') instead of reading the cluster")
 	return cmd
 }
 
@@ -91,6 +101,7 @@ func runScan(cmd *cobra.Command, _ []string) error {
 		RulesYAMLPath:    flagRulesYAML,
 		RuntimeClassName: flagScanRuntimeClass,
 		SkipClusterFacts: flagScanNoClusterFacts,
+		FactsPath:        flagScanFactsPath,
 		Stderr:           stderr,
 	}
 

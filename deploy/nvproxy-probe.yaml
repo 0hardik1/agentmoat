@@ -1,0 +1,63 @@
+# agentmoat: namespace and RBAC for `agentmoat probe nvproxy`.
+#
+# The nvproxy probe creates one short-lived pod on a gVisor node that mounts
+# the host's runsc binary read-only (hostPath, type File) and runs
+# `runsc --version` and `runsc nvproxy list-supported-drivers`, then deletes
+# the pod. It runs under runc (not the RuntimeClass) as an unprivileged user
+# with no capabilities; the hostPath mount is the only thing about it that
+# Pod Security Admission "baseline" rejects.
+#
+# By default the probe uses the `default` namespace, which needs nothing
+# from this file. Apply this file when your cluster enforces PSA cluster-wide
+# and pass `--probe-namespace agentmoat-probe` (MCP: "namespace"):
+#
+#   kubectl apply -f deploy/nvproxy-probe.yaml
+#   agentmoat probe nvproxy --probe-namespace agentmoat-probe --dry-run=false
+#
+# The Role grants exactly what the probe does in that namespace: create, get,
+# and delete pods, and read pod logs. Node and RuntimeClass reads come from
+# deploy/clusterrole-readonly.yaml. The binding targets the `agentmoat`
+# ServiceAccount defined there; repoint `subjects` at your own identity if
+# you run the CLI as a user.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentmoat-probe
+  labels:
+    app.kubernetes.io/name: agentmoat
+    app.kubernetes.io/component: nvproxy-probe
+    # hostPath volumes need the privileged PSA level. Nothing else in the
+    # pod is privileged; see pkg/probe/pod.go for the full manifest.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentmoat-nvproxy-probe
+  namespace: agentmoat-probe
+  labels:
+    app.kubernetes.io/name: agentmoat
+    app.kubernetes.io/component: rbac
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentmoat-nvproxy-probe
+  namespace: agentmoat-probe
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentmoat-nvproxy-probe
+subjects:
+  - kind: ServiceAccount
+    name: agentmoat
+    namespace: kube-system

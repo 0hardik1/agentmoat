@@ -34,6 +34,10 @@ func registerAssessWorkload(srv *server.MCPServer, deps Deps) {
 			mcp.Description("Name of the target workload (must be unique within Kind+Namespace).")),
 		mcp.WithString("rules_yaml_path",
 			mcp.Description("Optional path to a classifier rules YAML override.")),
+		mcp.WithString("runtime_class_name",
+			mcp.Description("RuntimeClass whose nodes the cluster facts describe. Default 'gvisor'.")),
+		mcp.WithString("facts_path",
+			mcp.Description("Path to a saved PreflightReport (probe_nvproxy output) or ScanReport whose cluster facts replace the live node reads; see scan_cluster.")),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
 
@@ -51,14 +55,16 @@ func registerAssessWorkload(srv *server.MCPServer, deps Deps) {
 			return toolErr(err)
 		}
 		opts := agentmoat.AssessWorkloadOptions{
-			KubeconfigPath: req.GetString("kubeconfig_path", ""),
-			Context:        req.GetString("context", ""),
-			Kind:           kind,
-			Namespace:      namespace,
-			Name:           name,
-			RulesYAMLPath:  req.GetString("rules_yaml_path", ""),
-			Stderr:         deps.Stderr,
-			KubeClient:     deps.KubeClient,
+			KubeconfigPath:   req.GetString("kubeconfig_path", ""),
+			Context:          req.GetString("context", ""),
+			Kind:             kind,
+			Namespace:        namespace,
+			Name:             name,
+			RulesYAMLPath:    req.GetString("rules_yaml_path", ""),
+			RuntimeClassName: req.GetString("runtime_class_name", ""),
+			FactsPath:        req.GetString("facts_path", ""),
+			Stderr:           deps.Stderr,
+			KubeClient:       deps.KubeClient,
 		}
 		result, err := agentmoat.AssessWorkload(ctx, opts)
 		if err != nil {

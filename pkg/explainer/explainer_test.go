@@ -24,6 +24,7 @@ func TestListsAllTopics(t *testing.T) {
 	got := Topics()
 	want := []string{
 		"compatibility",
+		"gpu",
 		"gvisor",
 		"performance",
 		"preflight",

@@ -31,6 +31,9 @@ func renderPreflightReportTable(report *schema.PreflightReport, w io.Writer, use
 		"runtime-class: " + report.Metadata.RuntimeClassName,
 		"cluster: " + displayCluster(report.Metadata.Cluster),
 	}
+	if pm := report.Metadata.Probe; pm != nil {
+		chips = append(chips, "probe: "+describeProbe(pm))
+	}
 	if _, err := fmt.Fprintln(w, s.Muted.Render(strings.Join(chips, "   "))); err != nil {
 		return err
 	}
@@ -116,7 +119,57 @@ func renderClusterFacts(s *Styles, facts schema.ClusterFacts, w io.Writer) error
 			return err
 		}
 	}
+	return renderGPUFacts(s, facts.GPU, w)
+}
+
+// renderGPUFacts prints the GPU line and one muted line per (card, driver,
+// MIG) group with its support verdicts. Silent on a CPU-only cluster.
+func renderGPUFacts(s *Styles, g *schema.GPUFacts, w io.Writer) error {
+	if g == nil {
+		return nil
+	}
+	nv := "nvproxy=(not probed; run 'agentmoat probe nvproxy')"
+	if g.Nvproxy != nil {
+		nv = fmt.Sprintf("nvproxy=runsc %s (%d supported drivers)", g.Nvproxy.RunscVersion, len(g.Nvproxy.SupportedDrivers))
+	}
+	if _, err := fmt.Fprintf(w, "  GPU: nodes=%d  matching-selector=%d  mig=%d  %s\n", g.Nodes, g.MatchingNodes, g.MIGNodes, nv); err != nil {
+		return err
+	}
+	for _, grp := range g.Groups {
+		product, driver := grp.Product, grp.Driver
+		if product == "" {
+			product = "(no GFD labels)"
+		}
+		if driver == "" {
+			driver = "unknown"
+		}
+		mig := ""
+		if grp.MIG {
+			mig = "  mig=yes"
+		}
+		line := fmt.Sprintf("%s  driver=%s  nodes=%d (matching %d)%s  card=%s  driver-support=%s",
+			product, driver, grp.Nodes, grp.MatchingNodes, mig, grp.ProductSupport, grp.DriverSupport)
+		if _, err := fmt.Fprintln(w, "    "+s.Muted.Render(line)); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// describeProbe condenses ProbeMetadata into the header chip.
+func describeProbe(pm *schema.ProbeMetadata) string {
+	switch {
+	case pm.DryRun && pm.Node != "":
+		return fmt.Sprintf("dry-run (would create %s/%s on node %s)", pm.Namespace, pm.PodName, pm.Node)
+	case pm.DryRun:
+		return "dry-run (not scheduled: preflight not ready)"
+	case pm.Succeeded:
+		return fmt.Sprintf("%s/%s ran on node %s", pm.Namespace, pm.PodName, pm.Node)
+	case pm.Node == "":
+		return "skipped (preflight not ready)"
+	default:
+		return fmt.Sprintf("failed on node %s (see findings)", pm.Node)
+	}
 }
 
 // renderFindingsList prints FINDINGS as badge + id, message, and fix

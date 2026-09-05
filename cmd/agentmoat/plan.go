@@ -39,6 +39,7 @@ var (
 	flagPlanIncludeReview bool
 	flagPlanRuntimeClass  string
 	flagPlanAddToleration bool
+	flagPlanFactsPath     string
 )
 
 func newPlanCmd() *cobra.Command {
@@ -61,8 +62,10 @@ scheduling.tolerations and your gVisor nodes carry the
 runtime=gvisor:NoSchedule taint; it changes the plan hash.
 
 When the scan recorded cluster facts, the plan lists warnings (no matching
-Ready node, EKS Auto Mode nodes, ...) under spec.warnings. They do not
-change the steps or the hash; 'agentmoat apply' re-checks the live cluster.
+Ready node, EKS Auto Mode nodes, unsupported GPU cards, ...) under
+spec.warnings. They do not change the steps or the hash; 'agentmoat apply'
+re-checks the live cluster. --facts loads the facts from a saved report
+(the inline scan then classifies against them too; see 'scan --help').
 
 plan is strictly read-only.`,
 		RunE: runPlan,
@@ -75,6 +78,8 @@ plan is strictly read-only.`,
 		"RuntimeClass name to patch onto migrated workloads")
 	cmd.Flags().BoolVar(&flagPlanAddToleration, "add-toleration", false,
 		"also patch the runtime=gvisor:NoSchedule toleration into each pod template (changes the plan hash)")
+	cmd.Flags().StringVar(&flagPlanFactsPath, "facts", "",
+		"load cluster facts from a saved PreflightReport or ScanReport (e.g. 'probe nvproxy' output); with --scan, replaces the stored facts for the warnings")
 	return cmd
 }
 
@@ -105,6 +110,7 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 			LabelSelector:    flagLabelSelector,
 			RulesYAMLPath:    flagRulesYAML,
 			RuntimeClassName: flagPlanRuntimeClass,
+			FactsPath:        flagPlanFactsPath,
 			Stderr:           stderr,
 		},
 		Planner: schema.PlannerOptions{
