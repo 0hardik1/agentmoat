@@ -78,7 +78,7 @@ jobs:
       # v7 is the first that does. Dependabot proposes major bumps of this
       # action; read the changelog before merging one.
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
           # Pin to a known-good golangci-lint release. Bumping this is a
           # deliberate decision (new lints can break builds), so we update it
