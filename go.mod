@@ -22,7 +22,7 @@ go 1.26.0
 require (
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
-	github.com/mark3labs/mcp-go v0.54.0
+	github.com/mark3labs/mcp-go v1.0.0
 	github.com/mattn/go-isatty v0.0.20
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.39.0
