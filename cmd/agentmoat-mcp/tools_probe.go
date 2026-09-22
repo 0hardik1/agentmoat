@@ -24,7 +24,7 @@ import (
 	"github.com/0hardik1/agentmoat/pkg/probe"
 )
 
-const probeNvproxyDescription = "Read which NVIDIA host driver versions the installed runsc's nvproxy supports, by running a one-shot pod on a gVisor node that mounts the host runsc binary read-only and runs 'runsc nvproxy list-supported-drivers'. SAFETY: defaults to dry-run (describes the pod, creates nothing); you MUST pass \"dry_run\": false to create the pod, which is deleted afterwards. Returns a PreflightReport: spec.facts.gpu lists the GPU nodes (from GPU Feature Discovery labels) with per-card and per-driver support verdicts, metadata.probe records the pod. Save the JSON and pass it as facts_path to scan_cluster to classify GPU workloads against the real driver list."
+const probeNvproxyDescription = "Read which NVIDIA host driver versions the installed runsc's nvproxy supports, by running a one-shot pod on a gVisor node that mounts the host runsc binary read-only and runs 'runsc nvproxy list-supported-drivers'. SAFETY: defaults to dry-run (describes the pod, creates nothing); you MUST pass \"dry_run\": false to create the pod, which is deleted afterwards. Returns a PreflightReport: spec.facts.gpu lists the GPU nodes (from GPU Feature Discovery labels) with per-card and per-driver support verdicts, spec.facts.runsc records the runsc release, metadata.probe records the pod. Save the JSON and pass it as facts_path to scan_cluster to classify GPU workloads against the real driver list, and systemd-init workloads against the runsc release (systemd needs release-20260831.0 or newer)."
 
 func registerProbeNvproxy(srv *server.MCPServer, deps Deps) {
 	tool := mcp.NewTool("probe_nvproxy",

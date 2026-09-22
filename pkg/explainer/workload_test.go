@@ -528,6 +528,43 @@ func TestExplainWorkload_PerRuleEvidence(t *testing.T) {
 				}
 			},
 		},
+		{
+			// Evidence comes from classifier.ContainerRunsSystemd, the same
+			// helper the rule's Match uses: a command path lands in
+			// Commands, an image-name hint in ImageMatches.
+			name: "systemd-init",
+			w: scanner.Workload{
+				Kind: "Deployment", Namespace: "ns", Name: "n",
+				Annotations: map[string]string{"agentmoat.io/runs-systemd": "true"},
+				PodSpec: corev1.PodSpec{
+					InitContainers: []corev1.Container{{Name: "setup", Command: []string{"/sbin/init"}}},
+					Containers: []corev1.Container{
+						{Name: "os", Command: []string{"/usr/lib/systemd/systemd", "--system"}},
+						{Name: "ubi", Image: "registry.access.redhat.com/ubi9/ubi-init"},
+						{Name: "app", Image: "test/app", Command: []string{"/app"}},
+					},
+				},
+			},
+			reason: makeReason("systemd-init", classifier.SeverityWarn),
+			check: func(t *testing.T, got schema.WorkloadExplanation) {
+				ev := got.Findings[0].Evidence
+				wantCmd := []schema.CommandHit{{Container: "os", Field: "command", Executable: "/usr/lib/systemd/systemd"}}
+				if !reflect.DeepEqual(ev.Commands, wantCmd) {
+					t.Errorf("Commands: got %+v want %+v", ev.Commands, wantCmd)
+				}
+				wantImg := []schema.ImageMatch{{Container: "ubi", Image: "registry.access.redhat.com/ubi9/ubi-init", HintPattern: "ubi-init"}}
+				if !reflect.DeepEqual(ev.ImageMatches, wantImg) {
+					t.Errorf("ImageMatches: got %+v want %+v", ev.ImageMatches, wantImg)
+				}
+				wantAnn := []schema.AnnotationHit{{Key: "agentmoat.io/runs-systemd", Value: "true"}}
+				if !reflect.DeepEqual(ev.Annotations, wantAnn) {
+					t.Errorf("Annotations: got %+v want %+v", ev.Annotations, wantAnn)
+				}
+				if got.Findings[0].Title != "systemd runs as PID 1" {
+					t.Errorf("Title: got %q", got.Findings[0].Title)
+				}
+			},
+		},
 	}
 
 	for _, c := range cases {

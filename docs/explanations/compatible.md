@@ -1,13 +1,13 @@
 ## What was checked
 
-The classifier ran all 14 built-in rules against this workload and none
+The classifier ran all 15 built-in rules against this workload and none
 fired. The sweep covers host namespace sharing (`hostNetwork`,
 `hostPID`, `hostIPC`), capability requests (`CAP_NET_RAW`, `CAP_BPF`,
 `CAP_PERFMON`, `CAP_SYS_ADMIN`, `privileged`), volume sources
 (`hostPath`, FUSE CSI drivers, `/dev/kvm`), resource requests
-(`nvidia.com/gpu`), workload annotations
-(`agentmoat.io/uses-iouring`, `agentmoat.io/needs-raw-socket`), and
-image-hint heuristics for known network-throughput-bound and
+(`nvidia.com/gpu`), systemd as PID 1, workload annotations
+(`agentmoat.io/uses-iouring`, `agentmoat.io/needs-raw-socket`,
+`agentmoat.io/runs-systemd`), and image-hint heuristics for known network-throughput-bound and
 syscall-heavy workloads. No incompatibility, review, or info finding
 was emitted. The full rule catalogue is in
 [`compatibility-checklist.md`](../compatibility-checklist.md).

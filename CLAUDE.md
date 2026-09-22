@@ -54,9 +54,9 @@ them green locally before pushing.
   `[]scanner.Workload`.
 - `pkg/classifier/`: pure-function rule engine. `Classify(w, registry)`
   returns a `Verdict`; `ClassifyWithFacts` adds `schema.ClusterFacts` so a
-  rule's `Refine` hook can move its severity (only `gpu-passthrough` does,
-  in `gpu_refine.go`). Built-in rules in `builtin_rules.go`; YAML
-  overrides in `internal/rules/gvisor.yaml`.
+  rule's `Refine` hook can move its severity (`gpu-passthrough` in
+  `gpu_refine.go`, `systemd-init` in `systemd_init.go`). Built-in rules in
+  `builtin_rules.go`; YAML overrides in `internal/rules/gvisor.yaml`.
 - `pkg/preflight/`: reads one RuntimeClass and the node list into
   `schema.ClusterFacts` (`Collect`), turns facts into findings with stable
   IDs (`Evaluate`, pure), and wraps both (`Run`). `apply` calls it as a gate

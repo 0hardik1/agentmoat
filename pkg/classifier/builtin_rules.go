@@ -1,6 +1,6 @@
 // Package classifier: built-in rule set.
 //
-// The 14 rules registered in this file are the standard gVisor
+// The 15 rules registered in this file are the standard gVisor
 // compatibility checks, covering both the cases where gVisor is the wrong
 // answer and the performance trade-offs to weigh. The upstream source for
 // most rules is the gVisor user
@@ -24,6 +24,8 @@
 //  12. privileged           (error) container in privileged mode.
 //  13. raw-socket           (error) CAP_NET_RAW or operator-declared usage.
 //  14. syscall-heavy        (info)  syscall-bound image (redis, memcached).
+//  15. systemd-init         (warn)  systemd as PID 1; refined by the
+//     installed runsc release (systemd_init.go).
 //
 // Each rule's Match closure is intentionally small and reads only the
 // fields it needs from the PodSpec. Rules are pure functions of the
@@ -38,7 +40,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// RegisterBuiltins adds the 14 standard rules to the given Registry. Call
+// RegisterBuiltins adds the 15 standard rules to the given Registry. Call
 // it once after NewRegistry() during CLI startup, before loading any YAML
 // overrides. The rules are split into three group functions (one per
 // severity) so each stays under the project's cyclomatic-complexity budget.
@@ -102,7 +104,7 @@ func registerErrorRules(r *Registry) {
 	})
 }
 
-// registerWarnRules adds the 5 review-class rules (any of which makes a
+// registerWarnRules adds the 6 review-class rules (any of which makes a
 // workload `review` unless the operator opts in via --include-review).
 func registerWarnRules(r *Registry) {
 	r.Register(Rule{
@@ -141,6 +143,15 @@ func registerWarnRules(r *Registry) {
 		Description:    "Workload requests CAP_PERFMON or CAP_SYS_ADMIN typically used for perf_event_open; gVisor does not expose perf events.",
 		RemediationURL: "https://gvisor.dev/docs/user_guide/compatibility/",
 		Match:          matchPerfEvents,
+	})
+	r.Register(Rule{
+		ID:       "systemd-init",
+		Severity: SeverityWarn,
+		Description: "Container runs systemd as PID 1; gVisor runs systemd from runsc release-" + SystemdMinRunsc +
+			" when the sandbox has the runsc flag in-sandbox-cgroup=v2 (off by default) and the container has CAP_SYS_ADMIN.",
+		RemediationURL: "https://gvisor.dev/blog/2026/09/17/systemd-in-gvisor/",
+		Match:          matchSystemdInit,
+		Refine:         refineSystemdInit,
 	})
 }
 

@@ -282,15 +282,7 @@ func renderEvidence(s *Styles, e *schema.Evidence, w io.Writer) error {
 		fmt.Fprintf(&b, "    Container %q has capability %s\n", h.Container, h.Capability)
 	}
 	for _, h := range e.HostPaths {
-		mounts := ""
-		if len(h.Containers) > 0 {
-			quoted := make([]string, 0, len(h.Containers))
-			for _, c := range h.Containers {
-				quoted = append(quoted, fmt.Sprintf("%q", c))
-			}
-			mounts = fmt.Sprintf("  (mounted by container %s)", strings.Join(quoted, ", "))
-		}
-		fmt.Fprintf(&b, "    Volume %q -> %s%s\n", h.Volume, h.Path, mounts)
+		fmt.Fprintln(&b, "    "+hostPathLine(h))
 	}
 	for _, h := range e.ImageMatches {
 		fmt.Fprintf(&b, "    Container %q image %q matches hint %q\n", h.Container, h.Image, h.HintPattern)
@@ -307,8 +299,25 @@ func renderEvidence(s *Styles, e *schema.Evidence, w io.Writer) error {
 	for _, h := range e.CSIDrivers {
 		fmt.Fprintf(&b, "    Volume %q uses CSI driver %q\n", h.Volume, h.Driver)
 	}
+	for _, h := range e.Commands {
+		fmt.Fprintf(&b, "    Container %q %s[0] = %s\n", h.Container, h.Field, h.Executable)
+	}
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// hostPathLine formats one hostPath hit: the volume, its host path, and
+// the containers that mount it, when known.
+func hostPathLine(h schema.HostPathHit) string {
+	mounts := ""
+	if len(h.Containers) > 0 {
+		quoted := make([]string, 0, len(h.Containers))
+		for _, c := range h.Containers {
+			quoted = append(quoted, fmt.Sprintf("%q", c))
+		}
+		mounts = fmt.Sprintf("  (mounted by container %s)", strings.Join(quoted, ", "))
+	}
+	return fmt.Sprintf("Volume %q -> %s%s", h.Volume, h.Path, mounts)
 }
 
 // evidenceEmpty reports whether every slice in e is empty. Used by
@@ -323,7 +332,8 @@ func evidenceEmpty(e *schema.Evidence) bool {
 		len(e.GPURequests) == 0 &&
 		len(e.EnvVars) == 0 &&
 		len(e.Annotations) == 0 &&
-		len(e.CSIDrivers) == 0
+		len(e.CSIDrivers) == 0 &&
+		len(e.Commands) == 0
 }
 
 // checkedBucket is one row in the "what was checked" summary printed
@@ -348,7 +358,8 @@ var checkedBuckets = []checkedBucket{
 	{Label: "privileged", Line: "privileged: no privileged containers"},
 	{Label: "volumes", Line: "volumes: no hostPath, no FUSE, no /dev/kvm"},
 	{Label: "images", Line: "images: no risky hints (no eBPF/cilium/tetragon/falco, no GPU)"},
-	{Label: "annotations", Line: "annotations: none flagged (no io_uring, no raw-socket override)"},
+	{Label: "init process", Line: "init process: not systemd"},
+	{Label: "annotations", Line: "annotations: none flagged (no io_uring, no raw-socket override, no runs-systemd)"},
 }
 
 // renderWorkloadChecked renders the "what was checked" summary for a

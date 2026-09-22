@@ -284,6 +284,12 @@ func assertSampleNvproxyFacts(t *testing.T, r *schema.PreflightReport) {
 	if g := r.Spec.Facts.GPU.Groups[0]; g.ProductSupport != schema.SupportSupported || g.DriverSupport != schema.SupportSupported {
 		t.Fatalf("group = %+v, want supported/supported", g)
 	}
+	// The same probe fills the top-level runsc facts that systemd-init
+	// reads, with the same version, node, and timestamp.
+	wantRunsc := schema.RunscFacts{Version: "release-20260817.0", Node: "gv-b", ProbedAt: nv.ProbedAt}
+	if rf := r.Spec.Facts.Runsc; rf == nil || *rf != wantRunsc {
+		t.Fatalf("Runsc = %+v, want %+v", rf, wantRunsc)
+	}
 }
 
 func TestRun_PodFailedIsAWarning(t *testing.T) {
@@ -343,6 +349,9 @@ func TestRun_UnparseableOutputIsAWarning(t *testing.T) {
 	f := findingByID(t, r, preflight.FindingNvproxyProbeFailed)
 	if !strings.Contains(f.Message, "unexpected output") || !strings.Contains(f.Message, `no "runsc version" line`) {
 		t.Fatalf("message = %q", f.Message)
+	}
+	if r.Spec.Facts.Runsc != nil {
+		t.Fatalf("a failed probe must not record runsc facts, got %+v", r.Spec.Facts.Runsc)
 	}
 	assertPodGone(t, c)
 }

@@ -1,0 +1,19 @@
+# agentmoat: expected verdict = review (perf-events, systemd-init)
+# The pod shape that boots systemd under gVisor (runsc release-20260831.0 or
+# newer): the in-sandbox-cgroup=v2 flag as a pod annotation, plus
+# CAP_SYS_ADMIN so systemd can remount the cgroup tree. See
+# docs/explanations/systemd-init.md.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ubi-init
+  namespace: default
+  annotations:
+    dev.gvisor.flag.in-sandbox-cgroup: "v2"
+spec:
+  containers:
+    - name: os
+      image: registry.access.redhat.com/ubi9/ubi-init:latest
+      securityContext:
+        capabilities:
+          add: ["SYS_ADMIN"]

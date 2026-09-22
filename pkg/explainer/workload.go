@@ -24,7 +24,7 @@
 //
 //   - "Checked" entries (rules that did NOT fire) are populated for every
 //     verdict, not just Compatible ones. This lets the operator see "we
-//     evaluated 14 rules; here is the 1 that fired and the 13 that did
+//     evaluated 15 rules; here is the 1 that fired and the 14 that did
 //     not" on a Review verdict, which matches the mental model of an
 //     audit log.
 //
@@ -88,8 +88,8 @@ func ExplainWorkload(
 
 	// Checked: one entry per rule that did NOT fire, in the input order.
 	// Populated for every verdict (not just Compatible) so even on a
-	// Review verdict the operator can see "we checked 14 rules, 1 fired,
-	// here are the 13 that didn't".
+	// Review verdict the operator can see "we checked 15 rules, 1 fired,
+	// here are the 14 that didn't".
 	checked := make([]schema.RuleCheck, 0, len(allRules))
 	for _, r := range allRules {
 		if _, fired := firedIDs[r.ID]; fired {
@@ -144,38 +144,31 @@ func LoadExplanationProse(ruleID string) string {
 // compatibility: a future rule that ships before its title is added
 // here will still render, just less prettily.
 func ruleTitle(ruleID string) string {
-	switch ruleID {
-	case "host-network":
-		return "Host network namespace shared"
-	case "host-pid":
-		return "Host PID namespace shared"
-	case "host-ipc":
-		return "Host IPC namespace shared"
-	case "privileged":
-		return "Privileged container"
-	case "raw-socket":
-		return "Raw socket capability requested"
-	case "ebpf":
-		return "eBPF workload detected"
-	case "kvm-nested":
-		return "Nested KVM virtualization"
-	case "host-path-mount":
-		return "Host path volume mounted"
-	case "gpu-passthrough":
-		return "GPU passthrough requested"
-	case "fuse-mount":
-		return "FUSE filesystem in use"
-	case "io-uring":
-		return "io_uring opt-in declared"
-	case "perf-events":
-		return "Performance event capability"
-	case "network-throughput":
-		return "Network-throughput-bound workload"
-	case "syscall-heavy":
-		return "Syscall-heavy workload"
-	default:
-		return ruleID
+	if t, ok := ruleTitles[ruleID]; ok {
+		return t
 	}
+	return ruleID
+}
+
+// ruleTitles maps each built-in rule ID to its section heading. A table
+// rather than a switch: one line per rule, and adding a rule does not grow
+// a function's cyclomatic complexity.
+var ruleTitles = map[string]string{
+	"host-network":       "Host network namespace shared",
+	"host-pid":           "Host PID namespace shared",
+	"host-ipc":           "Host IPC namespace shared",
+	"privileged":         "Privileged container",
+	"raw-socket":         "Raw socket capability requested",
+	"ebpf":               "eBPF workload detected",
+	"kvm-nested":         "Nested KVM virtualization",
+	"host-path-mount":    "Host path volume mounted",
+	"gpu-passthrough":    "GPU passthrough requested",
+	"fuse-mount":         "FUSE filesystem in use",
+	"io-uring":           "io_uring opt-in declared",
+	"perf-events":        "Performance event capability",
+	"network-throughput": "Network-throughput-bound workload",
+	"syscall-heavy":      "Syscall-heavy workload",
+	"systemd-init":       "systemd runs as PID 1",
 }
 
 // extractEvidence pulls the concrete PodSpec facts that triggered (or
@@ -187,38 +180,67 @@ func ruleTitle(ruleID string) string {
 // the finding still shows up with title + prose, just without
 // structured evidence).
 func extractEvidence(w scanner.Workload, ruleID string) schema.Evidence {
-	switch ruleID {
-	case "host-network":
-		return schema.Evidence{HostNamespaces: []string{"hostNetwork"}}
-	case "host-pid":
-		return schema.Evidence{HostNamespaces: []string{"hostPID"}}
-	case "host-ipc":
-		return schema.Evidence{HostNamespaces: []string{"hostIPC"}}
-	case "privileged":
-		return evidenceForPrivileged(w)
-	case "raw-socket":
-		return evidenceForRawSocket(w)
-	case "ebpf":
-		return evidenceForEBPF(w)
-	case "kvm-nested":
-		return evidenceForKVMNested(w)
-	case "host-path-mount":
-		return evidenceForHostPathMount(w)
-	case "gpu-passthrough":
-		return evidenceForGPUPassthrough(w)
-	case "fuse-mount":
-		return evidenceForFUSEMount(w)
-	case "io-uring":
-		return evidenceForIOUring(w)
-	case "perf-events":
-		return evidenceForPerfEvents(w)
-	case "network-throughput":
-		return evidenceForImageHints(w, []string{"nginx", "envoy", "haproxy", "traefik"})
-	case "syscall-heavy":
-		return evidenceForImageHints(w, []string{"redis", "memcached"})
-	default:
-		return schema.Evidence{}
+	if extract, ok := evidenceExtractors[ruleID]; ok {
+		return extract(w)
 	}
+	return schema.Evidence{}
+}
+
+// evidenceExtractors maps each built-in rule ID to its evidence function.
+// A table rather than a switch, for the same reason as ruleTitles.
+var evidenceExtractors = map[string]func(scanner.Workload) schema.Evidence{
+	"host-network":    hostNamespaceEvidence("hostNetwork"),
+	"host-pid":        hostNamespaceEvidence("hostPID"),
+	"host-ipc":        hostNamespaceEvidence("hostIPC"),
+	"privileged":      evidenceForPrivileged,
+	"raw-socket":      evidenceForRawSocket,
+	"ebpf":            evidenceForEBPF,
+	"kvm-nested":      evidenceForKVMNested,
+	"host-path-mount": evidenceForHostPathMount,
+	"gpu-passthrough": evidenceForGPUPassthrough,
+	"fuse-mount":      evidenceForFUSEMount,
+	"io-uring":        evidenceForIOUring,
+	"perf-events":     evidenceForPerfEvents,
+	"network-throughput": func(w scanner.Workload) schema.Evidence {
+		return evidenceForImageHints(w, []string{"nginx", "envoy", "haproxy", "traefik"})
+	},
+	"syscall-heavy": func(w scanner.Workload) schema.Evidence {
+		return evidenceForImageHints(w, []string{"redis", "memcached"})
+	},
+	"systemd-init": evidenceForSystemdInit,
+}
+
+// hostNamespaceEvidence returns an extractor for the host-namespace rules.
+// Their evidence is the pod field itself; the rule only fires when it is
+// true, so there is nothing else to look up.
+func hostNamespaceEvidence(field string) func(scanner.Workload) schema.Evidence {
+	return func(scanner.Workload) schema.Evidence {
+		return schema.Evidence{HostNamespaces: []string{field}}
+	}
+}
+
+// evidenceForSystemdInit reports the operator annotation and every main
+// container that runs systemd as PID 1. It calls the same
+// classifier.ContainerRunsSystemd the rule's Match uses, so the evidence is
+// exactly what made the rule fire: a command[0]/args[0] path becomes a
+// Commands entry, an image-name hint an ImageMatches entry.
+func evidenceForSystemdInit(w scanner.Workload) schema.Evidence {
+	ev := schema.Evidence{}
+	if val := w.Annotations[classifier.SystemdAnnotation]; val == "true" {
+		ev.Annotations = append(ev.Annotations, schema.AnnotationHit{Key: classifier.SystemdAnnotation, Value: val})
+	}
+	for _, c := range w.PodSpec.Containers {
+		m, ok := classifier.ContainerRunsSystemd(c)
+		switch {
+		case !ok:
+			continue
+		case m.Field == "image":
+			ev.ImageMatches = append(ev.ImageMatches, schema.ImageMatch{Container: c.Name, Image: c.Image, HintPattern: m.Value})
+		default:
+			ev.Commands = append(ev.Commands, schema.CommandHit{Container: c.Name, Field: m.Field, Executable: m.Value})
+		}
+	}
+	return ev
 }
 
 // evidenceForPrivileged collects the names of every container running

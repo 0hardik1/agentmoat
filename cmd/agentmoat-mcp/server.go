@@ -23,7 +23,7 @@ const serverInstructions = `agentmoat-mcp moves Kubernetes workloads from runc t
 Read-only tools: scan_cluster, preflight_cluster, assess_workload, propose_plan, verify_migration, explain.
 Mutating tools: apply_plan, rollback_plan, probe_nvproxy (default dry_run=true; must set "dry_run": false to mutate).
 Call preflight_cluster before apply_plan: apply refuses to run (every step skipped) when the cluster has no Ready node that can host the RuntimeClass.
-For GPU workloads, run probe_nvproxy (dry_run=false, creates and deletes one pod), save its JSON, and pass the path as facts_path to scan_cluster: the gpu-passthrough verdict is then settled from the real card and driver list.
+For GPU or systemd workloads, run probe_nvproxy (dry_run=false, creates and deletes one pod), save its JSON, and pass the path as facts_path to scan_cluster: the gpu-passthrough verdict is then settled from the real card and driver list, and systemd-init is checked against the installed runsc release.
 Resources: agentmoat://compatibility-rules, agentmoat://known-gotchas.
 Prompt: audit-cluster-for-agentic-workloads (audit for LLM/MCP/agent workloads).`
 

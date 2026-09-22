@@ -312,3 +312,38 @@ func TestRenderNamespaceExplanation_NoColorClean(t *testing.T) {
 		t.Errorf("expected no ANSI escapes in NoColor output, got:\n%q", out)
 	}
 }
+
+// TestRenderEvidence_CommandsAndHostPaths pins two evidence lines: the
+// Commands line systemd-init adds ("which program is PID 1") and the
+// hostPath line, whose formatting lives in hostPathLine.
+func TestRenderEvidence_CommandsAndHostPaths(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	ev := &schema.Evidence{
+		HostPaths: []schema.HostPathHit{
+			{Volume: "cgroup", Path: "/sys/fs/cgroup", Containers: []string{"os", "agent"}},
+			{Volume: "logs", Path: "/var/log"},
+		},
+		Commands: []schema.CommandHit{
+			{Container: "os", Field: "command", Executable: "/sbin/init"},
+			{Container: "vm", Field: "args", Executable: "/usr/lib/systemd/systemd"},
+		},
+	}
+	if err := renderEvidence(NewStyles(false), ev, &buf); err != nil {
+		t.Fatalf("renderEvidence: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		`Volume "cgroup" -> /sys/fs/cgroup  (mounted by container "os", "agent")`,
+		`Volume "logs" -> /var/log` + "\n",
+		`Container "os" command[0] = /sbin/init`,
+		`Container "vm" args[0] = /usr/lib/systemd/systemd`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\nfull output:\n%s", want, out)
+		}
+	}
+	if evidenceEmpty(&schema.Evidence{Commands: ev.Commands}) {
+		t.Error("evidence with only Commands must not count as empty")
+	}
+}
