@@ -17,10 +17,10 @@
 #     written as a matrix so we can add more Go versions or OSes later
 #     without restructuring the workflow.
 #   * `gvisor-pin`: runs scripts/check-gvisor-version.sh, which asserts the
-#     three gVisor release pins agree and that all eight release artifacts
-#     exist in the bucket. It does NOT fail on drift (a newer release); that
-#     is the weekly gvisor-drift.yml workflow's job, so a PR never turns red
-#     because gVisor shipped that morning.
+#     three gVisor release pins agree and that the release tarball and its
+#     checksum exist in the bucket for both archs. It does NOT fail on drift
+#     (a newer release); that is the weekly gvisor-drift.yml workflow's job,
+#     so a PR never turns red because gVisor shipped that morning.
 #
 # Caching:
 #   * actions/setup-go@v5 transparently caches the module cache (~/go/pkg/mod)

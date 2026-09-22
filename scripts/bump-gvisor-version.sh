@@ -8,7 +8,7 @@
 # unpublished tag fails before anything is committed.
 #
 # Usage:
-#   ./scripts/bump-gvisor-version.sh 20260817.0
+#   ./scripts/bump-gvisor-version.sh 20260914.0
 #
 # Used by .github/workflows/gvisor-drift.yml and by humans doing a manual
 # bump (see docs/gvisor-version.md). After bumping, rebuild the kind image

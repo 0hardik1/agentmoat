@@ -4,6 +4,7 @@
 #
 #   /usr/local/bin/runsc                       (gVisor runtime)
 #   /usr/local/bin/containerd-shim-runsc-v1    (containerd v2 shim)
+#   /usr/local/bin/gvisor-bin/                 (runsc sidecar binaries)
 #   /etc/containerd/runsc.toml                 (runsc platform/network config)
 #
 # The matching containerd runtime registration (the
@@ -17,7 +18,7 @@
 #
 #   docker buildx build \
 #     --platform "linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
-#     --build-arg GVISOR_VERSION=20260817.0 \
+#     --build-arg GVISOR_VERSION=20260914.0 \
 #     --build-arg KIND_NODE_VERSION=v1.32.5 \
 #     -t agentmoat-kind-gvisor:dev \
 #     -f kind/Dockerfile.gvisor-node kind/
@@ -41,38 +42,56 @@
 #     without exec'ing into the node.
 
 ARG KIND_NODE_VERSION=v1.32.5
-FROM kindest/node:${KIND_NODE_VERSION}
 
 # Pinned to a tested gVisor release. Bump with scripts/bump-gvisor-version.sh,
 # which rewrites every copy of the pin and verifies that both archs publish
-# `runsc`, `runsc.sha512`, `containerd-shim-runsc-v1`, and
-# `containerd-shim-runsc-v1.sha512` under
+# `gvisor.tar.bz2` and `gvisor.tar.bz2.sha512` under
 # https://storage.googleapis.com/gvisor/releases/release/<tag>/<arch>/.
 # The weekly gvisor-drift.yml workflow opens that PR automatically; see
-# docs/gvisor-version.md.
-ARG GVISOR_VERSION=20260817.0
+# docs/gvisor-version.md. Declared before the first FROM so both stages
+# below can read it (each stage re-declares it without a value).
+ARG GVISOR_VERSION=20260914.0
 
-# Record the baked gVisor release on the image. scripts/build-gvisor-node.sh
-# compares this label with the requested GVISOR_VERSION and rebuilds when
-# they differ, so a pin bump is never silently ignored by the tag cache.
-LABEL org.agentmoat.gvisor-version="${GVISOR_VERSION}"
-
-# docker buildx sets TARGETARCH to amd64|arm64; gVisor's release paths use
-# x86_64|aarch64. We translate inside the RUN below.
-ARG TARGETARCH
-
-# Install runsc + the containerd v2 shim, verifying SHA512 for both. We
-# pull the SHA file from the same release dir so a tampered binary fails
-# the local check (the SHA file's path is also bound to a specific
-# release/arch, so an attacker would have to compromise the GCS bucket
-# for both files to slip a bad binary through).
+# ---------------------------------------------------------------------------
+# Stage 1: fetch and verify the gVisor release tarball.
+# ---------------------------------------------------------------------------
 #
-# Why not gVisor's apt repository: kindest/node is Debian-based, so apt
-# would work, but this image must be reproducible. `apt-get install runsc`
-# resolves to whatever is newest at build time, which makes two builds of
-# the same commit install different binaries. The pinned artifact URL plus
-# the checksum keeps the build deterministic; the drift workflow keeps the
-# pin fresh.
+# From release 20260831.0 on, gVisor publishes one tarball per arch instead
+# of separate `runsc` and `containerd-shim-runsc-v1` files. The tarball
+# holds:
+#
+#   runsc
+#   containerd-shim-runsc-v1
+#   gvisor-bin/   (sidecars: gvisor_sentry, checkpointgofer, ...)
+#
+# runsc looks for gvisor-bin/ next to its own binary, and from 20260831.0
+# its default --sidecar-usage-policy refuses the old fallback of running
+# copies embedded in runsc. So gvisor-bin/ is not optional: without it the
+# sandbox does not start.
+#
+# Why a separate stage: kindest/node has no bzip2 (or zstd), and we do not
+# want download tools in the node image. This stage runs on the build
+# host's own platform ($BUILDPLATFORM), so a cross-arch build (amd64 image
+# on an arm64 Mac) does not emulate curl and tar; TARGETARCH still picks
+# the right gVisor arch.
+FROM --platform=$BUILDPLATFORM debian:trixie-slim AS gvisor
+ARG GVISOR_VERSION
+ARG TARGETARCH
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends bzip2 ca-certificates curl; \
+    rm -rf /var/lib/apt/lists/*
+
+# Verify the tarball with the SHA512 file from the same release dir, so a
+# tampered archive fails the local check (the SHA file's path is also bound
+# to a specific release/arch, so an attacker would have to compromise the
+# GCS bucket for both files to slip a bad archive through).
+#
+# Why not gVisor's apt repository: this image must be reproducible.
+# `apt-get install runsc` resolves to whatever is newest at build time,
+# which makes two builds of the same commit install different binaries.
+# The pinned artifact URL plus the checksum keeps the build deterministic;
+# the drift workflow keeps the pin fresh.
 RUN set -eux; \
     case "${TARGETARCH:-$(dpkg --print-architecture 2>/dev/null || echo unknown)}" in \
         amd64) GVISOR_ARCH=x86_64 ;; \
@@ -80,16 +99,31 @@ RUN set -eux; \
         *) echo "unsupported TARGETARCH='${TARGETARCH}'" >&2; exit 1 ;; \
     esac; \
     BASE="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/${GVISOR_ARCH}"; \
-    TMPDIR="$(mktemp -d)"; cd "${TMPDIR}"; \
-    for f in runsc runsc.sha512 containerd-shim-runsc-v1 containerd-shim-runsc-v1.sha512; do \
+    mkdir -p /fetch /out/usr/local/bin; cd /fetch; \
+    for f in gvisor.tar.bz2 gvisor.tar.bz2.sha512; do \
         curl --fail --silent --show-error --location --remote-name "${BASE}/${f}"; \
     done; \
-    sha512sum -c runsc.sha512; \
-    sha512sum -c containerd-shim-runsc-v1.sha512; \
-    install --owner=root --group=root --mode=0755 runsc /usr/local/bin/runsc; \
-    install --owner=root --group=root --mode=0755 containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1; \
-    cd /; rm -rf "${TMPDIR}"; \
-    /usr/local/bin/runsc --version
+    sha512sum -c gvisor.tar.bz2.sha512; \
+    tar -xjf gvisor.tar.bz2 -C /out/usr/local/bin; \
+    test -x /out/usr/local/bin/runsc; \
+    test -x /out/usr/local/bin/containerd-shim-runsc-v1; \
+    test -d /out/usr/local/bin/gvisor-bin
+
+# ---------------------------------------------------------------------------
+# Stage 2: the kind node image.
+# ---------------------------------------------------------------------------
+FROM kindest/node:${KIND_NODE_VERSION}
+ARG GVISOR_VERSION
+
+# Record the baked gVisor release on the image. scripts/build-gvisor-node.sh
+# compares this label with the requested GVISOR_VERSION and rebuilds when
+# they differ, so a pin bump is never silently ignored by the tag cache.
+LABEL org.agentmoat.gvisor-version="${GVISOR_VERSION}"
+
+# COPY writes root-owned files and keeps the tarball's 0755 modes. The
+# trailing slash merges into /usr/local/bin instead of replacing it.
+COPY --from=gvisor /out/usr/local/bin/ /usr/local/bin/
+RUN /usr/local/bin/runsc --version
 
 # runsc.toml controls platform + network for the gVisor sandbox. It is
 # loaded by the shim because the runtime registration (in cluster.yaml's

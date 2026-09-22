@@ -14,10 +14,10 @@ The same `yyyymmdd.N` tag appears in three load-bearing files:
 | `kind/Dockerfile.gvisor-node` | `ARG GVISOR_VERSION=...` |
 | `scripts/build-gvisor-node.sh` | `GVISOR_VERSION="${GVISOR_VERSION:-...}"` |
 
-The current pin is `20260817.0`. `make check-gvisor-version` fails when the
+The current pin is `20260914.0`. `make check-gvisor-version` fails when the
 three disagree.
 
-gVisor tags look like `release-20260817.0` on GitHub and in `runsc --version`.
+gVisor tags look like `release-20260914.0` on GitHub and in `runsc --version`.
 The download URLs drop the `release-` prefix, so the pin is written without it.
 
 ## Why a pin, and not the apt repository or `latest`
@@ -31,28 +31,67 @@ node image can use it:
   reproducible. Pulling `latest` at build time would make two builds of the
   same commit install different binaries.
 
-Both images therefore download the four release artifacts (`runsc`,
-`containerd-shim-runsc-v1`, and their `.sha512` files) from
+Both images therefore download the release tarball `gvisor.tar.bz2` and its
+`gvisor.tar.bz2.sha512` from
 `https://storage.googleapis.com/gvisor/releases/release/<tag>/<arch>/` and
-verify the checksums. A pin plus automation to keep it fresh gives
+verify the checksum. A pin plus automation to keep it fresh gives
 reproducibility and currency at the same time.
+
+## What the release tarball holds
+
+From release `20260831.0` on, gVisor publishes one tarball per architecture
+(`gvisor.tar.bz2` and `gvisor.tar.zstd`, each with a `.sha512`). It no longer
+publishes `runsc` and `containerd-shim-runsc-v1` as separate files. The
+tarball holds:
+
+| Path | Installed as |
+| --- | --- |
+| `runsc` | `/usr/local/bin/runsc` |
+| `containerd-shim-runsc-v1` | `/usr/local/bin/containerd-shim-runsc-v1` |
+| `gvisor-bin/` (`gvisor_sentry`, `checkpointgofer`, `runsc-fd-parking`, ...) | `/usr/local/bin/gvisor-bin/` |
+
+`gvisor-bin/` holds runsc's *sidecar* binaries. runsc looks for the directory
+next to its own binary. Older releases fell back to copies embedded in
+`runsc` when the directory was missing. From `20260831.0` the default
+`--sidecar-usage-policy` refuses that fallback, so an install without
+`gvisor-bin/` cannot start a sandbox. Both images install it.
+
+The kind image extracts the tarball in a separate build stage, because
+`kindest/node` has no `bzip2`. The Packer template installs `bzip2` with
+`dnf` only when the base AMI lacks it.
+
+Releases up to `20260817.0` publish the tarball as well as the separate
+files, so the checker works for pins on either side of the change.
 
 ## How the pin is kept current
 
 Two workflows share `scripts/check-gvisor-version.sh`:
 
 - **CI on every PR** (`.github/workflows/ci.yml`, job `gvisor-pin`) checks that
-  the three pins agree and that all eight artifacts (four files, two
-  architectures) exist. It does not fail on drift, so a PR never turns red
-  because gVisor shipped that morning.
+  the three pins agree and that the tarball and its checksum exist for both
+  architectures. It does not fail on drift, so a PR never turns red because
+  gVisor shipped that morning.
 - **Weekly drift check** (`.github/workflows/gvisor-drift.yml`, Mondays 06:17
   UTC, also on manual dispatch) runs the checker with `--latest`. That mode
-  asks the GitHub tags API for the newest release whose artifacts are all
-  present in the bucket. A tag can exist for days before its binaries are
-  uploaded, so "latest" means "newest published", not "newest tagged". When
-  the pin is behind, the workflow rewrites it with
-  `scripts/bump-gvisor-version.sh`, pushes a `chore/gvisor-<tag>` branch, and
-  opens a pull request. One open PR per target release.
+  asks the GitHub tags API for the newest release whose tarball is in the
+  bucket. A tag can exist before its artifacts are uploaded, and some tags
+  never get any (`20260824.0` has none), so "latest" means "newest
+  published", not "newest tagged". When the pin is behind, the workflow
+  rewrites it with `scripts/bump-gvisor-version.sh`, pushes a
+  `chore/gvisor-<tag>` branch, and opens a pull request. One open PR per
+  target release.
+
+Every tag the checker skips prints a warning, which shows as an annotation on
+the workflow run. It used to be a quiet note, and that hid a real failure: when
+gVisor stopped publishing the separate `runsc` files, the checker read each
+new release as "not uploaded yet" and skipped `20260824.0` through
+`20260914.0`. The drift runs of 2026-09-07, -14 and -21 stayed green while the
+pin fell four releases behind. A skip that repeats on the same tag for more
+than a week means the bucket layout changed again. Check
+`gsutil ls gs://gvisor/releases/release/<tag>/<arch>/` (or the
+[bucket listing API](https://storage.googleapis.com/storage/v1/b/gvisor/o?prefix=releases/release/))
+and update `GV_ARTIFACTS` in `scripts/lib/gvisor-version.sh`, the
+Dockerfile and the Packer template together.
 
 The drift workflow needs two one-time repository settings:
 

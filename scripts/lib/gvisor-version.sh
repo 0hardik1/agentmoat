@@ -32,11 +32,18 @@ GV_PACKER_HCL="$GV_REPO_ROOT/packer/eks-gvisor-al2023.pkr.hcl"
 GV_KIND_BUILD="$GV_REPO_ROOT/scripts/build-gvisor-node.sh"
 GV_KIND_DOCKERFILE="$GV_REPO_ROOT/kind/Dockerfile.gvisor-node"
 
-# The release bucket. Each release publishes, per arch, exactly these four
-# artifacts; the Dockerfile and the Packer template download all of them.
+# The release bucket. From release 20260831.0 on, each release publishes one
+# tarball per arch (gvisor.tar.bz2 and gvisor.tar.zstd, each with a .sha512)
+# holding runsc, containerd-shim-runsc-v1 and the gvisor-bin/ sidecar
+# directory. Before that it published runsc and the shim as separate files;
+# gVisor dropped those ("Remove individual binaries from gVisor release
+# artifacts" in the 20260831.0 notes). The Dockerfile and the Packer template
+# download the .bz2 tarball and its checksum, so those are the artifacts we
+# require. Releases up to 20260817.0 publish the tarball too, so the check
+# works on either side of the change.
 GV_BUCKET="https://storage.googleapis.com/gvisor/releases/release"
 GV_ARCHES=(x86_64 aarch64)
-GV_ARTIFACTS=(runsc runsc.sha512 containerd-shim-runsc-v1 containerd-shim-runsc-v1.sha512)
+GV_ARTIFACTS=(gvisor.tar.bz2 gvisor.tar.bz2.sha512)
 
 # GitHub tags API for google/gvisor. Tags are not returned in a guaranteed
 # order, so callers sort numerically; we page a little to be safe.
@@ -44,9 +51,15 @@ GV_TAGS_API="https://api.github.com/repos/google/gvisor/tags"
 GV_TAGS_PAGES="${GV_TAGS_PAGES:-3}"
 
 # How many of the newest tags gv_latest_published will probe for artifacts
-# before giving up. A tag can exist on GitHub for days before its binaries
-# land in the bucket (observed 2026-09-04 with release-20260831.0), so the
-# newest tag is not always installable.
+# before giving up. A tag can exist on GitHub before its artifacts are in
+# the bucket, and some tags never get any (release-20260824.0 has none), so
+# the newest tag is not always installable.
+#
+# A skipped tag is a warning, not a quiet note. Until September 2026 this
+# check looked for the separate runsc files, read their absence as "not
+# uploaded yet", and skipped four releases in a row (20260824.0 through
+# 20260914.0) while the weekly drift run stayed green. If the bucket layout
+# changes again, the warnings make it visible in the run summary.
 GV_PROBE_LIMIT="${GV_PROBE_LIMIT:-5}"
 
 # gv_extract_tag prints the first yyyymmdd.N token in its argument, or fails.
@@ -111,8 +124,9 @@ gv_artifact_url() {
   printf '%s/%s/%s/%s\n' "$GV_BUCKET" "$1" "$2" "$3"
 }
 
-# gv_artifacts_exist HEADs all eight artifacts for a tag. Prints one line per
-# URL when GV_VERBOSE=1. Returns 1 as soon as one is missing.
+# gv_artifacts_exist HEADs every artifact for a tag (GV_ARTIFACTS for each
+# of GV_ARCHES, four in all). Prints one line per URL when GV_VERBOSE=1.
+# Returns 1 as soon as one is missing.
 gv_artifacts_exist() {
   local tag="$1" arch file url
   for arch in "${GV_ARCHES[@]}"; do
@@ -165,6 +179,17 @@ gv_fetch_tags() {
   done | sort -t. -k1,1nr -k2,2nr | uniq
 }
 
+# gv_warn prints a warning on stderr. Under GitHub Actions it uses the
+# `::warning::` workflow command, so the message also shows as an annotation
+# in the run summary instead of only in the step log.
+gv_warn() {
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    echo "::warning title=gVisor release skipped::$*" >&2
+  else
+    echo "warning: $*" >&2
+  fi
+}
+
 # gv_latest_published prints the newest tag whose artifacts are all present
 # in the release bucket. Probes at most GV_PROBE_LIMIT tags. Fails when the
 # tag list is empty or none of the probed tags is fully published.
@@ -181,7 +206,7 @@ gv_latest_published() {
       printf '%s\n' "$tag"
       return 0
     fi
-    echo "note: release-$tag is tagged but its artifacts are not in the bucket yet; skipping" >&2
+    gv_warn "release-$tag is tagged but ${GV_ARTIFACTS[*]} are not in the bucket for every arch; skipping"
     if (( probed >= GV_PROBE_LIMIT )); then
       break
     fi

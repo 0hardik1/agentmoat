@@ -19,7 +19,7 @@
 #
 #   IMG_TAG          image ref (default: agentmoat-kind-gvisor:dev).
 #                    Must match kind/cluster.yaml's nodes[].image.
-#   GVISOR_VERSION   gVisor release tag (default: 20260817.0).
+#   GVISOR_VERSION   gVisor release tag (default: 20260914.0).
 #   KIND_NODE_VERSION
 #                    upstream kindest/node base (default: v1.32.5).
 #   REBUILD          set to 1 to force docker build even if image exists.
@@ -35,7 +35,7 @@
 set -euo pipefail
 
 IMG_TAG="${IMG_TAG:-agentmoat-kind-gvisor:dev}"
-GVISOR_VERSION="${GVISOR_VERSION:-20260817.0}"
+GVISOR_VERSION="${GVISOR_VERSION:-20260914.0}"
 KIND_NODE_VERSION="${KIND_NODE_VERSION:-v1.32.5}"
 REBUILD="${REBUILD:-0}"
 LOAD_CLUSTER="${LOAD_CLUSTER:-}"
