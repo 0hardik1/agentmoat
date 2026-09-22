@@ -28,10 +28,13 @@
 // namespace, plus the preflight's get/list on nodes and runtimeclasses.
 //
 // Output. Run returns a PreflightReport, the same document `agentmoat
-// preflight` produces, with Metadata.Probe describing the pod and
-// Spec.Facts.GPU.Nvproxy holding the runsc version and driver list. Feed the
-// saved report to `scan --facts` (or `plan`, `explain`, `assess_workload`)
-// and the classifier uses it to settle the gpu-passthrough verdict.
+// preflight` produces, with Metadata.Probe describing the pod,
+// Spec.Facts.GPU.Nvproxy holding the runsc version and driver list, and
+// Spec.Facts.Runsc holding the runsc version again for rules that have
+// nothing to do with GPUs. Feed the saved report to `scan --facts` (or
+// `plan`, `explain`, `assess_workload`) and the classifier uses it to settle
+// the gpu-passthrough verdict and to check the runsc release that
+// systemd-init needs.
 package probe
 
 import (
@@ -163,6 +166,10 @@ func Run(ctx context.Context, opts Options) (*schema.PreflightReport, error) {
 			facts.GPU = &schema.GPUFacts{}
 		}
 		facts.GPU.Nvproxy = nv
+		// The runsc release also gates rules unrelated to GPUs
+		// (systemd-init needs 20260831.0 or newer), so record it at the
+		// top level too, where those rules read it.
+		facts.Runsc = &schema.RunscFacts{Version: nv.RunscVersion, Node: nv.Node, ProbedAt: nv.ProbedAt}
 		preflight.RefreshGPUSupport(facts)
 		findings = preflight.Evaluate(facts)
 		meta.Succeeded = true

@@ -88,14 +88,16 @@ info, then by ID, so the same cluster state renders identically.
   back to runc needs no gVisor node.
 - **`agentmoat probe nvproxy`**: runs the preflight, then (unless
   `--dry-run`, the default) creates one pod on a matching node to read the
-  `runsc` nvproxy driver list, and returns the same PreflightReport with
-  `metadata.probe` and `spec.facts.gpu.nvproxy` filled in.
+  `runsc` version and nvproxy driver list, and returns the same
+  PreflightReport with `metadata.probe`, `spec.facts.gpu.nvproxy`, and
+  `spec.facts.runsc` filled in.
 - **`agentmoat scan`**: records the same facts under
   `metadata.clusterFacts` (best-effort: without node RBAC the scan still
   succeeds and omits them; `--no-cluster-facts` skips the reads;
   `--facts <file>` loads them from a saved PreflightReport or ScanReport
   instead). The classifier reads them too: `gpu-passthrough` is refined
-  from the GPU facts.
+  from the GPU facts, and `systemd-init` from the probed `runsc` version
+  (see [`explanations/systemd-init.md`](explanations/systemd-init.md)).
 - **`agentmoat plan`**: turns the scan's facts into `spec.warnings` (error
   and warn findings, plus `cluster-facts-runtime-class-mismatch` when the
   scan inspected a different RuntimeClass than the plan targets). Warnings do

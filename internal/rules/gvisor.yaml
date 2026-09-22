@@ -79,6 +79,16 @@ overrides:
     remediationUrl: "https://gvisor.dev/docs/user_guide/compatibility/"
     source: "https://gvisor.dev/docs/user_guide/compatibility/"
 
+  # systemd-init has a Refine hook: with cluster facts from `probe nvproxy`,
+  # a runsc older than release-20260831.0 raises it to error whatever this
+  # file says. On a new enough runsc it keeps the severity set here, so an
+  # operator who has confirmed in-sandbox-cgroup=v2 can set it to info.
+  - id: systemd-init
+    severity: warn
+    description: "Container runs systemd as PID 1; gVisor runs systemd from runsc release-20260831.0 when the sandbox has the runsc flag in-sandbox-cgroup=v2 (off by default) and the container has CAP_SYS_ADMIN."
+    remediationUrl: "https://gvisor.dev/blog/2026/09/17/systemd-in-gvisor/"
+    source: "https://gvisor.dev/blog/2026/09/17/systemd-in-gvisor/"
+
   - id: kvm-nested
     severity: error
     description: "Workload uses /dev/kvm (nested virtualization); gVisor sandbox cannot pass through KVM, and on EKS nested virt is unavailable anyway."

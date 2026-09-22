@@ -184,6 +184,33 @@ func TestGPUFactsRoundTripAndOmitEmpty(t *testing.T) {
 	}
 }
 
+func TestRunscFactsRoundTripAndOmitEmpty(t *testing.T) {
+	// Facts from before the probe ran (or from before this field existed)
+	// serialize exactly as they did: no "runsc" key.
+	plain, _ := json.Marshal(ClusterFacts{})
+	if strings.Contains(string(plain), `"runsc"`) {
+		t.Fatalf("ClusterFacts without a probe must omit runsc: %s", plain)
+	}
+
+	in := ClusterFacts{Runsc: &RunscFacts{Version: "release-20260914.0", Node: "gv-1", ProbedAt: "2026-09-22T00:00:00Z"}}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"runsc":{`, `"version":"release-20260914.0"`, `"node":"gv-1"`, `"probedAt":`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("serialized runsc facts missing %s: %s", key, data)
+		}
+	}
+	var out ClusterFacts
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(in, out) {
+		t.Fatalf("round trip mismatch:\n in %+v\nout %+v", in, out)
+	}
+}
+
 func TestProbeMetadataRoundTrip(t *testing.T) {
 	in := PreflightMetadata{RuntimeClassName: "gvisor", Probe: &ProbeMetadata{
 		DryRun: true, Namespace: "default", PodName: "agentmoat-nvproxy-probe", Node: "gv-1",

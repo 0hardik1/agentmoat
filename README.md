@@ -136,7 +136,7 @@ idempotent, records them, and undoes them.
 
 ## Compatibility checks
 
-14 stable rule IDs across three severities. Rule IDs are a public surface:
+15 stable rule IDs across three severities. Rule IDs are a public surface:
 they appear in `--output json`, in `--rules` overrides, and in the
 `docs/compatibility-checklist.md` table. The rule implementations live in
 [`pkg/classifier/builtin_rules.go`](pkg/classifier/builtin_rules.go).
@@ -155,6 +155,7 @@ they appear in `--output json`, in `--rules` overrides, and in the
 | `fuse-mount`        | warn     | CSI driver name containing `fuse`, or `AGENTMOAT_USES_FUSE=true`       |
 | `io-uring`          | warn     | Annotation `agentmoat.io/uses-iouring=true`                            |
 | `perf-events`       | warn     | `CAP_PERFMON` or `CAP_SYS_ADMIN`                                       |
+| `systemd-init`      | warn     | systemd as PID 1 (`command`/`args` of `/sbin/init` or `/usr/lib/systemd/systemd`, a UBI init image, or `agentmoat.io/runs-systemd=true`); refined to `error` when the probed runsc predates `release-20260831.0` |
 | `network-throughput`| info     | Image hint: nginx, envoy, haproxy, traefik (expect 20-40% overhead)    |
 | `syscall-heavy`     | info     | Image hint: redis, memcached (expect higher latency)                   |
 

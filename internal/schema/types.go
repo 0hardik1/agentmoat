@@ -773,6 +773,7 @@ type Evidence struct {
 	Annotations          []AnnotationHit `json:"annotations,omitempty"          yaml:"annotations,omitempty"`
 	PrivilegedContainers []string        `json:"privilegedContainers,omitempty" yaml:"privilegedContainers,omitempty"`
 	CSIDrivers           []CSIDriverHit  `json:"csiDrivers,omitempty"           yaml:"csiDrivers,omitempty"`
+	Commands             []CommandHit    `json:"commands,omitempty"             yaml:"commands,omitempty"`
 }
 
 // CapabilityHit names a container/capability pair that triggered a rule.
@@ -820,4 +821,14 @@ type AnnotationHit struct {
 type CSIDriverHit struct {
 	Volume string `json:"volume" yaml:"volume"`
 	Driver string `json:"driver" yaml:"driver"`
+}
+
+// CommandHit records the program a container starts, when that program
+// triggered a rule (systemd-init: /sbin/init as PID 1). Field says which
+// part of the container spec named it: "command" (command[0]) or "args"
+// (args[0], when command is empty and args replace the image CMD).
+type CommandHit struct {
+	Container  string `json:"container"  yaml:"container"`
+	Field      string `json:"field"      yaml:"field"`
+	Executable string `json:"executable" yaml:"executable"`
 }

@@ -76,6 +76,12 @@ produces, plus `metadata.probe` and, after a real run,
 `spec.facts.gpu.nvproxy` with the `runsc` version and the sorted driver list.
 Every GPU node group then carries a settled `driverSupport`.
 
+A real run also fills `spec.facts.runsc` (`version`, `node`, `probedAt`)
+with the same `runsc` version. That copy is for rules that have nothing to do
+with GPUs: `systemd-init` needs `release-20260831.0` or newer (see
+[`explanations/systemd-init.md`](explanations/systemd-init.md)). So the
+probe is useful on a cluster with no GPUs too.
+
 ### Namespace, PSA, and RBAC
 
 The `hostPath` mount is the one thing Pod Security Admission "baseline"

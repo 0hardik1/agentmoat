@@ -9,8 +9,10 @@
 // mounts the runsc binary read-only from the host, runs it as an
 // unprivileged user, reads the pod log, and deletes the pod. The result is
 // a PreflightReport (like `agentmoat preflight`) with the GPU facts and the
-// driver list under spec.facts.gpu.nvproxy; save it with --output json and
-// pass it to `scan --facts` so the classifier can settle gpu-passthrough.
+// driver list under spec.facts.gpu.nvproxy, and the runsc release under
+// spec.facts.runsc; save it with --output json and pass it to `scan --facts`
+// so the classifier can settle gpu-passthrough and check systemd-init
+// against the runsc release.
 //
 // This is the third verb that creates something in the cluster, after
 // apply and rollback, and it follows the same rule: --dry-run defaults to

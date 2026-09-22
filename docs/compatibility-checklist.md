@@ -28,6 +28,7 @@ For the rule implementations, see [`pkg/classifier/builtin_rules.go`](../pkg/cla
 | `fuse-mount` | CSI driver name containing "fuse" or `AGENTMOAT_USES_FUSE=true` | gVisor supports a subset of FUSE behavior. |
 | `io-uring` | Annotation `agentmoat.io/uses-iouring=true` | gVisor does not implement `io_uring`. |
 | `perf-events` | `CAP_PERFMON` or `CAP_SYS_ADMIN` | gVisor does not expose perf events. |
+| `systemd-init` | systemd as PID 1: `command[0]` (or `args[0]` with no command) of `/sbin/init`, `/usr/sbin/init`, `/lib/systemd/systemd`, or `/usr/lib/systemd/systemd`; a Red Hat UBI init image (`ubi-init`, `ubi9-init`, ...) with no command or args; or `agentmoat.io/runs-systemd=true` | gVisor runs systemd from runsc `release-20260831.0`, and only when the sandbox has the runsc flag `in-sandbox-cgroup=v2` (off by default) and the container has `CAP_SYS_ADMIN`. With the runsc version from `probe nvproxy` the verdict is refined: an older runsc becomes `error`. A new enough runsc stays `warn`, because agentmoat cannot see runsc flags. See [`explanations/systemd-init.md`](explanations/systemd-init.md). |
 
 ## Informational ("info") findings
 
@@ -55,6 +56,16 @@ to miss when reading the table above:
   is no static analysis of binaries or libraries.
 - **Image-hint rules** (`ebpf`, `network-throughput`, `syscall-heavy`) are
   substring heuristics on container image refs, not exhaustive detection.
+- **`systemd-init`** reads only the pod spec, not the image config. An image
+  that starts systemd from its own `ENTRYPOINT`/`CMD` is caught only when it
+  is a UBI init image; for any other such image, set
+  `agentmoat.io/runs-systemd=true`. Init containers are skipped (systemd as
+  PID 1 never exits). A command or args that names another program switches
+  the image hint off, because it replaces the image's default command.
+- **A working systemd pod also fires `perf-events`**, because systemd under
+  gVisor needs `CAP_SYS_ADMIN` and `perf-events` matches that capability. That
+  finding is expected; see
+  [`explanations/systemd-init.md`](explanations/systemd-init.md).
 - **`CAP_SYS_ADMIN`** is handled by the `perf-events` rule, not `ebpf`.
   Legacy eBPF loaders that rely on `CAP_SYS_ADMIN` without `CAP_BPF` may
   surface as `review` via `perf-events` rather than `incompatible` via `ebpf`.

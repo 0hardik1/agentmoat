@@ -28,6 +28,8 @@ type workloadOpts struct {
 	gpuLimit    bool
 	images      []string
 	annotations map[string]string
+	command     []string
+	args        []string
 }
 
 func newWorkload(o workloadOpts) scanner.Workload {
@@ -65,6 +67,8 @@ func newWorkload(o workloadOpts) scanner.Workload {
 	// PodSpec and ImageRefs are consistent (useful when a rule checks
 	// only ImageRefs anyway, but keeps the fixture honest).
 	container.Image = images[0]
+	container.Command = o.command
+	container.Args = o.args
 
 	return scanner.Workload{
 		Kind:      "Pod",
@@ -183,6 +187,40 @@ func TestClassify(t *testing.T) {
 			}),
 			wantCompat:  Review,
 			wantRuleIDs: []string{"io-uring"},
+		},
+		{
+			name:        "systemd as command is review",
+			w:           newWorkload(workloadOpts{command: []string{"/sbin/init"}}),
+			wantCompat:  Review,
+			wantRuleIDs: []string{"systemd-init"},
+		},
+		{
+			name:        "UBI init image with its default command is review",
+			w:           newWorkload(workloadOpts{images: []string{"registry.access.redhat.com/ubi9/ubi-init:9.6"}}),
+			wantCompat:  Review,
+			wantRuleIDs: []string{"systemd-init"},
+		},
+		{
+			name: "runs-systemd annotation is review",
+			w: newWorkload(workloadOpts{
+				annotations: map[string]string{"agentmoat.io/runs-systemd": "true"},
+			}),
+			wantCompat:  Review,
+			wantRuleIDs: []string{"systemd-init"},
+		},
+		{
+			name:        "tini as init shim is compatible",
+			w:           newWorkload(workloadOpts{command: []string{"/sbin/tini", "--", "/app"}}),
+			wantCompat:  Compatible,
+			wantRuleIDs: []string{},
+		},
+		{
+			// privileged stays an error: agentmoat does not assume the
+			// privileged bit was only there for systemd's cgroup access.
+			name:        "privileged systemd container is incompatible",
+			w:           newWorkload(workloadOpts{privileged: true, command: []string{"/usr/lib/systemd/systemd"}}),
+			wantCompat:  Incompatible,
+			wantRuleIDs: []string{"privileged", "systemd-init"},
 		},
 	}
 

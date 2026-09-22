@@ -206,6 +206,31 @@ type ClusterFacts struct {
 	// supports. Nil when no node advertises a GPU and no probe ran. The
 	// classifier reads this to refine the gpu-passthrough verdict.
 	GPU *GPUFacts `json:"gpu,omitempty" yaml:"gpu,omitempty"`
+
+	// Runsc is the gVisor runtime release installed on the nodes, as read
+	// by `agentmoat probe nvproxy` from the host's runsc binary. Nil until
+	// the probe has run: Kubernetes itself does not report the runtime
+	// version (no node label or RuntimeClass field carries it). The
+	// classifier reads this to gate features that need a minimum runsc
+	// release, such as systemd-init.
+	Runsc *RunscFacts `json:"runsc,omitempty" yaml:"runsc,omitempty"`
+}
+
+// RunscFacts is what the probe pod read about the runsc binary itself,
+// independent of any GPU. It repeats GPU.Nvproxy.RunscVersion on purpose:
+// that field sits under the GPU facts, and a rule that has nothing to do
+// with GPUs should not have to look there (or care whether the cluster has
+// GPUs at all).
+type RunscFacts struct {
+	// Version is the `runsc --version` release string
+	// ("release-20260914.0").
+	Version string `json:"version" yaml:"version"`
+
+	// Node is where the probe ran; ProbedAt when (RFC3339). The probe
+	// reads one node, so a cluster whose gVisor nodes run different
+	// releases reports only that node's.
+	Node     string `json:"node"     yaml:"node"`
+	ProbedAt string `json:"probedAt" yaml:"probedAt"`
 }
 
 // RuntimeClassFacts describes the RuntimeClass object the migration
