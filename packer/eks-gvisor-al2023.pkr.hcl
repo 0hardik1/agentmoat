@@ -13,14 +13,15 @@
 // Build:
 //   packer init   .
 //   packer validate .
-//   packer build  -var 'k8s_version=1.31' -var 'gvisor_version=20260817.0' .
+//   packer build  -var 'k8s_version=1.31' -var 'gvisor_version=20260914.0' .
 //
 // gVisor download URLs use the point-release tag ${yyyymmdd}.${rc} (e.g.
-// 20260817.0), not the `runsc --version` prefix "release-". See
+// 20260914.0), not the `runsc --version` prefix "release-". See
 // https://gvisor.dev/docs/user_guide/install/ and scripts/check-gvisor-version.sh.
 //
 // The resulting AMI:
-//   - Has /usr/local/bin/runsc and containerd-shim-runsc-v1 with verified SHA512.
+//   - Has /usr/local/bin/runsc, containerd-shim-runsc-v1 and the gvisor-bin/
+//     sidecar directory, from the release tarball with verified SHA512.
 //   - Has /etc/containerd/config.d/gvisor.toml (a drop-in, not an edit to the
 //     main config.toml) registering a "gvisor" runtime handler.
 //   - Has /etc/containerd/runsc.toml pinning the platform to "systrap"
@@ -44,8 +45,8 @@ variable "k8s_version" {
 
 variable "gvisor_version" {
   type        = string
-  default     = "20260817.0"
-  description = "gVisor point-release tag for download URLs (${yyyymmdd}.${rc}, e.g. 20260817.0). Must match kind/scripts GVISOR_VERSION. runsc --version prints a release- prefix; omit that here. See https://gvisor.dev/docs/user_guide/install/."
+  default     = "20260914.0"
+  description = "gVisor point-release tag for download URLs (yyyymmdd.N, e.g. 20260914.0). Must match kind/scripts GVISOR_VERSION. runsc --version prints a release- prefix; omit that here. See https://gvisor.dev/docs/user_guide/install/."
 }
 
 variable "region" {
@@ -128,28 +129,39 @@ build {
   name    = "agentmoat-gvisor-al2023"
   sources = ["source.amazon-ebs.eks_gvisor_al2023"]
 
-  // 1. Install runsc + the containerd shim, with SHA512 verification.
+  // 1. Install runsc, the containerd shim and runsc's sidecar binaries from
+  //    the release tarball, with SHA512 verification.
   //
   // gVisor's install guide prefers its Debian package where available. AL2023
   // is RPM/dnf based and gVisor publishes no RPM, so the pinned release
   // artifacts are the only supported path here. The pin is kept current by
   // .github/workflows/gvisor-drift.yml (see docs/gvisor-version.md).
+  //
+  // From release 20260831.0 on, gVisor publishes one tarball per arch
+  // (runsc, containerd-shim-runsc-v1 and a gvisor-bin/ directory of sidecar
+  // binaries) instead of separate files. runsc looks for gvisor-bin/ next to
+  // its own binary and, by default, no longer falls back to copies embedded
+  // in runsc, so gvisor-bin/ must land in /usr/local/bin/ too. bzip2 is
+  // installed only when the base AMI lacks it.
   provisioner "shell" {
     inline_shebang = "/bin/bash -eo pipefail"
     inline = [
       "set -euxo pipefail",
+      "command -v bzip2 >/dev/null || sudo dnf install -y bzip2",
       "ARCH=$(uname -m)",
       "BASE=https://storage.googleapis.com/gvisor/releases/release/${var.gvisor_version}/$${ARCH}",
       "TMPDIR=$(mktemp -d)",
       "cd \"$TMPDIR\"",
-      "curl --fail --silent --show-error --location --remote-name \"$BASE/runsc\"",
-      "curl --fail --silent --show-error --location --remote-name \"$BASE/runsc.sha512\"",
-      "curl --fail --silent --show-error --location --remote-name \"$BASE/containerd-shim-runsc-v1\"",
-      "curl --fail --silent --show-error --location --remote-name \"$BASE/containerd-shim-runsc-v1.sha512\"",
-      "sha512sum -c runsc.sha512",
-      "sha512sum -c containerd-shim-runsc-v1.sha512",
-      "sudo install --owner=root --group=root --mode=0755 runsc /usr/local/bin/runsc",
-      "sudo install --owner=root --group=root --mode=0755 containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1",
+      "curl --fail --silent --show-error --location --remote-name \"$BASE/gvisor.tar.bz2\"",
+      "curl --fail --silent --show-error --location --remote-name \"$BASE/gvisor.tar.bz2.sha512\"",
+      "sha512sum -c gvisor.tar.bz2.sha512",
+      "mkdir extract",
+      "tar -xjf gvisor.tar.bz2 -C extract",
+      "sudo install --owner=root --group=root --mode=0755 extract/runsc /usr/local/bin/runsc",
+      "sudo install --owner=root --group=root --mode=0755 extract/containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1",
+      "sudo install --owner=root --group=root --mode=0755 --directory /usr/local/bin/gvisor-bin",
+      "sudo install --owner=root --group=root --mode=0755 extract/gvisor-bin/* /usr/local/bin/gvisor-bin/",
+      "cd /",
       "rm -rf \"$TMPDIR\"",
       "/usr/local/bin/runsc --version",
     ]

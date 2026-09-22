@@ -5,17 +5,19 @@
 #   1. The three pin defaults (Packer template, kind build script, kind
 #      Dockerfile) agree with each other.
 #   2. The tag has the yyyymmdd.N shape (no `release-` prefix).
-#   3. All eight release artifacts (runsc, containerd-shim-runsc-v1, and both
-#      .sha512 files, for x86_64 and aarch64) exist in the release bucket.
-#      The Dockerfile and the Packer template download exactly these files.
+#   3. The release tarball and its checksum (gvisor.tar.bz2 and
+#      gvisor.tar.bz2.sha512, for x86_64 and aarch64) exist in the release
+#      bucket. The Dockerfile and the Packer template download exactly these
+#      files.
 #   4. With --latest: the pin is the newest *published* gVisor release. A
-#      tag can exist on GitHub before its binaries are uploaded, so "latest"
-#      means "newest tag whose artifacts are all present".
+#      tag can exist on GitHub before its artifacts are uploaded, so "latest"
+#      means "newest tag whose artifacts are all present". Each skipped tag
+#      prints a warning (a GitHub Actions annotation under CI).
 #
 # Usage:
 #   ./scripts/check-gvisor-version.sh                 # 1-3, used by CI on every PR
 #   ./scripts/check-gvisor-version.sh --latest        # 1-4, used by the weekly drift workflow
-#   GVISOR_VERSION=20260817.0 ./scripts/check-gvisor-version.sh   # check a tag other than the pin
+#   GVISOR_VERSION=20260914.0 ./scripts/check-gvisor-version.sh   # check a tag other than the pin
 #
 # Machine-readable output (--latest only), on stdout and appended to
 # $GITHUB_OUTPUT when that variable is set:
@@ -70,7 +72,7 @@ if ! GV_VERBOSE=1 gv_artifacts_exist "$GVISOR_VERSION"; then
   echo "error: release $GVISOR_VERSION is not fully published under $GV_BUCKET/$GVISOR_VERSION/" >&2
   exit 1
 fi
-echo "ok  all ${#GV_ARTIFACTS[@]} artifacts present for ${GV_ARCHES[*]}"
+echo "ok  ${GV_ARTIFACTS[*]} present for ${GV_ARCHES[*]}"
 
 if [[ "$CHECK_LATEST" != "1" ]]; then
   exit 0

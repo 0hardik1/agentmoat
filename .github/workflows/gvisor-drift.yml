@@ -11,9 +11,11 @@
 #
 # What it does:
 #   1. Runs scripts/check-gvisor-version.sh --latest. That script finds the
-#      newest gVisor tag whose eight release artifacts are all present in the
-#      release bucket (a tag can exist for days before its binaries land) and
-#      exits 2 when the pin is behind it.
+#      newest gVisor tag whose release tarball (gvisor.tar.bz2 + .sha512, for
+#      x86_64 and aarch64) is in the release bucket and exits 2 when the pin
+#      is behind it. A tag with no tarball is skipped with a warning
+#      annotation on the run, so a skip can no longer pass unseen (four
+#      releases did, before the check learned the tarball layout).
 #   2. If behind, rewrites the pin with scripts/bump-gvisor-version.sh,
 #      commits on a `chore/gvisor-<tag>` branch, and opens a PR. The PR goes
 #      through the normal review-protected merge; nothing lands on main from
@@ -106,7 +108,8 @@ jobs:
           git checkout -b "${BRANCH}"
 
           # Rewrites the pin in every known file and re-runs the checker
-          # (all eight artifacts must exist) before we commit anything.
+          # (the tarball and its checksum must exist for both archs) before
+          # we commit anything.
           ./scripts/bump-gvisor-version.sh "${LATEST}"
 
           git commit -am "chore(gvisor): bump pinned release to ${LATEST}"
@@ -122,8 +125,8 @@ jobs:
           What changed: the default in \`packer/eks-gvisor-al2023.pkr.hcl\`,
           \`kind/Dockerfile.gvisor-node\`, and \`scripts/build-gvisor-node.sh\`
           (plus doc mentions), rewritten by \`scripts/bump-gvisor-version.sh\`.
-          The checker confirmed all eight release artifacts exist for x86_64
-          and aarch64.
+          The checker confirmed the release tarball and its checksum exist for
+          x86_64 and aarch64.
 
           Before merging:
           - [ ] \`make kind-down && make e2e\` passes with the new runsc
