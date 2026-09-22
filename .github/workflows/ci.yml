@@ -10,7 +10,7 @@
 #
 # Jobs (all run in parallel; they have no inter-job dependencies):
 #   * `lint`: runs golangci-lint against the whole module. Uses the official
-#     `golangci/golangci-lint-action@v7`, which understands the .golangci.yml
+#     `golangci/golangci-lint-action@v9`, which understands the .golangci.yml
 #     at the repo root.
 #   * `test`: runs `go test -race -cover ./...` on a matrix. The matrix has
 #     a single dimension today (go-version: 1.26 on ubuntu-latest) but is
@@ -23,7 +23,7 @@
 #     because gVisor shipped that morning.
 #
 # Caching:
-#   * actions/setup-go@v5 transparently caches the module cache (~/go/pkg/mod)
+#   * actions/setup-go@v7 transparently caches the module cache (~/go/pkg/mod)
 #     and the build cache (~/.cache/go-build). We rely on that rather than
 #     hand-rolling actions/cache: setup-go is already aware of go.sum.
 # ---------------------------------------------------------------------------
@@ -51,17 +51,17 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      # checkout@v4 is the current major; pinned to a major rather than a sha
+      # checkout@v7 is the current major; pinned to a major rather than a sha
       # for readability. CI is not security-critical enough to warrant sha
       # pins, and we re-evaluate when the major bumps.
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      # setup-go@v5 installs the requested Go version and enables the module
+      # setup-go@v7 installs the requested Go version and enables the module
       # and build caches keyed by go.sum. No separate actions/cache step
       # needed.
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # Matches the toolchain in go.mod. golangci-lint refuses to lint a
           # module that targets a Go version newer than the one it was built
@@ -75,10 +75,11 @@ jobs:
       # golangci-lint-action wraps the golangci-lint binary, handles its own
       # caching for the analyzer state, and respects .golangci.yml. The
       # action major must understand golangci-lint v2 config (version: "2");
-      # v7 is the first that does. Dependabot proposes major bumps of this
+      # v7 is the first that does, and v8+ also needs golangci-lint v2.1.0 or
+      # newer (the pin below is). Dependabot proposes major bumps of this
       # action; read the changelog before merging one.
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
           # Pin to a known-good golangci-lint release. Bumping this is a
           # deliberate decision (new lints can break builds), so we update it
@@ -105,10 +106,10 @@ jobs:
         os: [ubuntu-latest]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go ${{ matrix.go-version }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go-version }}
           cache: true
@@ -129,7 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Verify pinned gVisor release
         run: make check-gvisor-version

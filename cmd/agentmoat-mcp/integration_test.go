@@ -161,8 +161,22 @@ func TestIntegration_ExplainOverStdio(t *testing.T) {
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "mcp-integration-test", "version": "0"},
 	})
-	if r := s.recv(t); r.ID != 1 || len(r.Result) == 0 {
-		t.Fatalf("initialize response unexpected: %+v", r)
+	initResp := s.recv(t)
+	if initResp.ID != 1 || len(initResp.Result) == 0 {
+		t.Fatalf("initialize response unexpected: %+v", initResp)
+	}
+	// The server must echo the version the client asked for. mcp-go v1
+	// added the stateless 2026-07-28 protocol next to this handshake; this
+	// check proves the legacy path (the one every shipped client and
+	// scripts/mcp-smoke.sh use) still negotiates the version it did before.
+	var initResult struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if err := json.Unmarshal(initResp.Result, &initResult); err != nil {
+		t.Fatalf("decode initialize result: %v\nresult: %s", err, initResp.Result)
+	}
+	if initResult.ProtocolVersion != "2025-06-18" {
+		t.Errorf("initialize protocolVersion: got %q, want %q", initResult.ProtocolVersion, "2025-06-18")
 	}
 
 	// 2. notifications/initialized (no response expected).
@@ -177,14 +191,67 @@ func TestIntegration_ExplainOverStdio(t *testing.T) {
 	if r.ID != 2 {
 		t.Fatalf("tools/call: id mismatch: %+v", r)
 	}
-	if len(r.Result) == 0 {
-		t.Fatalf("tools/call: empty result")
+	// 4. Drill into the result.
+	assertExplainResult(t, r.Result)
+}
+
+// TestIntegration_StatelessProtocolOverStdio sends one tools/call in the
+// stateless 2026-07-28 protocol, with no initialize handshake first.
+//
+// Why this test exists: mcp-go v1 serves that protocol on every transport,
+// stdio included. A request whose _meta names protocol version 2026-07-28
+// or later skips the handshake and must carry the client capabilities in
+// _meta too. Nothing else in the suite sends such a request, so without
+// this test a regression on the new path (a missing resultType, a handler
+// that assumed an initialized session) would ship unseen.
+func TestIntegration_StatelessProtocolOverStdio(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test skipped under -short")
+	}
+	bin := buildBinary(t)
+	s := startSession(t, bin)
+	defer s.close(t)
+
+	s.send(t, "tools/call", 1, map[string]any{
+		"name":      "explain",
+		"arguments": map[string]any{"topic": "gvisor"},
+		"_meta": map[string]any{
+			"io.modelcontextprotocol/protocolVersion":    "2026-07-28",
+			"io.modelcontextprotocol/clientCapabilities": map[string]any{},
+		},
+	})
+	r := s.recv(t)
+	if r.ID != 1 {
+		t.Fatalf("tools/call: id mismatch: %+v", r)
+	}
+	if len(r.Error) != 0 {
+		t.Fatalf("tools/call: error: %s", r.Error)
 	}
 
-	// 4. Drill into the result: it's a CallToolResult whose content[0].text is
-	//    the JSON-encoded schema.ExplainDocument. Use a permissive
-	//    intermediate type to avoid pulling mcp-go's CallToolResult into the
-	//    decoded path (which carries non-trivial polymorphism).
+	// The 2026-07-28 spec requires resultType on every result; "complete"
+	// is an ordinary final answer (as opposed to "input_required").
+	var envelope struct {
+		ResultType string `json:"resultType"`
+	}
+	if err := json.Unmarshal(r.Result, &envelope); err != nil {
+		t.Fatalf("decode result: %v\nresult: %s", err, r.Result)
+	}
+	if envelope.ResultType != "complete" {
+		t.Errorf("resultType: got %q, want %q", envelope.ResultType, "complete")
+	}
+	assertExplainResult(t, r.Result)
+}
+
+// assertExplainResult checks a tools/call(explain topic=gvisor) result: a
+// CallToolResult whose content[0].text is the JSON-encoded
+// schema.ExplainDocument. It decodes through a permissive intermediate type
+// to avoid pulling mcp-go's CallToolResult into the decoded path (which
+// carries non-trivial polymorphism).
+func assertExplainResult(t *testing.T, result json.RawMessage) {
+	t.Helper()
+	if len(result) == 0 {
+		t.Fatalf("tools/call: empty result")
+	}
 	var outer struct {
 		Content []struct {
 			Type string `json:"type"`
@@ -192,8 +259,8 @@ func TestIntegration_ExplainOverStdio(t *testing.T) {
 		} `json:"content"`
 		StructuredContent any `json:"structuredContent,omitempty"`
 	}
-	if err := json.Unmarshal(r.Result, &outer); err != nil {
-		t.Fatalf("decode result: %v\nresult: %s", err, r.Result)
+	if err := json.Unmarshal(result, &outer); err != nil {
+		t.Fatalf("decode result: %v\nresult: %s", err, result)
 	}
 	if len(outer.Content) == 0 || outer.Content[0].Type != "text" {
 		t.Fatalf("expected text content, got %+v", outer.Content)

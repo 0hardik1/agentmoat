@@ -12,6 +12,23 @@
 #     grouped because client-go, api, and apimachinery must move together;
 #     a PR that bumps only one of them does not compile.
 #
+# Why the groups: one PR per dependency made the queue grow faster than it
+# was reviewed. Every Go PR touches go.mod and go.sum, so after one merged
+# the rest conflicted, and Dependabot replaced stale PRs (x/term #24 became
+# #29, mcp-go #27 became #28 became #30) while none merged. Groups give about
+# two PRs a week:
+#
+#   * github-actions: all action bumps in one PR, majors included. They
+#     touch different `uses:` lines, and one CI run exercises all of them
+#     (except goreleaser-action, which runs only on tag pushes).
+#   * gomod: kubernetes stays its own group. Every other minor and patch
+#     bump goes in `go-minor-and-patch`. A major bump (mcp-go 0.x -> 1.x,
+#     for example) is left out of the group on purpose, so it gets its own
+#     PR and its own review.
+#
+# A dependency goes to the first group that matches it, so kubernetes must
+# stay above go-minor-and-patch.
+#
 # Dependabot does not understand the gVisor release pin (it is a URL path
 # fragment in a Dockerfile, a shell script, and a Packer template). That pin
 # is watched by .github/workflows/gvisor-drift.yml instead.
@@ -25,6 +42,10 @@ updates:
       day: monday
     commit-message:
       prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: gomod
     directory: /
@@ -39,3 +60,9 @@ updates:
         patterns:
           - "k8s.io/*"
           - "sigs.k8s.io/*"
+      go-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
