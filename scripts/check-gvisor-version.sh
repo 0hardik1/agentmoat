@@ -17,7 +17,7 @@
 # Usage:
 #   ./scripts/check-gvisor-version.sh                 # 1-3, used by CI on every PR
 #   ./scripts/check-gvisor-version.sh --latest        # 1-4, used by the weekly drift workflow
-#   GVISOR_VERSION=20260914.0 ./scripts/check-gvisor-version.sh   # check a tag other than the pin
+#   GVISOR_VERSION=20260921.0 ./scripts/check-gvisor-version.sh   # check a tag other than the pin
 #
 # Machine-readable output (--latest only), on stdout and appended to
 # $GITHUB_OUTPUT when that variable is set:
