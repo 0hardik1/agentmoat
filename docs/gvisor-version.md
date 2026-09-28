@@ -113,7 +113,7 @@ It cannot see this pin, which is why the drift workflow exists.
 # Am I behind? Exit 2 means yes; the output names the newest published tag.
 make check-gvisor-latest
 
-# Rewrite the pin everywhere and re-run the checks.
+# Rewrite the pin and re-run the checks.
 ./scripts/bump-gvisor-version.sh 2026MMDD.N
 
 # The kind image is cached by tag. The build script rebuilds when the baked
@@ -123,8 +123,11 @@ make kind-down && make e2e
 # Rebuild and roll the EKS AMI when you are ready (see docs/eks-deployment.md).
 ```
 
-Every mention of the tag that `bump-gvisor-version.sh` does not know about is
-reported as a warning. Add new files to its `FILES` list when that happens.
+In this page, the script rewrites only the "current pin" and "tags look
+like" lines, so the history above keeps the tags it names. Every other
+mention of the old tag in the tree is reported as a warning. If the mention
+is a pin, add its file to the script's `FILES` list. History and test
+fixtures that name the tag on purpose can stay as they are.
 
 Two things the script cannot bump for you, both in the release notes of the
 new tag:
