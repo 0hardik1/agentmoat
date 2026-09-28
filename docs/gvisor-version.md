@@ -76,10 +76,10 @@ Two workflows share `scripts/check-gvisor-version.sh`:
   asks the GitHub tags API for the newest release whose tarball is in the
   bucket. A tag can exist before its artifacts are uploaded, and some tags
   never get any (`20260824.0` has none), so "latest" means "newest
-  published", not "newest tagged". When the pin is behind, the workflow
-  rewrites it with `scripts/bump-gvisor-version.sh`, pushes a
-  `chore/gvisor-<tag>` branch, and opens a pull request. One open PR per
-  target release.
+  published", not "newest tagged". When the pin is behind, the run fails.
+  Its summary names the new tag and gives the bump commands. The run stays
+  red each Monday until the pin catches up. See
+  [Bumping by hand](#bumping-by-hand).
 
 Every tag the checker skips prints a warning, which shows as an annotation on
 the workflow run. It used to be a quiet note, and that hid a real failure: when
@@ -93,16 +93,17 @@ than a week means the bucket layout changed again. Check
 and update `GV_ARTIFACTS` in `scripts/lib/gvisor-version.sh`, the
 Dockerfile and the Packer template together.
 
-The drift workflow needs two one-time repository settings:
+The drift workflow only reports. It does not open the bump PR. An earlier
+version did, and that needed a repository setting that lets GitHub Actions
+create and approve pull requests (which also lets any workflow approve a PR
+toward the review rule on `main`), or a personal access token. It also saved
+little work: a bump must pass `make e2e` on a local kind cluster before it
+merges, so a person runs the bump locally anyway. The report-only workflow
+needs only read access, no repository setting, and no secret.
 
-1. Settings, Actions, General, Workflow permissions: enable "Allow GitHub
-   Actions to create and approve pull requests". Without it `gh pr create`
-   is rejected.
-2. Optional: a fine-grained personal access token with `contents: write` and
-   `pull-requests: write`, stored as the `GVISOR_BUMP_TOKEN` secret. Pushes
-   made with the default `GITHUB_TOKEN` do not trigger other workflows, so a
-   bot PR opened without the PAT will not run CI until a person pushes to the
-   branch or closes and reopens the PR.
+GitHub sends the failure email for a scheduled run to the person who last
+changed the `cron` line of the workflow, if that person has Actions
+notifications turned on.
 
 Dependabot (`.github/dependabot.yml`) covers GitHub Actions and Go modules.
 It cannot see this pin, which is why the drift workflow exists.

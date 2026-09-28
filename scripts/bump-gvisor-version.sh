@@ -10,9 +10,9 @@
 # Usage:
 #   ./scripts/bump-gvisor-version.sh 20260914.0
 #
-# Used by .github/workflows/gvisor-drift.yml and by humans doing a manual
-# bump (see docs/gvisor-version.md). After bumping, rebuild the kind image
-# (`make kind-down && make e2e`) and consider a Packer rebuild.
+# Run it by hand when the weekly drift check (.github/workflows/gvisor-drift.yml)
+# reports a newer release (see docs/gvisor-version.md). After bumping, rebuild
+# the kind image (`make kind-down && make e2e`) and consider a Packer rebuild.
 #
 # Exit codes:
 #   0  files rewritten (or already at the requested tag) and checks passed

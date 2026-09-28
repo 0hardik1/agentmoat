@@ -134,8 +134,9 @@ build {
   //
   // gVisor's install guide prefers its Debian package where available. AL2023
   // is RPM/dnf based and gVisor publishes no RPM, so the pinned release
-  // artifacts are the only supported path here. The pin is kept current by
-  // .github/workflows/gvisor-drift.yml (see docs/gvisor-version.md).
+  // artifacts are the only supported path here. The weekly check in
+  // .github/workflows/gvisor-drift.yml reports when the pin falls behind
+  // (see docs/gvisor-version.md).
   //
   // From release 20260831.0 on, gVisor publishes one tarball per arch
   // (runsc, containerd-shim-runsc-v1 and a gvisor-bin/ directory of sidecar
