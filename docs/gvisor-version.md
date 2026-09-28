@@ -14,10 +14,10 @@ The same `yyyymmdd.N` tag appears in three load-bearing files:
 | `kind/Dockerfile.gvisor-node` | `ARG GVISOR_VERSION=...` |
 | `scripts/build-gvisor-node.sh` | `GVISOR_VERSION="${GVISOR_VERSION:-...}"` |
 
-The current pin is `20260914.0`. `make check-gvisor-version` fails when the
+The current pin is `20260921.0`. `make check-gvisor-version` fails when the
 three disagree.
 
-gVisor tags look like `release-20260914.0` on GitHub and in `runsc --version`.
+gVisor tags look like `release-20260921.0` on GitHub and in `runsc --version`.
 The download URLs drop the `release-` prefix, so the pin is written without it.
 
 ## Why a pin, and not the apt repository or `latest`
