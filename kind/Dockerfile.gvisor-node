@@ -47,7 +47,7 @@ ARG KIND_NODE_VERSION=v1.32.5
 # which rewrites every copy of the pin and verifies that both archs publish
 # `gvisor.tar.bz2` and `gvisor.tar.bz2.sha512` under
 # https://storage.googleapis.com/gvisor/releases/release/<tag>/<arch>/.
-# The weekly gvisor-drift.yml workflow opens that PR automatically; see
+# The weekly gvisor-drift.yml workflow fails when a newer release is out; see
 # docs/gvisor-version.md. Declared before the first FROM so both stages
 # below can read it (each stage re-declares it without a value).
 ARG GVISOR_VERSION=20260914.0
@@ -91,7 +91,7 @@ RUN set -eux; \
 # `apt-get install runsc` resolves to whatever is newest at build time,
 # which makes two builds of the same commit install different binaries.
 # The pinned artifact URL plus the checksum keeps the build deterministic;
-# the drift workflow keeps the pin fresh.
+# the weekly drift check reports when the pin falls behind.
 RUN set -eux; \
     case "${TARGETARCH:-$(dpkg --print-architecture 2>/dev/null || echo unknown)}" in \
         amd64) GVISOR_ARCH=x86_64 ;; \

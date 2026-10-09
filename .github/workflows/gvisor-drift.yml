@@ -10,30 +10,25 @@
 #   pin only fails loudly when a human rebuilds an image.
 #
 # What it does:
-#   1. Runs scripts/check-gvisor-version.sh --latest. That script finds the
-#      newest gVisor tag whose release tarball (gvisor.tar.bz2 + .sha512, for
-#      x86_64 and aarch64) is in the release bucket and exits 2 when the pin
-#      is behind it. A tag with no tarball is skipped with a warning
-#      annotation on the run, so a skip can no longer pass unseen (four
-#      releases did, before the check learned the tarball layout).
-#   2. If behind, rewrites the pin with scripts/bump-gvisor-version.sh,
-#      commits on a `chore/gvisor-<tag>` branch, and opens a PR. The PR goes
-#      through the normal review-protected merge; nothing lands on main from
-#      here.
-#   3. If a PR for that tag is already open, does nothing (idempotent).
+#   Runs scripts/check-gvisor-version.sh --latest. That script finds the
+#   newest gVisor tag whose release tarball (gvisor.tar.bz2 + .sha512, for
+#   x86_64 and aarch64) is in the release bucket and exits 2 when the pin is
+#   behind it. A tag with no tarball is skipped with a warning annotation on
+#   the run, so a skip can no longer pass unseen (four releases did, before
+#   the check learned the tarball layout).
 #
-# Repository settings this needs (one-time, manual):
-#   * Settings -> Actions -> General -> Workflow permissions: tick
-#     "Allow GitHub Actions to create and approve pull requests". Without it
-#     `gh pr create` is rejected with "GitHub Actions is not permitted to
-#     create or approve pull requests".
-#   * Optional: a fine-grained PAT stored as the GVISOR_BUMP_TOKEN secret
-#     (contents: write, pull-requests: write). Pushes made with the default
-#     GITHUB_TOKEN do not trigger other workflows (GitHub's recursion guard),
-#     so a bot PR opened with it will not run CI until a human pushes to the
-#     branch or closes and reopens the PR. A PAT-authored push runs CI as
-#     usual. The workflow falls back to GITHUB_TOKEN when the secret is
-#     absent.
+#   When the pin is behind, the run fails. The red run (and the failure email
+#   GitHub sends for a scheduled run) is the signal to bump by hand; the run
+#   summary names the new tag and the commands. The run stays red every
+#   Monday until the pin catches up.
+#
+# Why it does not open the bump PR itself:
+#   It used to. That needed a repository setting that lets Actions create and
+#   approve pull requests (which also lets any workflow approve a PR toward
+#   main's review rule), or a personal access token. It also saved little: a
+#   bump must pass `make e2e` against the new runsc on a local kind cluster
+#   before it merges, so a person runs the bump locally anyway. Report-only
+#   needs neither the setting nor a token, and only read access.
 # ---------------------------------------------------------------------------
 
 name: gVisor drift
@@ -41,15 +36,12 @@ name: gVisor drift
 on:
   schedule:
     # Mondays 06:17 UTC. Off the hour to avoid the top-of-hour runner queue;
-    # Monday so the bump PR is waiting at the start of the week.
+    # Monday so a red run is waiting at the start of the week.
     - cron: '17 6 * * 1'
   workflow_dispatch:
 
-# Write access is needed to push the bump branch and open the PR. Nothing
-# here touches main directly.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   drift:
@@ -58,14 +50,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-        with:
-          # See the header: a PAT (when configured) makes the pushed branch
-          # trigger CI; the default token does not.
-          token: ${{ secrets.GVISOR_BUMP_TOKEN || github.token }}
 
       # Exit 2 means "behind"; the script also writes gvisor_pin,
       # gvisor_latest, and gvisor_behind to $GITHUB_OUTPUT before exiting.
-      # continue-on-error lets the next steps branch on those outputs.
+      # continue-on-error lets the next steps tell drift apart from a real
+      # error.
       - name: Check the pin against the newest published release
         id: check
         continue-on-error: true
@@ -76,7 +65,7 @@ jobs:
         run: ./scripts/check-gvisor-version.sh --latest
 
       # A failure that is not drift (network error, diverged pins, missing
-      # artifact for the current pin) must still fail the job.
+      # artifact for the current pin) must fail the job with its own message.
       - name: Fail on a real error
         if: steps.check.outcome == 'failure' && steps.check.outputs.gvisor_behind != 'true'
         run: |
@@ -87,55 +76,30 @@ jobs:
         if: steps.check.outputs.gvisor_behind != 'true'
         run: echo "pin ${{ steps.check.outputs.gvisor_pin }} is the newest published release; nothing to do."
 
-      - name: Open a bump PR
+      # Drift: fail the run, and put the bump steps in the run summary so the
+      # failure email links straight to them.
+      - name: Fail on drift
         if: steps.check.outputs.gvisor_behind == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GVISOR_BUMP_TOKEN || github.token }}
           PIN: ${{ steps.check.outputs.gvisor_pin }}
           LATEST: ${{ steps.check.outputs.gvisor_latest }}
         run: |
-          set -euo pipefail
-          BRANCH="chore/gvisor-${LATEST}"
-
-          # Idempotent: one open PR per target release.
-          if [ "$(gh pr list --head "$BRANCH" --state open --json number --jq length)" != "0" ]; then
-            echo "an open PR for ${BRANCH} already exists; nothing to do."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "${BRANCH}"
-
-          # Rewrites the pin in every known file and re-runs the checker
-          # (the tarball and its checksum must exist for both archs) before
-          # we commit anything.
-          ./scripts/bump-gvisor-version.sh "${LATEST}"
-
-          git commit -am "chore(gvisor): bump pinned release to ${LATEST}"
-          # The branch is bot-owned and named after the release, so a stale
-          # remote branch from a closed PR can be overwritten safely.
-          git push --force -u origin "${BRANCH}"
-
-          BODY="$(cat <<MD
-          Bumps the pinned gVisor release from \`${PIN}\` to \`${LATEST}\`.
+          cat >>"$GITHUB_STEP_SUMMARY" <<MD
+          ## gVisor ${LATEST} is published; the pin is ${PIN}
 
           Release notes: https://github.com/google/gvisor/releases/tag/release-${LATEST}
 
-          What changed: the default in \`packer/eks-gvisor-al2023.pkr.hcl\`,
-          \`kind/Dockerfile.gvisor-node\`, and \`scripts/build-gvisor-node.sh\`
-          (plus doc mentions), rewritten by \`scripts/bump-gvisor-version.sh\`.
-          The checker confirmed the release tarball and its checksum exist for
-          x86_64 and aarch64.
+          Bump by hand (see docs/gvisor-version.md):
 
-          Before merging:
-          - [ ] \`make kind-down && make e2e\` passes with the new runsc
-          - [ ] Consider rebuilding the Packer AMI
+          \`\`\`bash
+          git fetch origin
+          git switch -c chore/gvisor-${LATEST} origin/main
+          ./scripts/bump-gvisor-version.sh ${LATEST}
+          make kind-down && make e2e
+          git commit -am "chore(gvisor): bump pinned release to ${LATEST}"
+          \`\`\`
 
-          Opened automatically by .github/workflows/gvisor-drift.yml. See
-          docs/gvisor-version.md.
+          Then open a PR, and consider a Packer AMI rebuild.
           MD
-          )"
-          gh pr create --base main --head "${BRANCH}" \
-            --title "chore(gvisor): bump pinned release to ${LATEST}" \
-            --body "${BODY}"
+          echo "::error::gVisor pin ${PIN} is behind the newest published release ${LATEST}; bump it with ./scripts/bump-gvisor-version.sh ${LATEST} (steps in the run summary)"
+          exit 1
