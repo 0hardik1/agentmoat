@@ -13,10 +13,10 @@
 // Build:
 //   packer init   .
 //   packer validate .
-//   packer build  -var 'k8s_version=1.31' -var 'gvisor_version=20260921.0' .
+//   packer build  -var 'k8s_version=1.31' -var 'gvisor_version=20261005.0' .
 //
 // gVisor download URLs use the point-release tag ${yyyymmdd}.${rc} (e.g.
-// 20260921.0), not the `runsc --version` prefix "release-". See
+// 20261005.0), not the `runsc --version` prefix "release-". See
 // https://gvisor.dev/docs/user_guide/install/ and scripts/check-gvisor-version.sh.
 //
 // The resulting AMI:
@@ -45,8 +45,8 @@ variable "k8s_version" {
 
 variable "gvisor_version" {
   type        = string
-  default     = "20260921.0"
-  description = "gVisor point-release tag for download URLs (yyyymmdd.N, e.g. 20260921.0). Must match kind/scripts GVISOR_VERSION. runsc --version prints a release- prefix; omit that here. See https://gvisor.dev/docs/user_guide/install/."
+  default     = "20261005.0"
+  description = "gVisor point-release tag for download URLs (yyyymmdd.N, e.g. 20261005.0). Must match kind/scripts GVISOR_VERSION. runsc --version prints a release- prefix; omit that here. See https://gvisor.dev/docs/user_guide/install/."
 }
 
 variable "region" {
