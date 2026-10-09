@@ -13,7 +13,7 @@
 // Build:
 //   packer init   .
 //   packer validate .
-//   packer build  -var 'k8s_version=1.31' -var 'gvisor_version=20261005.0' .
+//   packer build  -var 'k8s_version=1.37' -var 'gvisor_version=20261005.0' .
 //
 // gVisor download URLs use the point-release tag ${yyyymmdd}.${rc} (e.g.
 // 20261005.0), not the `runsc --version` prefix "release-". See
@@ -37,9 +37,17 @@ packer {
   }
 }
 
+// The default is the newest Kubernetes line on EKS. EKS gives each line 14
+// months of standard support, then 12 months of extended support at a
+// higher price. An old default builds AMIs for a line that ends soon. See
+// https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html.
+//
+// Set this to the control-plane minor version of the target cluster. A
+// kubelet that is newer than its API server is not supported, so do not
+// use a 1.37 AMI in a cluster that is still on 1.36 or older.
 variable "k8s_version" {
   type        = string
-  default     = "1.31"
+  default     = "1.37"
   description = "Kubernetes minor version line of the parent EKS-optimized AMI to build on."
 }
 
