@@ -17,18 +17,31 @@
 #   the run, so a skip can no longer pass unseen (four releases did, before
 #   the check learned the tarball layout).
 #
-#   When the pin is behind, the run fails. The red run (and the failure email
-#   GitHub sends for a scheduled run) is the signal to bump by hand; the run
-#   summary names the new tag and the commands. The run stays red every
-#   Monday until the pin catches up.
+#   Drift is tracked in one open issue with the label `gvisor-drift`:
+#     - pin behind, no open issue: open one, assigned to the repository
+#       owner (the assignment sends the notification), with the new tag and
+#       the bump commands;
+#     - pin behind, issue open, newer release since: update the title and
+#       body, and comment so the assignee is notified again;
+#     - pin current, issue open: close it.
+#   The run stays green in all three cases.
+#
+#   The run fails only on a real error: a network error, diverged pins, or a
+#   missing tarball for the current pin. A red run always needs a look.
+#
+# Why drift is an issue and not a red run:
+#   Until 2026-10 the run failed on drift. gVisor ships most weeks, so the
+#   run was red most Mondays, and a red run reads as "the check is broken"
+#   (the 2026-10-19 run was read that way). An issue is a to-do that stays
+#   open until the pin catches up, and a red run keeps one meaning.
 #
 # Why it does not open the bump PR itself:
 #   It used to. That needed a repository setting that lets Actions create and
 #   approve pull requests (which also lets any workflow approve a PR toward
 #   main's review rule), or a personal access token. It also saved little: a
 #   bump must pass `make e2e` against the new runsc on a local kind cluster
-#   before it merges, so a person runs the bump locally anyway. Report-only
-#   needs neither the setting nor a token, and only read access.
+#   before it merges, so a person runs the bump locally anyway. An issue
+#   needs neither the setting nor a token, only `issues: write`.
 # ---------------------------------------------------------------------------
 
 name: gVisor drift
@@ -36,17 +49,32 @@ name: gVisor drift
 on:
   schedule:
     # Mondays 06:17 UTC. Off the hour to avoid the top-of-hour runner queue;
-    # Monday so a red run is waiting at the start of the week.
+    # Monday so a new drift issue is waiting at the start of the week.
     - cron: '17 6 * * 1'
   workflow_dispatch:
 
 permissions:
   contents: read
+  # Open, update, label, and close the drift issue. The token still cannot
+  # push, open a pull request, or approve one.
+  issues: write
+
+# A manual dispatch during the scheduled run could otherwise see "no open
+# issue" twice and open two.
+concurrency:
+  group: gvisor-drift
+  cancel-in-progress: false
 
 jobs:
   drift:
     name: Compare pin with newest published release
     runs-on: ubuntu-latest
+    env:
+      # gh reads these; the runner image ships the GitHub CLI.
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      DRIFT_LABEL: gvisor-drift
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -72,24 +100,39 @@ jobs:
           echo "::error::scripts/check-gvisor-version.sh failed for a reason other than drift; see the step log above"
           exit 1
 
-      - name: Report
-        if: steps.check.outputs.gvisor_behind != 'true'
-        run: echo "pin ${{ steps.check.outputs.gvisor_pin }} is the newest published release; nothing to do."
+      # Pin current: close the drift issue if one is still open (the bump PR
+      # may already have closed it).
+      - name: Report and close the drift issue
+        if: steps.check.outcome == 'success'
+        env:
+          PIN: ${{ steps.check.outputs.gvisor_pin }}
+        run: |
+          echo "pin ${PIN} is the newest published release; nothing to do."
+          # A label filter, not a search: the search index can lag behind a
+          # new issue.
+          number="$(gh issue list --state open --label "$DRIFT_LABEL" --json number --jq '.[0].number // empty')"
+          if [[ -n "$number" ]]; then
+            gh issue close "$number" --comment "The pin is now \`${PIN}\`, the newest published release. Closed by the weekly drift check: ${RUN_URL}"
+          fi
 
-      # Drift: fail the run, and put the bump steps in the run summary so the
-      # failure email links straight to them.
-      - name: Fail on drift
+      # Pin behind: open the drift issue, or update it when a newer release
+      # has shipped since it was opened. The run stays green.
+      - name: Open or update the drift issue
         if: steps.check.outputs.gvisor_behind == 'true'
         env:
           PIN: ${{ steps.check.outputs.gvisor_pin }}
           LATEST: ${{ steps.check.outputs.gvisor_latest }}
+          OWNER: ${{ github.repository_owner }}
+          DOC_URL: ${{ github.server_url }}/${{ github.repository }}/blob/main/docs/gvisor-version.md#bumping-by-hand
         run: |
-          cat >>"$GITHUB_STEP_SUMMARY" <<MD
-          ## gVisor ${LATEST} is published; the pin is ${PIN}
+          title="gVisor ${LATEST} is published; the pin is ${PIN}"
+          body="$RUNNER_TEMP/drift-issue.md"
+          cat >"$body" <<MD
+          The pinned gVisor release is \`${PIN}\`. The newest published release is \`${LATEST}\`.
 
           Release notes: https://github.com/google/gvisor/releases/tag/release-${LATEST}
 
-          Bump by hand (see docs/gvisor-version.md):
+          Bump by hand (see [docs/gvisor-version.md](${DOC_URL})):
 
           \`\`\`bash
           git fetch origin
@@ -99,7 +142,30 @@ jobs:
           git commit -am "chore(gvisor): bump pinned release to ${LATEST}"
           \`\`\`
 
-          Then open a PR, and consider a Packer AMI rebuild.
+          Then open a PR that closes this issue, and consider a Packer AMI rebuild. Check the release notes for new nvproxy card families (\`NvproxySupportedProducts\` in \`pkg/preflight/gpu.go\`).
+
+          The weekly drift check updates this issue when a newer release ships and closes it when the pin is current. Last run: ${RUN_URL}
           MD
-          echo "::error::gVisor pin ${PIN} is behind the newest published release ${LATEST}; bump it with ./scripts/bump-gvisor-version.sh ${LATEST} (steps in the run summary)"
-          exit 1
+
+          number="$(gh issue list --state open --label "$DRIFT_LABEL" --json number --jq '.[0].number // empty')"
+          if [[ -z "$number" ]]; then
+            # --force creates the label on the first run and is a no-op after.
+            gh label create "$DRIFT_LABEL" --force --color D93F0B \
+              --description "The pinned gVisor release is behind the newest published release"
+            url="$(gh issue create --title "$title" --body-file "$body" --label "$DRIFT_LABEL" --assignee "$OWNER")"
+            echo "opened ${url}"
+          else
+            url="$(gh issue view "$number" --json url --jq .url)"
+            # Same title means same pin and same newest release: the issue is
+            # already right, and a comment every week would only be noise.
+            if [[ "$(gh issue view "$number" --json title --jq .title)" != "$title" ]]; then
+              gh issue edit "$number" --title "$title" --body-file "$body"
+              gh issue comment "$number" --body "gVisor \`${LATEST}\` is now the newest published release. The issue body has the updated commands. Run: ${RUN_URL}"
+              echo "updated ${url}"
+            else
+              echo "already open: ${url}"
+            fi
+          fi
+
+          echo "::warning::gVisor pin ${PIN} is behind the newest published release ${LATEST}; bump steps in ${url}"
+          printf '## gVisor %s is published; the pin is %s\n\nBump steps: %s\n' "$LATEST" "$PIN" "$url" >>"$GITHUB_STEP_SUMMARY"
