@@ -76,9 +76,9 @@ Two workflows share `scripts/check-gvisor-version.sh`:
   asks the GitHub tags API for the newest release whose tarball is in the
   bucket. A tag can exist before its artifacts are uploaded, and some tags
   never get any (`20260824.0` has none), so "latest" means "newest
-  published", not "newest tagged". When the pin is behind, the run fails.
-  Its summary names the new tag and gives the bump commands. The run stays
-  red each Monday until the pin catches up. See
+  published", not "newest tagged". When the pin is behind, the run opens an
+  issue with the label `gvisor-drift`, assigned to the repository owner. The
+  issue names the new tag and gives the bump commands. See
   [Bumping by hand](#bumping-by-hand).
 
 Every tag the checker skips prints a warning, which shows as an annotation on
@@ -93,17 +93,34 @@ than a week means the bucket layout changed again. Check
 and update `GV_ARTIFACTS` in `scripts/lib/gvisor-version.sh`, the
 Dockerfile and the Packer template together.
 
-The drift workflow only reports. It does not open the bump PR. An earlier
-version did, and that needed a repository setting that lets GitHub Actions
-create and approve pull requests (which also lets any workflow approve a PR
-toward the review rule on `main`), or a personal access token. It also saved
-little work: a bump must pass `make e2e` on a local kind cluster before it
-merges, so a person runs the bump locally anyway. The report-only workflow
-needs only read access, no repository setting, and no secret.
+There is at most one open drift issue. Each weekly run does one of these:
 
+| Pin | Open drift issue | What the run does | Run result |
+| --- | --- | --- | --- |
+| behind | none | Opens one. | green |
+| behind | yes, names an older release | Updates the title and body, and comments. | green |
+| behind | yes, names the same release | Nothing. | green |
+| current | yes | Closes it. | green |
+| current | none | Nothing. | green |
+| real error | any | Nothing. | red |
+
+A real error is a network error, pins that disagree, or a missing tarball for
+the current pin. So a red run always means the check itself needs a look.
 GitHub sends the failure email for a scheduled run to the person who last
 changed the `cron` line of the workflow, if that person has Actions
 notifications turned on.
+
+Until 2026-10 the run failed on drift. gVisor ships most weeks, so the run was
+red most Mondays, and the red run of 2026-10-19 was read as a broken check.
+An issue stays open until the pin catches up, and a red run keeps one meaning.
+
+The drift workflow does not open the bump PR. An earlier version did, and that
+needed a repository setting that lets GitHub Actions create and approve pull
+requests (which also lets any workflow approve a PR toward the review rule on
+`main`), or a personal access token. It also saved little work: a bump must
+pass `make e2e` on a local kind cluster before it merges, so a person runs the
+bump locally anyway. The issue needs only the `issues: write` permission, no
+repository setting, and no secret.
 
 Dependabot (`.github/dependabot.yml`) covers GitHub Actions and Go modules.
 It cannot see this pin, which is why the drift workflow exists.

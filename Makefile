@@ -79,7 +79,8 @@ check-gvisor-version: ## Verify pinned gVisor release tags resolve and packer/ki
 	@./scripts/check-gvisor-version.sh
 
 check-gvisor-latest: ## Like check-gvisor-version, and fail (exit 2) if a newer gVisor release is published.
-	@# The weekly gvisor-drift.yml workflow runs this and fails when behind.
+	@# The weekly gvisor-drift.yml workflow runs this check and opens a
+	@# gvisor-drift issue when behind.
 	@# Locally it answers "am I behind?" without touching any file; to
 	@# bump, run ./scripts/bump-gvisor-version.sh <tag>.
 	@./scripts/check-gvisor-version.sh --latest
