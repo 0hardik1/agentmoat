@@ -97,7 +97,8 @@ formula and a `kubectl agentmoat` krew plugin follow.
   [`docs/preflight.md`](docs/preflight.md).
 - **`probe nvproxy`** creates one short-lived pod on a gVisor node, reads
   `runsc --version` and `runsc nvproxy list-supported-drivers` from the
-  host's `runsc` binary, and deletes the pod. That driver list exists
+  host's `runsc` binary, and deletes the pod (it runs the pod a second time
+  when that `runsc` needs its sidecar binaries). That driver list exists
   nowhere else, and it decides whether GPU workloads can move. Dry-run by
   default like `apply`; save the report and hand it to `scan --facts`. See
   [`docs/gpu-nvproxy.md`](docs/gpu-nvproxy.md).
@@ -263,7 +264,7 @@ elided fields are marked `...`.
   the patches are computed and surfaced in the `StepResult.patch` field, but
   nothing is sent to the API server. Mutating requires explicit
   `--dry-run=false`. `probe nvproxy`, the only other verb that creates
-  anything (one pod, deleted afterwards), follows the same rule.
+  anything (one pod at a time, deleted afterwards), follows the same rule.
 - **Idempotent.** Every `apply` writes the plan hash to the affected
   namespace as `agentmoat.io/plan-hash`. Re-running the same plan against
   the same cluster reports every step as `already-applied` and exits 0.

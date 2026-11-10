@@ -59,6 +59,13 @@ func Probe(ctx context.Context, opts ProbeOptions) (*schema.PreflightReport, err
 	}
 
 	pm := report.Metadata.Probe
+	// Say so when the probe mounted more than the runsc file. The report
+	// has the same fact in metadata.probe.sidecarPath; this line is for
+	// the operator who watches the terminal.
+	if pm != nil && pm.SidecarPath != "" {
+		_, _ = fmt.Fprintf(stderr, "probe: runsc on node %s needs its sidecar binaries; ran the pod a second time with %s mounted read-only\n",
+			pm.Node, pm.SidecarPath)
+	}
 	switch {
 	case pm == nil:
 	case pm.Succeeded:

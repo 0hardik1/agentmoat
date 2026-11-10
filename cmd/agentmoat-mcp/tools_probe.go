@@ -5,7 +5,9 @@
 // safety gate: dry_run defaults to true and must be set to false explicitly.
 // A dry run reports the pod that would be created; a real run creates one
 // pod on a gVisor node, reads the runsc version and nvproxy driver list from
-// its log, and deletes it.
+// its log, and deletes it. pkg/probe creates the pod a second time, with the
+// gvisor-bin directory also mounted, when the runsc on the node needs its
+// sidecar binaries.
 //
 // The result is a PreflightReport with metadata.probe and, after a real
 // run, spec.facts.gpu.nvproxy. Save the JSON to a file and pass it as
@@ -24,7 +26,7 @@ import (
 	"github.com/0hardik1/agentmoat/pkg/probe"
 )
 
-const probeNvproxyDescription = "Read which NVIDIA host driver versions the installed runsc's nvproxy supports, by running a one-shot pod on a gVisor node that mounts the host runsc binary read-only and runs 'runsc nvproxy list-supported-drivers'. SAFETY: defaults to dry-run (describes the pod, creates nothing); you MUST pass \"dry_run\": false to create the pod, which is deleted afterwards. Returns a PreflightReport: spec.facts.gpu lists the GPU nodes (from GPU Feature Discovery labels) with per-card and per-driver support verdicts, spec.facts.runsc records the runsc release, metadata.probe records the pod. Save the JSON and pass it as facts_path to scan_cluster to classify GPU workloads against the real driver list, and systemd-init workloads against the runsc release (systemd needs release-20260831.0 or newer)."
+const probeNvproxyDescription = "Read which NVIDIA host driver versions the installed runsc's nvproxy supports, by running a one-shot pod on a gVisor node that mounts the host runsc binary read-only and runs 'runsc nvproxy list-supported-drivers'. When that runsc needs its sidecar binaries (gVisor 20261019.0 and newer), the pod is created a second time with the gvisor-bin directory next to runsc also mounted read-only; metadata.probe.sidecarPath then names that directory. SAFETY: defaults to dry-run (describes the pod, creates nothing); you MUST pass \"dry_run\": false to create the pod, which is deleted afterwards. Returns a PreflightReport: spec.facts.gpu lists the GPU nodes (from GPU Feature Discovery labels) with per-card and per-driver support verdicts, spec.facts.runsc records the runsc release, metadata.probe records the pod. Save the JSON and pass it as facts_path to scan_cluster to classify GPU workloads against the real driver list, and systemd-init workloads against the runsc release (systemd needs release-20260831.0 or newer)."
 
 func registerProbeNvproxy(srv *server.MCPServer, deps Deps) {
 	tool := mcp.NewTool("probe_nvproxy",
@@ -43,7 +45,7 @@ func registerProbeNvproxy(srv *server.MCPServer, deps Deps) {
 		mcp.WithString("runsc_path",
 			mcp.Description("Path of the runsc binary on the node. Default '"+probe.DefaultRunscPath+"'.")),
 		mcp.WithNumber("timeout_seconds",
-			mcp.Description("How long to wait for the probe pod to complete. Default 120.")),
+			mcp.Description("How long to wait for the probe pod to complete, for each pod when the probe needs a second one. Default 120.")),
 		mcp.WithBoolean("dry_run",
 			mcp.Description("If omitted or true, no pod is created and the report describes the pod that would be. Set explicitly to false to run the probe."),
 			mcp.DefaultBool(true),

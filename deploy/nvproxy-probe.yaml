@@ -3,9 +3,13 @@
 # The nvproxy probe creates one short-lived pod on a gVisor node that mounts
 # the host's runsc binary read-only (hostPath, type File) and runs
 # `runsc --version` and `runsc nvproxy list-supported-drivers`, then deletes
-# the pod. It runs under runc (not the RuntimeClass) as an unprivileged user
-# with no capabilities; the hostPath mount is the only thing about it that
-# Pod Security Admission "baseline" rejects.
+# the pod. When that runsc needs its sidecar binaries to answer (gVisor
+# 20261019.0 and newer), the probe then creates the pod a second time with
+# the gvisor-bin directory next to runsc also mounted read-only (hostPath,
+# type Directory), and deletes it. The pod runs under runc (not the
+# RuntimeClass) as an unprivileged user with no capabilities; the hostPath
+# mounts are the only thing about it that Pod Security Admission "baseline"
+# rejects. See docs/gpu-nvproxy.md.
 #
 # By default the probe uses the `default` namespace, which needs nothing
 # from this file. Apply this file when your cluster enforces PSA cluster-wide

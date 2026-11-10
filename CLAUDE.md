@@ -66,8 +66,9 @@ them green locally before pushing.
 - `pkg/probe/`: the nvproxy probe. Creates one pod on a gVisor node that
   runs the host `runsc` (hostPath, read-only, non-root, under runc), parses
   `runsc --version` and `runsc nvproxy list-supported-drivers`, deletes the
-  pod. Dry-run by default. Output is a `PreflightReport`; `scan --facts`
-  reads it. See `docs/gpu-nvproxy.md`.
+  pod. When that `runsc` needs its sidecars (gVisor 20261019.0 and newer), a
+  second pod also mounts `gvisor-bin/` read-only. Dry-run by default. Output
+  is a `PreflightReport`; `scan --facts` reads it. See `docs/gpu-nvproxy.md`.
 - `pkg/planner/`: pure function from `ScanReport` to `MigrationPlan`.
   Same scan in, same plan and same SHA-256 `planHash` out. Don't break
   determinism.

@@ -7,7 +7,10 @@
 // the only way to read it is to run `runsc nvproxy list-supported-drivers`
 // on a gVisor node. This command creates a small pod pinned to such a node,
 // mounts the runsc binary read-only from the host, runs it as an
-// unprivileged user, reads the pod log, and deletes the pod. The result is
+// unprivileged user, reads the pod log, and deletes the pod. When that runsc
+// needs its sidecar binaries to print the list (gVisor 20261019.0 and
+// newer), pkg/probe runs the pod a second time with the gvisor-bin directory
+// next to runsc also mounted read-only. The result is
 // a PreflightReport (like `agentmoat preflight`) with the GPU facts and the
 // driver list under spec.facts.gpu.nvproxy, and the runsc release under
 // spec.facts.runsc; save it with --output json and pass it to `scan --facts`
@@ -78,7 +81,11 @@ mounts the host's runsc binary read-only, and runs:
     runsc nvproxy list-supported-drivers
 
 The pod runs under runc (not the RuntimeClass) as an unprivileged user with
-no capabilities, and is deleted afterwards. The output is a PreflightReport
+no capabilities, and is deleted afterwards. From gVisor 20261019.0, runsc
+needs its sidecar binaries to print the driver list. When the first pod shows
+that, the probe creates the pod a second time with the gvisor-bin directory
+next to runsc also mounted read-only, and the report records that directory
+in metadata.probe.sidecarPath. The output is a PreflightReport
 whose spec.facts.gpu block lists the GPU nodes (from GPU Feature Discovery
 labels) with, for each card and driver, whether gVisor nvproxy supports it.
 
@@ -108,7 +115,7 @@ on pods/log in that namespace, plus the preflight's node reads.`,
 	cmd.Flags().StringVar(&flagProbeRunscPath, "runsc-path", probe.DefaultRunscPath,
 		"path of the runsc binary on the node")
 	cmd.Flags().DurationVar(&flagProbeTimeout, "timeout", probe.DefaultTimeout,
-		"how long to wait for the probe pod to complete")
+		"how long to wait for the probe pod to complete (for each pod, when the probe needs a second one)")
 	return cmd
 }
 
