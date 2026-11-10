@@ -14,10 +14,10 @@ The same `yyyymmdd.N` tag appears in three load-bearing files:
 | `kind/Dockerfile.gvisor-node` | `ARG GVISOR_VERSION=...` |
 | `scripts/build-gvisor-node.sh` | `GVISOR_VERSION="${GVISOR_VERSION:-...}"` |
 
-The current pin is `20261012.0`. `make check-gvisor-version` fails when the
+The current pin is `20261102.0`. `make check-gvisor-version` fails when the
 three disagree.
 
-gVisor tags look like `release-20261012.0` on GitHub and in `runsc --version`.
+gVisor tags look like `release-20261102.0` on GitHub and in `runsc --version`.
 The download URLs drop the `release-` prefix, so the pin is written without it.
 
 ## Why a pin, and not the apt repository or `latest`
@@ -55,6 +55,13 @@ next to its own binary. Older releases fell back to copies embedded in
 `runsc` when the directory was missing. From `20260831.0` the default
 `--sidecar-usage-policy` refuses that fallback, so an install without
 `gvisor-bin/` cannot start a sandbox. Both images install it.
+
+From `20261019.0`, `runsc` also gives some of its own subcommands to
+`gvisor_sentry`, and `runsc nvproxy` is one of them. A `runsc` binary without
+`gvisor-bin/` next to it can then print its version but not the nvproxy
+driver list. `agentmoat probe nvproxy` mounts `gvisor-bin/` as well as
+`runsc` on such a node (see
+[`gpu-nvproxy.md`](gpu-nvproxy.md#when-the-probe-runs-a-second-pod)).
 
 The kind image extracts the tarball in a separate build stage, because
 `kindest/node` has no `bzip2`. The Packer template installs `bzip2` with
@@ -155,3 +162,9 @@ new tag:
 - the supported driver list, which is compiled into `runsc` and which
   `agentmoat probe nvproxy` reads from the nodes, so it needs no code change
   but does need the nodes re-imaged before the probe reports the new list.
+
+`make e2e` runs the nvproxy probe against the new `runsc`, so do not skip it
+for a bump that looks routine. The bump from `20261012.0` to `20261102.0`
+passed every other e2e step and failed that one: `20261019.0` had moved
+`runsc nvproxy` into the `gvisor_sentry` sidecar, and the probe pod mounted
+only the `runsc` file.

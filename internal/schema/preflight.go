@@ -149,6 +149,15 @@ type ProbeMetadata struct {
 	Image     string `json:"image"     yaml:"image"`
 	RunscPath string `json:"runscPath" yaml:"runscPath"`
 
+	// SidecarPath is the host directory with runsc's sidecar binaries
+	// (the gvisor-bin directory next to RunscPath). It is set only when
+	// the probe mounted it, read-only, in a second pod. That happens when
+	// the runsc on the node cannot print the driver list without its
+	// sidecars (gVisor 20261019.0 and newer). Empty means the probe
+	// mounted RunscPath and nothing else; it is always empty in dry-run,
+	// where the nvproxy-probe-dry-run finding names the possible mount.
+	SidecarPath string `json:"sidecarPath,omitempty" yaml:"sidecarPath,omitempty"`
+
 	// Succeeded is true when the pod ran to completion and its output
 	// parsed. False in dry-run and when the probe failed (see the
 	// nvproxy-probe-failed finding for why).

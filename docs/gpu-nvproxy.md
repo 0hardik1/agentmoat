@@ -58,7 +58,9 @@ GPUs, since its `runsc` is the one that matters). The pod:
 - runs under `runc`, not the RuntimeClass, so the binary it executes is the
   host's `runsc` and not a copy inside a sandbox;
 - mounts `/usr/local/bin/runsc` read-only (`hostPath`, type `File`) and
-  runs `runsc --version` and `runsc nvproxy list-supported-drivers`;
+  runs `runsc --version` and `runsc nvproxy list-supported-drivers`. On a
+  current gVisor release a second pod also mounts `gvisor-bin/`; see
+  [When the probe runs a second pod](#when-the-probe-runs-a-second-pod);
 - runs as an unprivileged user with no capabilities, a read-only root
   filesystem, the `RuntimeDefault` seccomp profile, and no service account
   token;
@@ -67,9 +69,52 @@ GPUs, since its `runsc` is the one that matters). The pod:
 It does not touch a GPU, load CUDA, or open `/dev/nvidia*`. It answers one
 narrow question: does this `runsc` know this driver version?
 
+### When the probe runs a second pod
+
+From gVisor `20261019.0`, `runsc nvproxy` does not run in the `runsc` binary.
+`runsc` gives the command to `gvisor_sentry`, one of the sidecar binaries in
+the `gvisor-bin/` directory next to `runsc` (see
+[`gvisor-version.md`](gvisor-version.md#what-the-release-tarball-holds)). A
+pod that mounts only the `runsc` file prints the version and then fails:
+
+```
+sidecar binary "gvisor_sentry" not found (expected at "/gvisor-bin/gvisor_sentry")
+```
+
+The probe handles this in two steps:
+
+1. The first pod is the pod described above. It mounts the `runsc` file and
+   nothing else. This is sufficient for every `runsc` up to `20261012.0`.
+2. If the output of the first pod shows that `runsc` looked for
+   `gvisor-bin/`, the probe deletes that pod and creates it again, with the
+   same name, on the same node, with one more read-only mount:
+   `/usr/local/bin/gvisor-bin` (`hostPath`, type `Directory`).
+
+So the probe mounts the sidecar directory only when the `runsc` on the node
+asks for it, and a node with an older `runsc` gets the same single pod as
+before. This is important for a node older than `20260831.0`: it has no
+`gvisor-bin/`, and a pod that mounts a missing directory cannot start.
+
+Each mount has a type (`File`, `Directory`). A `hostPath` with no type makes
+the container runtime create a missing path on the node, and the probe must
+not write to a node.
+
+A real run that used the second pod records the directory in
+`metadata.probe.sidecarPath` and prints one line on stderr. The dry run
+cannot know which case applies, so the `nvproxy-probe-dry-run` finding names
+the directory as a possible second mount.
+
+The sidecar directory is always the `gvisor-bin` directory next to
+`--runsc-path`. `runsc` resolves a symlink to itself before it looks for
+`gvisor-bin/`. If `runsc` on your nodes is a symlink, give `--runsc-path` the
+path of the real binary. If the directory is not there, the second pod stays
+in `ContainerCreating` until the timeout, and the `nvproxy-probe-failed`
+finding names the directory it tried to mount.
+
 Like `apply` and `rollback`, the probe defaults to `--dry-run=true`. The dry
 run reports the pod it would create (namespace, name, node, image, host
-path) under `metadata.probe` and adds the `nvproxy-probe-dry-run` finding.
+path) under `metadata.probe` and adds the `nvproxy-probe-dry-run` finding,
+which also names the directory that a second pod would mount.
 
 The output is a `PreflightReport`, the same document `agentmoat preflight`
 produces, plus `metadata.probe` and, after a real run,
@@ -97,7 +142,8 @@ and RuntimeClasses. Nothing cluster-wide is written.
 
 `--image` (default `busybox:1.36.1`, only `/bin/sh` is used), `--runsc-path`
 (default `/usr/local/bin/runsc`), and `--timeout` (default `2m`) cover
-non-standard nodes and air-gapped registries.
+non-standard nodes and air-gapped registries. `--timeout` is the wait for one
+pod. A probe that needs the second pod can wait up to two times that.
 
 ## How the verdict is decided
 
@@ -155,7 +201,7 @@ or `propose_plan`.
 | `gpu-nvproxy-ready` | info | Card and driver both supported by the probed `runsc`. |
 | `nvproxy-probe-dry-run` | info | The probe described its pod and created nothing. |
 | `nvproxy-probe-skipped` | warn | The preflight has an error finding, so there was no node to run on. |
-| `nvproxy-probe-failed` | warn | The pod did not complete or its output did not parse; the message says why (image pull, timeout, `runsc` not at the given path). |
+| `nvproxy-probe-failed` | warn | The pod did not complete or its output did not parse; the message says why (image pull, timeout, `runsc` not at the given path, no `gvisor-bin/` next to it). |
 
 GPU findings never block: the RuntimeClass can still host CPU workloads.
 They change the `gpu-passthrough` verdict and appear as plan warnings.

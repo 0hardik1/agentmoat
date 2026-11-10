@@ -227,6 +227,23 @@ func TestProbeMetadataRoundTrip(t *testing.T) {
 	if !strings.Contains(string(data), `"succeeded":false`) {
 		t.Fatalf("succeeded must always serialize so a dry run reads as not-run: %s", data)
 	}
+	// sidecarPath is present only when the probe mounted the directory, so
+	// a report from a one-pod probe keeps the shape it had before the
+	// field was added.
+	if strings.Contains(string(data), "sidecarPath") {
+		t.Fatalf("an empty sidecarPath must not serialize: %s", data)
+	}
+
+	in.Probe.DryRun, in.Probe.Succeeded = false, true
+	in.Probe.SidecarPath = "/usr/local/bin/gvisor-bin"
+	data, _ = json.Marshal(in)
+	out = PreflightMetadata{}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal with sidecarPath: %v", err)
+	}
+	if !reflect.DeepEqual(in, out) || !strings.Contains(string(data), `"sidecarPath":"/usr/local/bin/gvisor-bin"`) {
+		t.Fatalf("sidecarPath round trip mismatch: %s", data)
+	}
 }
 
 func TestNvidiaConstants(t *testing.T) {

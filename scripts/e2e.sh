@@ -35,7 +35,9 @@
 #                           (exit non-zero, stderr lists topics).
 #   7. `agentmoat probe nvproxy`  dry-run creates nothing; the real run
 #                           reads runsc's version and nvproxy driver list
-#                           from the kind worker through a one-shot pod.
+#                           from the kind worker through a one-shot pod
+#                           (two pods in turn from gVisor 20261019.0 on,
+#                           the second with gvisor-bin/ mounted).
 #                           GFD-style labels on the worker then drive the
 #                           gpu-passthrough verdict through `scan --facts`.
 #

@@ -88,7 +88,9 @@ info, then by ID, so the same cluster state renders identically.
   back to runc needs no gVisor node.
 - **`agentmoat probe nvproxy`**: runs the preflight, then (unless
   `--dry-run`, the default) creates one pod on a matching node to read the
-  `runsc` version and nvproxy driver list, and returns the same
+  `runsc` version and nvproxy driver list (and a second pod when that `runsc`
+  needs its sidecar binaries, see [`gpu-nvproxy.md`](gpu-nvproxy.md)), and
+  returns the same
   PreflightReport with `metadata.probe`, `spec.facts.gpu.nvproxy`, and
   `spec.facts.runsc` filled in.
 - **`agentmoat scan`**: records the same facts under

@@ -37,7 +37,7 @@ byte-identical: same Go struct, same `json:` tags, same APIVersion
 |---------------------|-------------------------------|----------|----------------------------------------------------------------------|
 | `scan_cluster`      | `agentmoat.Scan`              | no       | Returns a `ScanReport` (with `metadata.clusterFacts`; `no_cluster_facts` skips them, `facts_path` loads them from a saved report). |
 | `preflight_cluster` | `agentmoat.Preflight`         | no       | Returns a `PreflightReport`. `spec.summary.ready=false` means `apply_plan` will refuse to run. |
-| `probe_nvproxy`     | `agentmoat.Probe`             | YES      | Creates and deletes one pod on a gVisor node to read the `runsc` nvproxy driver list. Defaults to dry-run; `"dry_run": false` runs it. Returns a `PreflightReport` with `spec.facts.gpu.nvproxy`. |
+| `probe_nvproxy`     | `agentmoat.Probe`             | YES      | Creates and deletes one pod on a gVisor node to read the `runsc` nvproxy driver list (a second pod when that `runsc` needs its sidecar binaries). Defaults to dry-run; `"dry_run": false` runs it. Returns a `PreflightReport` with `spec.facts.gpu.nvproxy`. |
 | `assess_workload`   | `agentmoat.AssessWorkload`    | no       | Returns a `WorkloadResult` for one named workload. Accepts `facts_path`. |
 | `propose_plan`      | `agentmoat.Plan`              | no       | Same scan in -> same `planHash`. Accepts `scan_report_path` to reuse a saved scan, `facts_path` for the facts, `add_toleration` for the pod toleration. |
 | `apply_plan`        | `agentmoat.Apply`             | YES      | Defaults to dry-run. Must set `"dry_run": false` explicitly to mutate. Runs the preflight first; `skip_preflight` bypasses it. |
@@ -66,7 +66,7 @@ See [`preflight.md`](preflight.md) for the finding ids.
 
 **GPU workloads.** `gpu-passthrough` is refined from cluster facts (card,
 driver, MIG). The driver list lives only in the `runsc` binary, so the flow
-is: `probe_nvproxy` with `"dry_run": false` (one pod, created and deleted),
+is: `probe_nvproxy` with `"dry_run": false` (one pod at a time, created and deleted),
 save the returned JSON to a file, then pass its path as `facts_path` to
 `scan_cluster` / `assess_workload` / `propose_plan`. The verdict is then
 `compatible` on supported hardware and `incompatible` on an unsupported

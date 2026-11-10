@@ -18,7 +18,7 @@
 #
 #   docker buildx build \
 #     --platform "linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
-#     --build-arg GVISOR_VERSION=20261012.0 \
+#     --build-arg GVISOR_VERSION=20261102.0 \
 #     --build-arg KIND_NODE_VERSION=v1.32.5 \
 #     -t agentmoat-kind-gvisor:dev \
 #     -f kind/Dockerfile.gvisor-node kind/
@@ -47,10 +47,10 @@ ARG KIND_NODE_VERSION=v1.32.5
 # which rewrites every copy of the pin and verifies that both archs publish
 # `gvisor.tar.bz2` and `gvisor.tar.bz2.sha512` under
 # https://storage.googleapis.com/gvisor/releases/release/<tag>/<arch>/.
-# The weekly gvisor-drift.yml workflow fails when a newer release is out; see
-# docs/gvisor-version.md. Declared before the first FROM so both stages
-# below can read it (each stage re-declares it without a value).
-ARG GVISOR_VERSION=20261012.0
+# The weekly gvisor-drift.yml workflow opens an issue when a newer release is
+# out; see docs/gvisor-version.md. Declared before the first FROM so both
+# stages below can read it (each stage re-declares it without a value).
+ARG GVISOR_VERSION=20261102.0
 
 # ---------------------------------------------------------------------------
 # Stage 1: fetch and verify the gVisor release tarball.
