@@ -14,10 +14,10 @@ The same `yyyymmdd.N` tag appears in three load-bearing files:
 | `kind/Dockerfile.gvisor-node` | `ARG GVISOR_VERSION=...` |
 | `scripts/build-gvisor-node.sh` | `GVISOR_VERSION="${GVISOR_VERSION:-...}"` |
 
-The current pin is `20261102.0`. `make check-gvisor-version` fails when the
+The current pin is `20261116.0`. `make check-gvisor-version` fails when the
 three disagree.
 
-gVisor tags look like `release-20261102.0` on GitHub and in `runsc --version`.
+gVisor tags look like `release-20261116.0` on GitHub and in `runsc --version`.
 The download URLs drop the `release-` prefix, so the pin is written without it.
 
 ## Why a pin, and not the apt repository or `latest`
@@ -62,6 +62,31 @@ From `20261019.0`, `runsc` also gives some of its own subcommands to
 driver list. `agentmoat probe nvproxy` mounts `gvisor-bin/` as well as
 `runsc` on such a node (see
 [`gpu-nvproxy.md`](gpu-nvproxy.md#when-the-probe-runs-a-second-pod)).
+
+From `20261116.0`, runsc confines each sandbox to a device cgroup
+(gVisor commit "Confine the sandbox to a device cgroup", PR 16485). Before
+it, the sandbox's cgroup allowed every host device (`a *:* rwm`), so a
+process that took over the Sentry or the Gofer could open any device node
+it could reach. Now the host kernel enforces an allowlist: `/dev/null`,
+`/dev/ptmx` and the pseudo-terminals, overlayfs whiteouts,
+`/dev/cpu_dma_latency`, the platform's device (`/dev/kvm` on the KVM
+platform, none on systrap), the devices in the container's OCI spec (which
+is where a Kubernetes device plugin puts a GPU), and the NVIDIA driver
+majors when the NVIDIA hook is in use. cgroup v1 uses the `devices`
+controller and fails sandbox creation when that controller is not mounted;
+cgroup v2 attaches a `BPF_PROG_TYPE_CGROUP_DEVICE` program and needs Linux
+5.6 or newer. The EKS AMI (Amazon Linux 2023) runs cgroup v2 on a 6.x
+kernel. A kind node uses whatever cgroup version its host runs. Both images
+use the systrap platform, which has no device to allow.
+
+What runs inside the sandbox does not change: `/dev/zero`, `/dev/fuse` and
+the other devices a pod sees are the Sentry's own. Checked against runsc
+`20261102.0` and `20261116.0` side by side under Docker on a cgroup v1
+host: a declared `/dev/fuse` opens on both, a bind-mounted host `/dev/kmsg`
+fails to read on both (the device is not passed through), and only
+`20261116.0` refuses a host process in the sandbox's cgroup a device off
+the list. `scripts/check-device-cgroup.sh` (`make check-device-cgroup`)
+checks the confinement on a node, and `make e2e` runs it on the kind worker.
 
 The kind image extracts the tarball in a separate build stage, because
 `kindest/node` has no `bzip2`. The Packer template installs `bzip2` with

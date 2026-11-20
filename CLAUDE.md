@@ -35,6 +35,7 @@ invocation more than twice, prefer extending a target.
 | `make tidy`       | `go mod tidy`. Run after any import change. |
 | `make check-gvisor-version` | Asserts the gVisor release pin agrees across packer/kind/scripts and that all release artifacts exist. CI runs it on every PR. |
 | `make check-gvisor-latest`  | Same, plus exit 2 when a newer gVisor release is published. The weekly `gvisor-drift.yml` workflow runs this and opens (or updates) a `gvisor-drift` issue when the pin is behind; the run fails only on a real error, and it does not open a PR. See `docs/gvisor-version.md`. |
+| `make check-device-cgroup` | Checks that every runsc sandbox on a node is confined to a device cgroup (gVisor 20261116.0 and newer): `/dev/null` opens, `/dev/kmsg` is refused. `NODE=<kind node>` runs it through `docker exec`; `make e2e` runs it on the kind worker. |
 | `make kind-up`    | Builds the gVisor-enabled kind worker image and creates the local cluster. Idempotent; an existing cluster is reused as is, so run `make kind-down` first after a gVisor pin bump. |
 | `make e2e`        | Builds, brings up kind, runs scan/plan/apply/rollback end-to-end against a real `runsc` runtime, tears down. Honors `KEEP_CLUSTER=1`. |
 | `make kind-down`  | Tear down the kind cluster from `make kind-up`. |
