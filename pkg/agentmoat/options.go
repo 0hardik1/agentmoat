@@ -90,17 +90,25 @@ type ScanOptions struct {
 	KubeClient kubernetes.Interface
 }
 
-// PlanOptions configures pkg/agentmoat.Plan. Plan() either reads a
-// ScanReport directly (when ScanReport is non-nil) or runs Scan() inline
-// with the embedded ScanOptions.
+// PlanOptions configures pkg/agentmoat.Plan. The source of the plan is the
+// first of these that is set: ScanReport (an in-memory report),
+// ScanReportPath (a report file), or an inline Scan() with the embedded
+// ScanOptions.
 type PlanOptions struct {
-	// ScanOptions is the scan configuration to use when ScanReport is
-	// nil. Ignored when ScanReport is supplied.
+	// ScanOptions is the scan configuration to use when neither ScanReport
+	// nor ScanReportPath is set. Its FactsPath is honored in every case.
 	ScanOptions ScanOptions
 
-	// ScanReport, when non-nil, is used as the source for the plan.
-	// This is how the CLI feeds in a stored scan from disk.
+	// ScanReport, when non-nil, is used as the source for the plan. For
+	// callers that already hold a report in memory (library users, tests).
 	ScanReport *schema.ScanReport
+
+	// ScanReportPath, when non-empty and ScanReport is nil, names a saved
+	// ScanReport (YAML or JSON) to load and use as the source. This is how
+	// `agentmoat plan --scan <file>` and the propose_plan tool's
+	// scan_report_path feed in a stored scan: both pass the path and let
+	// Plan load it, so both reject a wrong file the same way.
+	ScanReportPath string
 
 	// Planner controls ordering, inclusion, and the RuntimeClass name.
 	Planner schema.PlannerOptions

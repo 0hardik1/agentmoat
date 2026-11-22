@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/0hardik1/agentmoat/internal/kube"
 	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/classifier"
 	"github.com/0hardik1/agentmoat/pkg/scanner"
@@ -43,29 +42,14 @@ func AssessWorkload(ctx context.Context, opts AssessWorkloadOptions) (*schema.Wo
 		return nil, fmt.Errorf("assess: kind, namespace, and name are required")
 	}
 
-	client := opts.KubeClient
-	if client == nil {
-		cs, _, err := kube.NewClient(opts.KubeconfigPath, opts.Context)
-		if err != nil {
-			return nil, fmt.Errorf("assess: building kubernetes client: %w", err)
-		}
-		client = cs
+	client, err := newKubeClient(opts.KubeClient, opts.KubeconfigPath, opts.Context)
+	if err != nil {
+		return nil, fmt.Errorf("assess: %w", err)
 	}
 
-	registry := classifier.NewRegistry()
-	classifier.RegisterBuiltins(registry)
-	if opts.RulesYAMLPath != "" {
-		data, err := os.ReadFile(opts.RulesYAMLPath)
-		if err != nil {
-			return nil, fmt.Errorf("assess: reading rules override %s: %w", opts.RulesYAMLPath, err)
-		}
-		warns, err := registry.LoadYAML(data)
-		if err != nil {
-			return nil, fmt.Errorf("assess: parsing rules override %s: %w", opts.RulesYAMLPath, err)
-		}
-		for _, w := range warns {
-			_, _ = fmt.Fprintf(stderr, "warning: %s\n", w)
-		}
+	registry, err := buildRegistry(opts.RulesYAMLPath, stderr)
+	if err != nil {
+		return nil, fmt.Errorf("assess: %w", err)
 	}
 
 	workload, err := scanner.GetByRef(ctx, client, opts.Kind, opts.Namespace, opts.Name)
@@ -82,14 +66,6 @@ func AssessWorkload(ctx context.Context, opts AssessWorkloadOptions) (*schema.Wo
 		return nil, fmt.Errorf("assess: %w", err)
 	}
 
-	verdict := classifier.ClassifyWithFacts(workload, registry, facts)
-	return &schema.WorkloadResult{
-		Kind:           workload.Kind,
-		Namespace:      workload.Namespace,
-		Name:           workload.Name,
-		Compatibility:  verdict.Compatibility,
-		Reasons:        verdict.Reasons,
-		Recommendation: verdict.Recommendation,
-		Overhead:       verdict.Overhead,
-	}, nil
+	result := workloadResult(workload, classifier.ClassifyWithFacts(workload, registry, facts))
+	return &result, nil
 }

@@ -1,12 +1,17 @@
-// Package agentmoat: shared loaders for MigrationPlan files on disk.
+// Package agentmoat: shared loaders for report files on disk.
 //
 // loadPlan is invoked by Apply, Rollback, and Verify. Keeping it here
 // (instead of in apply.go) avoids a Verify -> Apply file dependency: Verify
 // is read-only and should not be coupled to the mutating package.
 //
+// loadScanReport is invoked by Plan (PlanOptions.ScanReportPath). The CLI
+// and the MCP server each used to carry their own copy with different
+// error text; the library owns it now, so `plan --scan` and the
+// propose_plan tool reject the same files with the same message.
+//
 // The on-disk format is whatever sigs.k8s.io/yaml accepts (YAML or JSON,
 // since YAML is a JSON superset). The Kind sniff is the first defense
-// against the operator pointing at a ScanReport by mistake.
+// against the operator pointing at the wrong kind of report by mistake.
 package agentmoat
 
 import (
@@ -80,4 +85,36 @@ func loadPlan(path string) (*schema.MigrationPlan, error) {
 		}
 	}
 	return &plan, nil
+}
+
+// loadScanReport reads a ScanReport from disk (YAML or JSON).
+//
+// Returns a non-nil error for: file read failure, malformed document, wrong
+// Kind (e.g. someone hands us a MigrationPlan). The Kind is sniffed before
+// the full parse so a wrong file produces "has kind X, want ScanReport"
+// rather than a ScanReport with every field empty, which would plan zero
+// steps and look like a clean result.
+func loadScanReport(path string) (*schema.ScanReport, error) {
+	// #nosec G304 -- path is a user-supplied flag (or MCP tool argument)
+	// for a scan file the operator explicitly points us at; that is the
+	// entire purpose of `agentmoat plan --scan`.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	var envelope struct {
+		Kind string `json:"kind"`
+	}
+	if err := yaml.Unmarshal(data, &envelope); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	if envelope.Kind != schema.KindScanReport {
+		return nil, fmt.Errorf("scan file %s has kind %q, want %q",
+			path, envelope.Kind, schema.KindScanReport)
+	}
+	var report schema.ScanReport
+	if err := yaml.Unmarshal(data, &report); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return &report, nil
 }

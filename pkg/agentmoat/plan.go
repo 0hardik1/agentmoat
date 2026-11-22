@@ -25,9 +25,9 @@ import (
 	"github.com/0hardik1/agentmoat/pkg/planner"
 )
 
-// Plan produces a MigrationPlan for a cluster. If opts.ScanReport is
-// non-nil, it is used as the source. Otherwise, Plan runs Scan(opts.ScanOptions)
-// to obtain one.
+// Plan produces a MigrationPlan for a cluster. The source is
+// opts.ScanReport when it is non-nil, else the file at opts.ScanReportPath
+// when that is set, else an inline Scan(opts.ScanOptions).
 //
 // The returned plan has its Metadata stamped with the current binary
 // version and GeneratedAt timestamp. The planner's pure function does the
@@ -39,6 +39,13 @@ func Plan(ctx context.Context, opts PlanOptions) (*schema.MigrationPlan, error) 
 	}
 
 	report := opts.ScanReport
+	if report == nil && opts.ScanReportPath != "" {
+		r, err := loadScanReport(opts.ScanReportPath)
+		if err != nil {
+			return nil, fmt.Errorf("plan: loading scan report: %w", err)
+		}
+		report = r
+	}
 	if report != nil && opts.ScanOptions.FactsPath != "" {
 		// A stored scan plus fresher facts (typically a probe report):
 		// swap the facts block so the warnings below describe the

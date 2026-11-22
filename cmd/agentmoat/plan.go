@@ -20,12 +20,10 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 
 	"github.com/spf13/cobra"
-	"sigs.k8s.io/yaml"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/agentmoat"
@@ -121,15 +119,10 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 		Stderr: stderr,
 	}
 
-	// Source resolution: if --scan was given, load the report from disk
-	// and skip the inline scan.
-	if flagPlanScanPath != "" {
-		report, err := loadScanReport(flagPlanScanPath)
-		if err != nil {
-			return fmt.Errorf("loading --scan: %w", err)
-		}
-		opts.ScanReport = report
-	}
+	// Source resolution: --scan names a saved ScanReport. The library
+	// loads it (and rejects a file of the wrong kind), so this command and
+	// the MCP propose_plan tool behave the same. Empty means scan inline.
+	opts.ScanReportPath = flagPlanScanPath
 
 	plan, err := agentmoat.Plan(context.Background(), opts)
 	if err != nil {
@@ -137,31 +130,4 @@ func runPlan(cmd *cobra.Command, _ []string) error {
 	}
 
 	return output.Render(plan, format, cmd.OutOrStdout(), renderOpts)
-}
-
-// loadScanReport reads and parses a ScanReport from disk. The file may be
-// JSON or YAML; sigs.k8s.io/yaml normalises both internally.
-func loadScanReport(path string) (*schema.ScanReport, error) {
-	// #nosec G304 -- path is a user-supplied CLI flag for a scan file the
-	// operator explicitly points us at; that is the entire purpose of
-	// `agentmoat plan --scan`.
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var envelope struct {
-		Kind string `json:"kind"`
-	}
-	if err := yaml.Unmarshal(data, &envelope); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
-	}
-	if envelope.Kind != schema.KindScanReport {
-		return nil, fmt.Errorf("file %s has kind %q, want %q",
-			path, envelope.Kind, schema.KindScanReport)
-	}
-	var r schema.ScanReport
-	if err := yaml.Unmarshal(data, &r); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
-	}
-	return &r, nil
 }
