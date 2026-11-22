@@ -49,7 +49,7 @@ BIN_DIR := ./bin
 
 # Declare every target as phony. None of these targets produce a file at the
 # literal name of the target, so Make should always run the recipe.
-.PHONY: help build test lint tidy clean version check-gvisor-version check-gvisor-latest kind-build kind-up kind-down e2e scan mcp-smoke
+.PHONY: help build test lint tidy clean version check-gvisor-version check-gvisor-latest check-device-cgroup kind-build kind-up kind-down e2e scan mcp-smoke
 
 help: ## Print this help message (default target).
 	@# The awk pattern below scans this Makefile for lines of the form
@@ -84,6 +84,12 @@ check-gvisor-latest: ## Like check-gvisor-version, and fail (exit 2) if a newer 
 	@# Locally it answers "am I behind?" without touching any file; to
 	@# bump, run ./scripts/bump-gvisor-version.sh <tag>.
 	@./scripts/check-gvisor-version.sh --latest
+
+check-device-cgroup: ## On a gVisor node (or a kind node with NODE=<name>), check each runsc sandbox is confined to a device cgroup.
+	@# runsc 20261116.0 and newer restrict the sandbox cgroup to the host
+	@# devices it needs. make e2e runs this against the kind worker; on an EKS
+	@# node, run ./scripts/check-device-cgroup.sh as root (for example over SSM).
+	@./scripts/check-device-cgroup.sh $(if $(NODE),--node $(NODE))
 
 lint: ## Run golangci-lint against the whole module.
 	@# Configuration lives in .golangci.yml at the repo root. Run this before

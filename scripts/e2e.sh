@@ -29,6 +29,12 @@
 #                           apply, after idempotent re-apply (still all
 #                           ok), and after rollback (expect mismatch=8
 #                           and exit 4).
+#   4b. device cgroup       scripts/check-device-cgroup.sh on the kind
+#                           worker: every runsc sandbox of the migrated
+#                           pods may open /dev/null and is refused
+#                           /dev/kmsg by the host kernel (runsc
+#                           20261116.0 and newer confine the sandbox to a
+#                           device cgroup; see docs/gvisor-version.md).
 #   5. `agentmoat rollback` to clear the patches and restore the
 #                           pre-apply spec.
 #   6. `agentmoat explain`  smoke: list mode, known topic, unknown topic
@@ -114,6 +120,7 @@ E2E_REPLAY_APPLY_BLOCKED="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan-
 E2E_REPLAY_APPLY="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
 E2E_REPLAY_VERIFY_PROBE="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json --in-pod-probe"
 E2E_REPLAY_VERIFY="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json"
+E2E_REPLAY_DEVICE_CGROUP="scripts/check-device-cgroup.sh --node <gvisor-worker>"
 E2E_REPLAY_ROLLBACK="$E2E_REPLAY_AGENT rollback --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
 E2E_REPLAY_EXPLAIN="bin/agentmoat explain"
 E2E_REPLAY_EXPLAIN_NS="$E2E_REPLAY_AGENT explain namespace $NAMESPACE"
@@ -513,6 +520,34 @@ NP_MISMATCHED=$(jq -r \
   "$WORK_DIR/verify-after-apply.json")
 assert_eq "verify nodePlacement mismatched total (post-apply)" 0 "$NP_MISMATCHED"
 e2e_step_pass "verify (post-apply)" "$E2E_REPLAY_VERIFY_PROBE"
+
+# -----------------------------------------------------------------------------
+# 4b. device cgroup: the sandboxes of the migrated pods are confined.
+# -----------------------------------------------------------------------------
+#
+# From gVisor 20261116.0, runsc puts each sandbox in a device cgroup that
+# allows only the host devices the sandbox needs (/dev/null, ptys, the
+# platform device, the devices in the pod's spec). verify --in-pod-probe
+# proves the pods run under the Sentry; this proves the host-side layer
+# under the Sentry is in force on the node. The check runs on the kind
+# worker through `docker exec` (a kind node is a container named after the
+# node) and probes every runsc sandbox there, which right now means the
+# eight migrated workloads. Exit 2 (skipped) is a failure here: the pinned
+# release has the device cgroup and the pods are running, so a skip means
+# the node image or the check is wrong.
+
+e2e_step "device cgroup: every runsc sandbox on the gVisor worker is confined"
+DEVICE_NODE=$("${KCTL[@]}" get nodes -l runtime=gvisor -o jsonpath='{.items[0].metadata.name}')
+[[ -n "$DEVICE_NODE" ]] || fail "device cgroup: no node labelled runtime=gvisor"
+DEVICE_EXIT=0
+"$REPO_ROOT/scripts/check-device-cgroup.sh" --node "$DEVICE_NODE" \
+  | tee "$WORK_DIR/device-cgroup.txt" || DEVICE_EXIT=${PIPESTATUS[0]}
+assert_eq "check-device-cgroup exit code" 0 "$DEVICE_EXIT"
+DEVICE_OK_COUNT=$(grep -c '^ok   sandbox ' "$WORK_DIR/device-cgroup.txt" || true)
+if (( DEVICE_OK_COUNT < E2E_COMPAT )); then
+  fail "device cgroup: expected at least $E2E_COMPAT confined sandboxes on $DEVICE_NODE, got $DEVICE_OK_COUNT"
+fi
+e2e_step_pass "device cgroup" "${E2E_REPLAY_DEVICE_CGROUP/<gvisor-worker>/$DEVICE_NODE}"
 
 # -----------------------------------------------------------------------------
 # 5. idempotent re-apply: every step already-applied.
