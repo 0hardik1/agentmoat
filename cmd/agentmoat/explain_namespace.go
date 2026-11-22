@@ -65,7 +65,7 @@ incompatible workload, so CI scripts and AI agents can branch on it.`,
 // mirrors `agentmoat scan`: any incompatible workload trips exit 2.
 func runExplainNamespace(cmd *cobra.Command, args []string) error {
 	// Parse --output early so we fail before any K8s work.
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindExplainDocument)
 	if err != nil {
 		return err
 	}

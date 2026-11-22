@@ -114,61 +114,20 @@ func ExplainWorkload(
 }
 
 // LoadExplanationProse returns the embedded markdown prose for a rule
-// ID. Returns the empty string (no error) when the rule has no prose
-// file, so callers can fall back to the rule's Reason.Description.
+// (docs/explanations/<rule-id>.md), or "" when no file exists for the ID,
+// so callers can fall back to the rule's Reason.Description.
 //
-// The lookup is exact: rule IDs are stable, lowercased, dash-separated
-// strings (see pkg/classifier/builtin_rules.go), and the prose files
-// follow the same convention (`docs/explanations/<ruleID>.md`).
+// The text and the lookup live in the docs package (docs.RuleExplanation),
+// next to the embedded files, because pkg/output needs the same prose for
+// the SARIF output.
 func LoadExplanationProse(ruleID string) string {
-	if ruleID == "" {
-		return ""
-	}
-	data, err := docs.FS.ReadFile("explanations/" + ruleID + ".md")
-	if err != nil {
-		// Soft fallback: a missing prose file is not fatal. Callers can
-		// substitute the Reason.Description string into the operator
-		// output instead.
-		return ""
-	}
-	return string(data)
+	return docs.RuleExplanation(ruleID)
 }
 
-// ruleTitle returns the short, human-readable header for a rule ID. The
-// strings are hardcoded (rather than derived from rule.Description)
-// because Description is a sentence ("Container requests CAP_NET_RAW;
-// gVisor ...") while Title is meant to fit as a section heading
-// ("Raw socket capability requested").
-//
-// An unknown rule ID falls back to the ID itself, which gives forward-
-// compatibility: a future rule that ships before its title is added
-// here will still render, just less prettily.
+// ruleTitle returns the short, human-readable header for a rule ID. An
+// unknown rule ID falls back to the ID. See docs.RuleTitle.
 func ruleTitle(ruleID string) string {
-	if t, ok := ruleTitles[ruleID]; ok {
-		return t
-	}
-	return ruleID
-}
-
-// ruleTitles maps each built-in rule ID to its section heading. A table
-// rather than a switch: one line per rule, and adding a rule does not grow
-// a function's cyclomatic complexity.
-var ruleTitles = map[string]string{
-	"host-network":       "Host network namespace shared",
-	"host-pid":           "Host PID namespace shared",
-	"host-ipc":           "Host IPC namespace shared",
-	"privileged":         "Privileged container",
-	"raw-socket":         "Raw socket capability requested",
-	"ebpf":               "eBPF workload detected",
-	"kvm-nested":         "Nested KVM virtualization",
-	"host-path-mount":    "Host path volume mounted",
-	"gpu-passthrough":    "GPU passthrough requested",
-	"fuse-mount":         "FUSE filesystem in use",
-	"io-uring":           "io_uring opt-in declared",
-	"perf-events":        "Performance event capability",
-	"network-throughput": "Network-throughput-bound workload",
-	"syscall-heavy":      "Syscall-heavy workload",
-	"systemd-init":       "systemd runs as PID 1",
+	return docs.RuleTitle(ruleID)
 }
 
 // extractEvidence pulls the concrete PodSpec facts that triggered (or

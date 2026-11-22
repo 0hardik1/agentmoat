@@ -19,6 +19,9 @@
 #     5. Input that is not rendered (a Kustomize base and overlay):
 #        --fail-on sandboxed refuses it; the rendered output is checked.
 #     6. A plan made from manifests is a preview: apply refuses it.
+#     7. The output formats for a pipeline: Markdown (the gate result is in
+#        the report, because a job summary shows no stderr) and SARIF (a
+#        result is "error" only when it makes the gate fail).
 #
 # The canary
 #
@@ -290,6 +293,74 @@ expect_rc 1 "rollback refuses the plan"
 
 run verify --plan "$WORK_DIR/plan.json"
 expect_rc 1 "verify refuses the plan"
+
+# -----------------------------------------------------------------------------
+section "7. output for a pipeline: markdown and sarif"
+# -----------------------------------------------------------------------------
+
+# Relative paths from here on: a SARIF location is a path relative to the
+# repository root, which is what a pipeline job gives.
+cd "$REPO_ROOT"
+REL="test/testdata/manifests"
+
+run scan -f "$REL/sandboxed-hostnetwork.yaml" --fail-on sandboxed -o markdown
+expect_rc 2 "markdown: the gate still sets the exit code"
+expect_text "$OUT" '**Gate failed** (`--fail-on sandboxed`)' "markdown: the gate result is in the report, not only on stderr"
+expect_text "$OUT" "Deployment edge/gateway: host-network ($REL/sandboxed-hostnetwork.yaml:4)" "markdown: the failing workload is listed with file and line"
+if [[ "$(head -n 1 "$OUT")" == "## agentmoat scan" ]]; then
+  pass "markdown: the report starts with its title"
+else
+  fail "markdown: the report starts with its title" "the first line is '$(head -n 1 "$OUT")'"
+fi
+
+run scan -f "$REL/sandboxed-compatible.yaml" --fail-on sandboxed -o markdown
+expect_rc 0 "markdown: a passing gate exits 0"
+expect_text "$OUT" '**Gate passed**' "markdown: a pass says so"
+
+run scan -f "$E2E_WORKLOADS" --fail-on sandboxed -o markdown
+expect_rc 0 "markdown: a gate that checked nothing exits 0"
+expect_text "$OUT" '**Gate checked nothing**' "markdown: and the report does not call it a pass"
+
+run scan -f "$REL/kustomize" --fail-on sandboxed -o markdown
+expect_rc 1 "markdown: a refused gate exits 1"
+expect_text "$OUT" '**Gate could not answer**' "markdown: the report that was printed says that the gate refused"
+
+# SARIF. Two files: a sandboxed Deployment that cannot run in gVisor, and a
+# Rollout that cannot run in it and does not ask to.
+run scan -f "$REL/sandboxed-hostnetwork.yaml" -f "$REL/rollout-privileged.yaml" --fail-on sandboxed -o sarif
+expect_rc 2 "sarif: the gate still sets the exit code"
+expect_jq '.version' "2.1.0" "sarif: version 2.1.0"
+expect_jq '.runs[0].results | length' "2" "sarif: one result for each finding"
+expect_jq '[.runs[0].results[] | "\(.properties.name)=\(.level)"] | sort | join(" ")' "canary=warning gateway=error" \
+  "sarif: only the workload that fails the gate has the level error"
+expect_jq '.runs[0].results[] | select(.properties.name == "gateway") | .locations[0].physicalLocation | "\(.artifactLocation.uri):\(.region.startLine)"' \
+  "$REL/sandboxed-hostnetwork.yaml:4" "sarif: the location is the file, relative, and the line"
+expect_jq '[.runs[0].tool.driver.rules[].id] | join(" ")' "host-network privileged" "sarif: the rules are listed, sorted by ID"
+expect_jq '[.runs[0].tool.driver.rules[] | select((.shortDescription.text | length) == 0 or (.fullDescription.text | length) == 0 or (.help.text | length) == 0)] | length' "0" \
+  "sarif: every rule has the text that code scanning requires"
+
+# The same files under the default gate: both workloads fail it.
+run scan -f "$REL/sandboxed-hostnetwork.yaml" -f "$REL/rollout-privileged.yaml" -o sarif
+expect_jq '[.runs[0].results[].level] | unique | join(" ")' "error" "sarif: under the default gate, both results are errors"
+
+run scan -f "$REL/sandboxed-compatible.yaml" -o sarif
+expect_rc 0 "sarif: a scan with no findings exits 0"
+expect_jq '.runs[0] | "\(.results | type) \(.results | length) \(.tool.driver.rules | type)"' "array 0 array" \
+  "sarif: no findings is an empty array, not null"
+
+run scan -f - -o sarif < "$REL/sandboxed-hostnetwork.yaml"
+expect_text "$ERR" "have no file location" "sarif: results from standard input have no file, and scan says so"
+expect_jq '.runs[0].results[0].locations[0] | has("physicalLocation")' "false" "sarif: such a result has a logical location only"
+
+# A format that a command cannot render is refused before any work.
+run apply --plan "$WORK_DIR/plan.json" --no-audit -o sarif
+expect_rc 1 "apply -o sarif is an error"
+expect_text "$ERR" "is not available for ApplyResult output" "the error is about the format, before the plan is read"
+expect_empty "$OUT" "nothing is printed on stdout"
+
+run plan --scan "$WORK_DIR/scan.json" -o markdown
+expect_rc 0 "plan -o markdown works"
+expect_text "$OUT" '`manifest-source`' "markdown: the preview warning is in the plan summary"
 
 # -----------------------------------------------------------------------------
 section "the canary"

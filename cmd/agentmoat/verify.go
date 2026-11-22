@@ -61,7 +61,7 @@ verify is strictly read-only and never mutates the cluster.`,
 }
 
 func runVerify(cmd *cobra.Command, _ []string) error {
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindVerifyReport)
 	if err != nil {
 		return err
 	}

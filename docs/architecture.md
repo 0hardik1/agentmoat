@@ -77,7 +77,7 @@ Jobs, Pods). This pattern matches the K8s-tooling ecosystem (`kube-bench`,
 | `pkg/applier` | Pod-template patching with `runtimeClassName`. |
 | `pkg/verifier` | Compares live pods' `runtimeClassName` and hosting nodes to the plan; optional in-pod probe. |
 | `pkg/explainer` | Educational text for `agentmoat explain`. |
-| `pkg/output` | Renderers (table / JSON / YAML). |
+| `pkg/output` | Renderers: table, JSON, YAML, Markdown (job summaries and pull-request comments), and SARIF (`scan` only). `Format.Supports` is the list of which document takes which format. See [`output-formats.md`](output-formats.md). |
 | `internal/kube` | client-go construction helpers. |
 | `internal/containerd` | (Phase 5) Drop-in config parser. |
 | `internal/schema` | Versioned wire types (`agentmoat.io/v1alpha1`). |

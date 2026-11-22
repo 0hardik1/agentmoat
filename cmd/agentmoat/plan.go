@@ -82,7 +82,7 @@ plan is strictly read-only.`,
 }
 
 func runPlan(cmd *cobra.Command, _ []string) error {
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindMigrationPlan)
 	if err != nil {
 		return err
 	}

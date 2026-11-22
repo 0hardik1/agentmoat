@@ -63,7 +63,7 @@ controllers re-ordered the list since apply ran.`,
 }
 
 func runRollback(cmd *cobra.Command, _ []string) error {
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindRollbackResult)
 	if err != nil {
 		return err
 	}

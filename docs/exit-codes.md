@@ -47,7 +47,9 @@ and nothing in it failed the gate":
   answer would not describe what gets deployed. Scan the rendered objects:
   `kustomize build <dir> | agentmoat scan -f - --fail-on sandboxed`. In this
   case the report is still printed (it is correct about the files), and
-  `metadata.source.unrendered` lists the signs.
+  `metadata.source.unrendered` lists the signs. With `-o markdown`, the first
+  line of that report says that the gate could not answer, so a job summary
+  does not read as a pass. See [output formats](output-formats.md).
 
 Input with objects but no workloads (config only) is exit `0` with a note.
 

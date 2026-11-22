@@ -23,6 +23,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
+	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/agentmoat"
 	"github.com/0hardik1/agentmoat/pkg/output"
 	"github.com/0hardik1/agentmoat/pkg/scanner"
@@ -86,6 +87,16 @@ versioned, stable schema suitable for piping into other tools or AI agents:
 as a directory with a kustomization file: an overlay can add
 runtimeClassName, and the answer would not describe what gets deployed.
 
+Two output formats are for a pipeline:
+
+    -o markdown   a summary for a CI job summary or a pull-request comment.
+                  It starts with the result of the gate, because those
+                  places do not show stderr
+    -o sarif      SARIF 2.1.0 for code scanning. A finding has the level
+                  "error" only when it makes the gate fail; the others are
+                  "warning". Scan files (-f) for SARIF: a result needs a
+                  file location to be shown
+
 For a cluster, the report also records cluster facts (metadata.clusterFacts):
 whether the RuntimeClass exists, how many Ready nodes match its nodeSelector,
 and whether those nodes are EKS Auto Mode or Bottlerocket instances that can
@@ -120,7 +131,7 @@ scan is strictly read-only and never mutates cluster state.`,
 func runScan(cmd *cobra.Command, _ []string) error {
 	// Parse --output and --fail-on first, so a typing error fails before
 	// any file or cluster is read.
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindScanReport)
 	if err != nil {
 		return err
 	}
@@ -155,19 +166,29 @@ func runScan(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	// The gate, before the report is rendered. The decision is the
+	// library's (EvaluateGate), so every surface gates the same way; this
+	// command only turns it into an exit code. Two output formats show the
+	// decision in the report: Markdown (a job summary does not show
+	// stderr) and SARIF (for its levels).
+	//
+	// A gate error (it could not answer) is kept until the report is
+	// printed: the report is still correct about the files it read, and
+	// the Markdown form says that the gate refused. The error then becomes
+	// exit 1.
+	gate, gateErr := agentmoat.EvaluateGate(report, failOn)
+	renderOpts.Gate = outputGate(gate)
+
 	// Render to stdout. Stderr already received progress messages.
 	if err := output.Render(report, format, cmd.OutOrStdout(), renderOpts); err != nil {
 		return err
 	}
+	if format == output.FormatSARIF {
+		noteSARIFLocations(stderr, report)
+	}
 
-	// Exit-code shaping. The decision is the library's (EvaluateGate), so
-	// every surface gates the same way; this command only turns it into
-	// an exit code. A gate error (it could not answer) is returned and
-	// becomes exit 1, after the report was printed: the report is still
-	// correct about the files it read.
-	gate, err := agentmoat.EvaluateGate(report, failOn)
-	if err != nil {
-		return err
+	if gateErr != nil {
+		return gateErr
 	}
 	for _, line := range gate.Messages {
 		_, _ = fmt.Fprintln(stderr, line)
@@ -176,6 +197,34 @@ func runScan(cmd *cobra.Command, _ []string) error {
 		exitCode = 2
 	}
 	return nil
+}
+
+// outputGate converts the library's gate result to the form the renderer
+// takes. The two packages do not import each other, so this command, which
+// imports both, copies the fields.
+func outputGate(g agentmoat.GateResult) *output.Gate {
+	return &output.Gate{
+		FailOn:  string(g.FailOn),
+		Outcome: output.GateOutcome(g.Outcome),
+		Summary: g.Summary,
+		Details: g.Details,
+		Failing: g.Failing,
+	}
+}
+
+// noteSARIFLocations says, on stderr, when SARIF results have no file
+// location. A code scanning service puts an alert on a file and a line. It
+// has no place for a result from a cluster scan or from standard input, and
+// GitHub does not show one. Without this note the upload would succeed and
+// show nothing, with no reason given.
+func noteSARIFLocations(stderr io.Writer, report *schema.ScanReport) {
+	results, withoutFile := output.SARIFLocations(report)
+	if withoutFile == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(stderr, "note: %d of %d SARIF result(s) have no file location, because the workload did not come from a file. "+
+		"GitHub code scanning shows a result only when it has one. To upload SARIF, scan files: agentmoat scan -f <dir> -o sarif\n",
+		withoutFile, results)
 }
 
 // scanOptions maps the flags to ScanOptions for the cluster form or, when

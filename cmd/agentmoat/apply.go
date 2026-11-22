@@ -77,7 +77,7 @@ mutation, and appends one line per mutation to ~/.agentmoat/audit.jsonl.`,
 }
 
 func runApply(cmd *cobra.Command, _ []string) error {
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindApplyResult)
 	if err != nil {
 		return err
 	}

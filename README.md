@@ -85,6 +85,17 @@ written: render Helm templates and Kustomize overlays first, as above.
 RuntimeClass is incompatible, so a CNI DaemonSet that will never move does not
 fail the check. See [`docs/exit-codes.md`](docs/exit-codes.md).
 
+In a pipeline, write the report where the reviewer reads it:
+
+```bash
+./bin/agentmoat scan -f ./k8s --fail-on sandboxed -o markdown >> "$GITHUB_STEP_SUMMARY"
+./bin/agentmoat scan -f ./k8s --fail-on sandboxed -o sarif > agentmoat.sarif
+```
+
+The Markdown report starts with the result of the gate. A SARIF result has the
+level `error` only when it makes the gate fail. See
+[`docs/output-formats.md`](docs/output-formats.md).
+
 ## What it does
 
 ```
@@ -366,7 +377,7 @@ make kind-down
 
 | Flag                       | Default          | Purpose                                                                  |
 | -------------------------- | ---------------- | ------------------------------------------------------------------------ |
-| `--output / -o`            | `table`          | `table`, `json`, or `yaml`. `json`/`yaml` follow `agentmoat.io/v1alpha1`.|
+| `--output / -o`            | `table`          | `table`, `json`, `yaml`, `markdown`, or `sarif`. `json`/`yaml` follow `agentmoat.io/v1alpha1`. See [Output formats](#output-formats). |
 | `--kubeconfig`             | `$KUBECONFIG`    | Path to kubeconfig.                                                      |
 | `--context`                | current-context  | kubeconfig context to use.                                               |
 | `--namespace / -n`         | (all)            | Repeatable. Default: scan every namespace. With `scan -f`: one value, the namespace for objects that name none (not a filter). |
@@ -405,6 +416,12 @@ make kind-down
 | `table`| Default human-readable view; per-workload row with runtime class, verdict, and top reasons. |
 | `json` | Versioned, stable schema (`agentmoat.io/v1alpha1`). Pipe into `jq` or store as evidence. |
 | `yaml` | Byte-identical to JSON after canonicalisation; convenient for review/diff.         |
+| `markdown` (or `md`) | A CI job summary, a pull-request comment, a merge-request note. For `scan`, the first line is the result of the `--fail-on` gate. Not for `explain`. |
+| `sarif` | SARIF 2.1.0 for a code scanning service. `scan` only. A result is an `error` only when it makes the gate fail. |
+
+A command refuses a format that it cannot write before it does any work. The
+details (the gate line, the SARIF levels and locations, the limits) are in
+[`docs/output-formats.md`](docs/output-formats.md).
 
 ## FAQ
 
@@ -497,6 +514,7 @@ Roadmap:
 - [Threat model](docs/threat-model.md): what gVisor stops that `runc` does not, with CVE references.
 - [Compatibility checklist](docs/compatibility-checklist.md): the full rule catalog and `--rules` override schema.
 - [Exit codes](docs/exit-codes.md): the deterministic exit codes by command.
+- [Output formats](docs/output-formats.md): table, JSON, YAML, Markdown for a job summary, and SARIF for code scanning.
 - [EKS deployment](docs/eks-deployment.md): the Packer + EKS recipe (stub today; tracked for Phase 5).
 - [Kind quickstart](docs/kind-quickstart.md): bring up a local cluster with gVisor preinstalled (doc is a stub today; `make kind-up` is the working path).
 

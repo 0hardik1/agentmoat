@@ -55,13 +55,58 @@ func ParseFailOn(s string) (FailOn, error) {
 		s, FailOnIncompatible, FailOnSandboxed, FailOnNone)
 }
 
+// GateOutcome is what the gate decided. It is a type, not text in a
+// message, so that a renderer can show each outcome in its own way and does
+// not have to read a sentence to tell a pass from "checked nothing".
+type GateOutcome string
+
+// The outcomes. Only GateFailed is exit code 2. GateRefused comes with an
+// error from EvaluateGate (exit code 1). The other three are exit code 0,
+// and only GatePassed is a pass.
+const (
+	// GateOff: FailOnNone. There is no gate; the report is the result.
+	GateOff GateOutcome = "off"
+	// GatePassed: the gate looked at one or more workloads and none failed.
+	GatePassed GateOutcome = "passed"
+	// GateFailed: one or more workloads failed.
+	GateFailed GateOutcome = "failed"
+	// GateNothingChecked: the gate had no workload to look at. With
+	// FailOnSandboxed, that is the dangerous quiet case of a sandbox
+	// RuntimeClass with another name.
+	GateNothingChecked GateOutcome = "nothing-checked"
+	// GateRefused: the gate could not answer, because the input is not
+	// rendered.
+	GateRefused GateOutcome = "refused"
+)
+
 // GateResult is the answer of EvaluateGate.
 type GateResult struct {
-	// Failed is true when the scan must fail (exit code 2).
+	// FailOn is the setting the gate was evaluated with.
+	FailOn FailOn
+
+	// Outcome is the decision. See GateOutcome.
+	Outcome GateOutcome
+
+	// Failed is true when the scan must fail (exit code 2). It is
+	// Outcome == GateFailed.
 	Failed bool
 
-	// Messages are lines for a person or a job log: which workloads
-	// failed the gate, or why the gate had nothing to check. FailOnSandboxed
+	// Summary is one sentence that states the outcome and the numbers
+	// behind it. It is always set. A report that a person reads away from
+	// the job log (a Markdown job summary) shows it.
+	Summary string
+
+	// Details has one line for each workload that failed the gate, for
+	// the settings that list them (FailOnSandboxed).
+	Details []string
+
+	// Failing lists the workloads that make the gate fail, one entry for
+	// each identity, in report order. The SARIF output uses it: only a
+	// finding on one of these workloads has the level "error".
+	Failing []schema.WorkloadRef
+
+	// Messages are lines for stderr and a job log: which workloads failed
+	// the gate, or why the gate had nothing to check. FailOnSandboxed
 	// always gives one or more; the other two settings give none, so the
 	// default scan prints what it always printed.
 	Messages []string
@@ -79,22 +124,55 @@ var ErrUnrenderedInput = errors.New("the input is not rendered")
 // base, or change the pod spec of a workload that has it, and a file scan
 // applies no overlay; a "pass" would describe objects that are never
 // deployed in that form. A refusal is exit code 1 (an error), not 2: the
-// scan did not find a problem, it could not look.
+// scan did not find a problem, it could not look. The GateResult is set in
+// that case too (Outcome is GateRefused), so a caller can show the refusal
+// in the report before it returns the error.
 func EvaluateGate(report *schema.ScanReport, failOn FailOn) (GateResult, error) {
 	switch failOn {
 	case FailOnNone:
-		return GateResult{}, nil
+		return GateResult{
+			FailOn:  FailOnNone,
+			Outcome: GateOff,
+			Summary: "This report does not pass or fail.",
+		}, nil
 	case FailOnSandboxed:
 		return sandboxedGate(report)
 	case FailOnIncompatible, "":
-		for _, w := range report.Spec.Workloads {
-			if w.Compatibility == schema.CompatibilityIncompatible {
-				return GateResult{Failed: true}, nil
-			}
-		}
-		return GateResult{}, nil
+		return incompatibleGate(report), nil
 	}
 	return GateResult{}, fmt.Errorf("unknown --fail-on value %q", failOn)
+}
+
+// incompatibleGate is EvaluateGate for FailOnIncompatible: fail when any
+// workload is incompatible. It gives no Messages, so the default scan prints
+// on stderr what it always printed.
+func incompatibleGate(report *schema.ScanReport) GateResult {
+	res := GateResult{FailOn: FailOnIncompatible}
+	seen := map[identity]bool{}
+	for _, w := range report.Spec.Workloads {
+		if w.Compatibility != schema.CompatibilityIncompatible {
+			continue
+		}
+		id := identity{w.Kind, w.Namespace, w.Name}
+		if !seen[id] {
+			seen[id] = true
+			res.Failing = append(res.Failing, schema.WorkloadRef{Kind: w.Kind, Namespace: w.Namespace, Name: w.Name})
+		}
+	}
+	total := len(report.Spec.Workloads)
+	switch {
+	case len(res.Failing) > 0:
+		res.Failed = true
+		res.Outcome = GateFailed
+		res.Summary = fmt.Sprintf("%d of %d workload(s) cannot run in gVisor.", len(res.Failing), total)
+	case total == 0:
+		res.Outcome = GateNothingChecked
+		res.Summary = "The scan found no workloads, so the gate checked nothing."
+	default:
+		res.Outcome = GatePassed
+		res.Summary = fmt.Sprintf("None of the %d workload(s) is incompatible.", total)
+	}
+	return res
 }
 
 // identity is what makes two report rows "the same workload".
@@ -105,24 +183,69 @@ func sandboxedGate(report *schema.ScanReport) (GateResult, error) {
 	runtimeClass := sandboxClassName(report.Metadata.RuntimeClassName)
 
 	if src := report.Metadata.Source; src != nil && len(src.Unrendered) > 0 {
-		return GateResult{}, fmt.Errorf("--fail-on %s cannot answer: %w (%s). "+
-			"An overlay can add runtimeClassName to a workload or change its pod spec, and a file scan applies no overlay. "+
-			"Scan the rendered objects: kustomize build <dir> | agentmoat scan -f - --fail-on %s",
-			FailOnSandboxed, ErrUnrenderedInput, summarizeSigns(src.Unrendered), FailOnSandboxed)
+		signs := summarizeSigns(src.Unrendered)
+		why := fmt.Sprintf("An overlay can add runtimeClassName to a workload or change its pod spec, and a file scan applies no overlay. "+
+			"Scan the rendered objects: kustomize build <dir> | agentmoat scan -f - --fail-on %s", FailOnSandboxed)
+		refused := GateResult{
+			FailOn:  FailOnSandboxed,
+			Outcome: GateRefused,
+			Summary: fmt.Sprintf("The input is not rendered (%s), so the gate cannot answer. %s", signs, why),
+		}
+		return refused, fmt.Errorf("--fail-on %s cannot answer: %w (%s). %s", FailOnSandboxed, ErrUnrenderedInput, signs, why)
 	}
 
-	// Work by identity, not by row. A manifest scan keeps every copy of a
-	// workload that is defined twice (two overlays that each carry a full
-	// Deployment). Which copy gets deployed is not knowable from the files,
-	// so the safe reading is the union: the workload is sandboxed if any
-	// copy asks for the class, and incompatible if any copy is.
+	res := GateResult{FailOn: FailOnSandboxed}
+	sandboxed, failing, details, otherClasses := sandboxedWorkloads(report, runtimeClass)
+	res.Failing, res.Details = failing, details
+
+	switch {
+	case len(res.Failing) > 0:
+		res.Failed = true
+		res.Outcome = GateFailed
+		res.Summary = fmt.Sprintf("%d workload(s) ask for RuntimeClass %q and cannot run in it.", len(res.Failing), runtimeClass)
+		res.Messages = []string{fmt.Sprintf("gate failed: these workloads ask for RuntimeClass %q and cannot run in it:", runtimeClass)}
+		for _, line := range res.Details {
+			res.Messages = append(res.Messages, "  "+line)
+		}
+	case sandboxed == 0:
+		// The dangerous quiet case: a cluster whose class is named
+		// "gvisor-runsc" would pass this gate forever. Say that nothing
+		// was checked, and show the names that are in use.
+		res.Outcome = GateNothingChecked
+		what := fmt.Sprintf("o workload asks for RuntimeClass %q, so --fail-on %s checked nothing.", runtimeClass, FailOnSandboxed)
+		if len(otherClasses) > 0 {
+			what += fmt.Sprintf(" RuntimeClass names in this scan: %s. If one of them is your sandbox, pass it with --runtime-class.",
+				formatCounts(otherClasses))
+		}
+		res.Summary = "N" + what
+		res.Messages = []string{"gate: n" + what}
+	default:
+		res.Outcome = GatePassed
+		res.Summary = fmt.Sprintf("%d workload(s) ask for RuntimeClass %q and none is incompatible.", sandboxed, runtimeClass)
+		res.Messages = []string{"gate passed: " + res.Summary}
+	}
+	return res, nil
+}
+
+// sandboxedWorkloads reads the report for the sandboxed gate. It returns the
+// number of workloads that ask for runtimeClass, the ones among them that
+// are incompatible (failing, one entry per workload, and details, one line
+// per incompatible copy), and a count of the other RuntimeClass names in
+// the report.
+//
+// It works by identity, not by row. A manifest scan keeps every copy of a
+// workload that is defined twice (two overlays that each carry a full
+// Deployment). Which copy gets deployed is not knowable from the files, so
+// the safe reading is the union: the workload is sandboxed if any copy asks
+// for the class, and incompatible if any copy is.
+func sandboxedWorkloads(report *schema.ScanReport, runtimeClass string) (sandboxed int, failing []schema.WorkloadRef, details []string, otherClasses map[string]int) {
 	type state struct {
 		sandboxed    bool
 		incompatible []schema.WorkloadResult
 	}
 	states := map[identity]*state{}
 	var order []identity
-	otherClasses := map[string]int{}
+	otherClasses = map[string]int{}
 	for _, w := range report.Spec.Workloads {
 		id := identity{w.Kind, w.Namespace, w.Name}
 		st := states[id]
@@ -142,38 +265,20 @@ func sandboxedGate(report *schema.ScanReport) (GateResult, error) {
 		}
 	}
 
-	var res GateResult
-	sandboxed := 0
 	for _, id := range order {
 		st := states[id]
 		if !st.sandboxed {
 			continue
 		}
 		sandboxed++
+		if len(st.incompatible) > 0 {
+			failing = append(failing, schema.WorkloadRef{Kind: id.kind, Namespace: id.namespace, Name: id.name})
+		}
 		for _, w := range st.incompatible {
-			res.Failed = true
-			res.Messages = append(res.Messages, "  "+describeBlocked(w))
+			details = append(details, describeBlocked(w))
 		}
 	}
-
-	switch {
-	case res.Failed:
-		head := fmt.Sprintf("gate failed: these workloads ask for RuntimeClass %q and cannot run in it:", runtimeClass)
-		res.Messages = append([]string{head}, res.Messages...)
-	case sandboxed == 0:
-		// The dangerous quiet case: a cluster whose class is named
-		// "gvisor-runsc" would pass this gate forever. Say that nothing
-		// was checked, and show the names that are in use.
-		msg := fmt.Sprintf("gate: no workload asks for RuntimeClass %q, so --fail-on %s checked nothing.", runtimeClass, FailOnSandboxed)
-		if len(otherClasses) > 0 {
-			msg += fmt.Sprintf(" RuntimeClass names in this scan: %s. If one of them is your sandbox, pass it with --runtime-class.",
-				formatCounts(otherClasses))
-		}
-		res.Messages = []string{msg}
-	default:
-		res.Messages = []string{fmt.Sprintf("gate passed: %d workload(s) ask for RuntimeClass %q and none is incompatible.", sandboxed, runtimeClass)}
-	}
-	return res, nil
+	return sandboxed, failing, details, otherClasses
 }
 
 // describeBlocked renders one workload that failed the gate: identity, the

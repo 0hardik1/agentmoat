@@ -65,7 +65,7 @@ Documentation: see docs/ in the repo or run 'agentmoat explain <topic>'.`,
 	// Global flags shared by all subcommands.
 	pf := root.PersistentFlags()
 	pf.StringVarP(&flagOutput, "output", "o", "table",
-		"output format: table | json | yaml")
+		"output format: table | json | yaml | markdown | sarif (sarif: scan only)")
 	pf.StringVar(&flagKubeconfig, "kubeconfig", "",
 		"path to kubeconfig file (default: $KUBECONFIG or ~/.kube/config)")
 	pf.StringVar(&flagContext, "context", "",

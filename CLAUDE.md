@@ -39,7 +39,7 @@ invocation more than twice, prefer extending a target.
 | `make check-device-cgroup` | Checks that every runsc sandbox on a node is confined to a device cgroup (gVisor 20261116.0 and newer): `/dev/null` opens, `/dev/kmsg` is refused. `NODE=<kind node>` runs it through `docker exec`; `make e2e` runs it on the kind worker. |
 | `make kind-up`    | Builds the gVisor-enabled kind worker image and creates the local cluster. Idempotent; an existing cluster is reused as is, so run `make kind-down` first after a gVisor pin bump. |
 | `make e2e`        | Builds, brings up kind, runs scan/plan/apply/rollback end-to-end against a real `runsc` runtime, tears down. Honors `KEEP_CLUSTER=1`. |
-| `make offline-smoke` | Builds, then runs `scan -f` and the `--fail-on` gate on the manifest fixtures in `test/testdata/manifests` with no cluster. Needs `jq`. CI runs it on every PR. Run it after changes to the manifest scanner or the gate. |
+| `make offline-smoke` | Builds, then runs `scan -f`, the `--fail-on` gate, and the Markdown and SARIF outputs on the manifest fixtures in `test/testdata/manifests` with no cluster. Needs `jq`. CI runs it on every PR. Run it after changes to the manifest scanner, the gate, or `pkg/output`. |
 | `make kind-down`  | Tear down the kind cluster from `make kind-up`. |
 
 CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
@@ -88,13 +88,22 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   that live pods match the plan and run on nodes the RuntimeClass
   `nodeSelector` selects; `explain` renders the embedded docs and
   per-workload evidence.
-- `pkg/output/`: table / JSON / YAML renderers. The renderer dispatches
-  on concrete type with a switch; extend it when adding a new schema type.
+- `pkg/output/`: the renderers. Table, JSON, and YAML for every document;
+  Markdown (`markdown.go`, `markdown_pipeline.go`) for a CI job summary or a
+  pull-request comment; SARIF (`sarif.go`) for `scan` only. The renderer
+  dispatches on concrete type with a switch; extend it when adding a new
+  schema type. `formatKinds` in `renderer.go` is the list of which document
+  takes which format, and each command checks it first with `ParseFor`. See
+  `docs/output-formats.md`.
 - `internal/schema/`: versioned wire types (`agentmoat.io/v1alpha1`).
   This is the public-ish surface for JSON/YAML output. Touch carefully.
 - `internal/kube/`: client-go construction (kubeconfig + in-cluster).
 - `internal/audit/`: `~/.agentmoat/audit.jsonl` append-only log.
-- `docs/`: public docs. Some are stubs marked as such.
+- `docs/`: public docs. Some are stubs marked as such. It is also a Go
+  package: `embed.go` embeds the files, and `rules.go` gives the title and
+  the explanation of each rule (`RuleTitle`, `RuleExplanation`) to `explain`
+  and to the SARIF output. A new rule needs a title there and a file in
+  `docs/explanations/`; a test in `docs/rules_test.go` checks it.
 - `kind/`, `packer/`, `deploy/`, `scripts/`: cluster + AMI plumbing.
 - `Dockerfile`, `Dockerfile.alpine`, `.goreleaser.yaml`: the release. Each
   tag publishes the archives and two images to `ghcr.io/0hardik1/agentmoat`:
@@ -138,6 +147,17 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
     patch) is a partial object, never a compatible workload. `--fail-on
     sandboxed` refuses input that is not rendered. Do not weaken these to
     make a scan pass.
+11. **Pipeline output states the gate, and trusts no text from the input.**
+    A job summary shows no stderr and no exit code, so `scan -o markdown`
+    starts with the gate result, for every outcome (a gate that checked
+    nothing or could not answer is not a pass). A SARIF result has the level
+    `error` only when its workload makes the gate fail, so an upload is not
+    a second gate. Every string that comes from a manifest (a name, a kind,
+    a path, a description) goes through `mdCode`, `mdCodeCell`, `mdText`, or
+    a fenced block; a pull request must not be able to add structure, a
+    link, or a mention to its own report. The size has a limit for any
+    input (a job summary on GitHub takes 1 MiB); a test in
+    `pkg/output/markdown_test.go` checks it.
 
 ## Conventions (mirror the existing code)
 
@@ -198,6 +218,7 @@ Read the relevant doc:
 - Architecture and package map: [`docs/architecture.md`](docs/architecture.md)
 - Rule catalog and `--rules` override schema: [`docs/compatibility-checklist.md`](docs/compatibility-checklist.md)
 - Exit codes: [`docs/exit-codes.md`](docs/exit-codes.md)
+- Output formats (Markdown, SARIF, the gate line): [`docs/output-formats.md`](docs/output-formats.md)
 - Preflight findings and the apply gate: [`docs/preflight.md`](docs/preflight.md)
 - GPU workloads, nvproxy support, the driver probe: [`docs/gpu-nvproxy.md`](docs/gpu-nvproxy.md)
 - gVisor primer: [`docs/gvisor-101.md`](docs/gvisor-101.md)

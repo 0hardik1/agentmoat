@@ -31,6 +31,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/agentmoat"
 	"github.com/0hardik1/agentmoat/pkg/output"
 )
@@ -88,7 +89,7 @@ matters.`,
 var flagExplainFactsPath string
 
 func runExplain(cmd *cobra.Command, args []string) error {
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindExplainDocument)
 	if err != nil {
 		return err
 	}
