@@ -11,14 +11,25 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/0hardik1/agentmoat/pkg/agentmoat"
 )
 
 // Version and GitSHA are set at build time via -ldflags. Mirrors the
 // CLI binary's pattern so both binaries report the same release string.
+// Empty by default: ResolveBuildInfo then reads the Go build record.
 var (
-	Version = "dev"
-	GitSHA  = "unknown"
+	Version = ""
+	GitSHA  = ""
 )
+
+// init resolves the version and commit and stores the version in the
+// library package. Without this call every report an MCP tool returns
+// (ScanReport, MigrationPlan, ...) carried agentmoatVersion "dev", whatever
+// the release, because only the CLI binary set the library's Version.
+func init() {
+	Version, GitSHA = agentmoat.ResolveBuildInfo(Version, GitSHA)
+}
 
 func main() {
 	// Flags. We deliberately keep this surface tiny: MCP clients drive

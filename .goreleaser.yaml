@@ -96,7 +96,13 @@ archives:
   # `ids` here selects which build's output goes into the archive.
   # `format_overrides` switches to zip on windows (not built today, but correct
   # the day we add it). `name_template` yields names like
-  # `agentmoat_0.1.0_linux_amd64.tar.gz`. LICENSE + README ride along so
+  # `agentmoat_linux_amd64.tar.gz`. The version is left out of the name on
+  # purpose: GitHub serves the newest release at a fixed URL,
+  #   https://github.com/0hardik1/agentmoat/releases/latest/download/agentmoat_linux_amd64.tar.gz
+  # and that URL only stays valid from release to release when the asset name
+  # does not change. The README install line and CI recipes use it. (v0.1.0
+  # assets carried the version in the name; the fixed URL works from the
+  # first release after this change.) LICENSE + README ride along so
   # consumers can verify provenance offline.
   - id: agentmoat
     ids:
@@ -109,7 +115,6 @@ archives:
           - zip
     name_template: >-
       {{ .Binary }}_
-      {{- .Version }}_
       {{- .Os }}_
       {{- .Arch }}
     files:
@@ -126,7 +131,6 @@ archives:
           - zip
     name_template: >-
       {{ .Binary }}_
-      {{- .Version }}_
       {{- .Os }}_
       {{- .Arch }}
     files:

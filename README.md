@@ -21,6 +21,23 @@ gVisor. agentmoat fills that gap.
 
 The threat model and CVE backdrop live in [`docs/threat-model.md`](docs/threat-model.md).
 
+## Install
+
+Prebuilt binaries for linux and darwin (amd64 and arm64) and a checksums file
+are attached to each
+[GitHub release](https://github.com/0hardik1/agentmoat/releases). Download the
+archive for your platform, extract it, and put `agentmoat` on your `PATH`.
+
+With Go 1.26 or newer:
+
+```bash
+go install github.com/0hardik1/agentmoat/cmd/agentmoat@latest
+go install github.com/0hardik1/agentmoat/cmd/agentmoat-mcp@latest
+```
+
+`@latest` installs the newest tagged release. Use `@main` to build the tip of
+`main`.
+
 ## Quickstart
 
 From a fresh clone, against a local kind cluster with real gVisor preinstalled:
@@ -51,20 +68,6 @@ make build                                            # produces ./bin/agentmoat
 `scan` exits 0 when nothing is incompatible, 2 when at least one workload is.
 `apply` and `rollback` are idempotent: re-running an applied plan reports every
 step as `already-applied` and exits 0.
-
-## Install
-
-Build from source with Go 1.26+:
-
-```bash
-go install github.com/0hardik1/agentmoat/cmd/agentmoat@latest
-go install github.com/0hardik1/agentmoat/cmd/agentmoat-mcp@latest
-```
-
-Once a release is tagged, prebuilt binaries (linux/darwin, amd64/arm64) and a
-checksums file are attached to each
-[GitHub release](https://github.com/0hardik1/agentmoat/releases); a Homebrew
-formula and a `kubectl agentmoat` krew plugin follow.
 
 ## What it does
 

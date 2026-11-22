@@ -23,8 +23,11 @@ import (
 	"github.com/0hardik1/agentmoat/pkg/scanner"
 )
 
-// Version is set at build time via -ldflags. Defaults to "dev" for local
-// builds. Reported in ScanReport.Metadata.AgentmoatVersion for provenance.
+// Version is the agentmoat version that every report carries in
+// Metadata.AgentmoatVersion for provenance. Both binaries set it at start-up
+// through ResolveBuildInfo (version.go): -ldflags first, then the Go build
+// record. "dev" is what a program sees when it imports this package and
+// never calls ResolveBuildInfo.
 var Version = "dev"
 
 // Scan performs a full read-only scan and classification of the target
