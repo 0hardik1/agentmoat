@@ -52,8 +52,11 @@ them green locally before pushing.
   live in `root.go`.
 - `pkg/agentmoat/`: orchestrator. One public function per verb
   (`Scan`, `Plan`, `Apply`, `Rollback`, ...). Both binaries call these.
-- `pkg/scanner/`: cluster enumeration via `client-go`. Returns canonical
-  `[]scanner.Workload`.
+- `pkg/scanner/`: returns canonical `[]scanner.Workload` from one of two
+  sources. `Enumerate` lists a cluster through `client-go`. `FromManifests`
+  decodes YAML or JSON text with no cluster (`ReadManifestPaths` reads the
+  files, directories, or stdin), and also accepts other kinds that carry a
+  pod template, such as an Argo `Rollout`.
 - `pkg/classifier/`: pure-function rule engine. `Classify(w, registry)`
   returns a `Verdict`; `ClassifyWithFacts` adds `schema.ClusterFacts` so a
   rule's `Refine` hook can move its severity (`gpu-passthrough` in

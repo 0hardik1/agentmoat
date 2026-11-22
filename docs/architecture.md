@@ -69,7 +69,7 @@ Jobs, Pods). This pattern matches the K8s-tooling ecosystem (`kube-bench`,
 | `cmd/agentmoat` | CLI entrypoint (cobra). Thin shell over `pkg/agentmoat`. |
 | `cmd/agentmoat-mcp` | MCP-over-stdio server. Thin shell over `pkg/agentmoat`. |
 | `pkg/agentmoat` | Orchestration: `Scan`, `Preflight`, `Probe`, `Plan`, `Apply`, `Verify`, `Rollback`, `Explain`, `AssessWorkload`. |
-| `pkg/scanner` | Cluster enumeration via client-go; produces `Workload` values. |
+| `pkg/scanner` | Produces `Workload` values from a cluster (client-go) or from manifest text with no cluster (`FromManifests`, `ReadManifestPaths`). |
 | `pkg/classifier` | Pure-function rule engine; produces `Verdict` values. `ClassifyWithFacts` lets a rule refine its severity from `ClusterFacts` (today: `gpu-passthrough`). |
 | `pkg/preflight` | Reads the RuntimeClass, nodes, and GPU labels into `ClusterFacts`; pure `Evaluate` turns facts into findings. Gates `apply`. |
 | `pkg/probe` | The nvproxy probe: a one-shot pod that reads `runsc --version` and `runsc nvproxy list-supported-drivers` from a gVisor node. Dry-run by default. |
