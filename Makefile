@@ -55,7 +55,7 @@ GORELEASER_VERSION ?= v2.20.3
 
 # Declare every target as phony. None of these targets produce a file at the
 # literal name of the target, so Make should always run the recipe.
-.PHONY: help build test lint tidy clean version release-snapshot check-gvisor-version check-gvisor-latest check-device-cgroup kind-build kind-up kind-down e2e scan mcp-smoke
+.PHONY: help build test lint tidy clean version release-snapshot check-gvisor-version check-gvisor-latest check-device-cgroup kind-build kind-up kind-down e2e scan mcp-smoke offline-smoke
 
 help: ## Print this help message (default target).
 	@# The awk pattern below scans this Makefile for lines of the form
@@ -172,3 +172,13 @@ mcp-smoke: build ## Drive a JSON-RPC session against agentmoat-mcp on the kind c
 	@# `make e2e` so a CLI regression cannot block MCP iteration and
 	@# vice versa.
 	@./scripts/mcp-smoke.sh
+
+offline-smoke: build ## Run the checks that need no cluster (scan -f, the --fail-on gate) on the built binary.
+	@# scripts/offline-smoke.sh runs ./bin/agentmoat against the manifest
+	@# fixtures in test/testdata/manifests and asserts exit codes and
+	@# output. It needs jq, and no cluster: every run has KUBECONFIG set
+	@# to a file that points at a dead server, and the script fails if
+	@# that file's context name shows up in any output. CI runs it on
+	@# every PR. kubectl, when present, is used only for a local
+	@# `kubectl kustomize` render.
+	@./scripts/offline-smoke.sh

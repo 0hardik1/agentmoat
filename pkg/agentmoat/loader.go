@@ -29,7 +29,8 @@ import (
 // parser handles both.
 //
 // Returns a non-nil error for: missing path, file read failure, malformed
-// document, wrong Kind (e.g. someone hands us a ScanReport).
+// document, wrong Kind (e.g. someone hands us a ScanReport), a failed
+// integrity check, and a plan that was made from manifests (a preview).
 func loadPlan(path string) (*schema.MigrationPlan, error) {
 	if path == "" {
 		return nil, fmt.Errorf("--plan is required")
@@ -63,6 +64,18 @@ func loadPlan(path string) (*schema.MigrationPlan, error) {
 	// the test "the file is parseable as a real MigrationPlan" cheap.
 	if _, err := json.Marshal(plan); err != nil {
 		return nil, fmt.Errorf("validating plan shape: %w", err)
+	}
+
+	// A plan made from manifests is a preview and nothing that acts on a
+	// cluster may load it. The reason is in the applier: a dry-run marks a
+	// step "applied" without reading the workload (it only builds the
+	// patch), so `apply` on this plan would print a clean dry-run for
+	// workloads that may not exist in the cluster at all, in namespaces the
+	// manifests may not even name. That output would look like a rehearsal
+	// and be nothing of the kind. Every caller of loadPlan (apply,
+	// rollback, verify) acts on a cluster, so the check lives here.
+	if src := plan.Metadata.Source; src != nil && src.Type == schema.SourceManifests {
+		return nil, fmt.Errorf("plan file %s cannot be used here: %s", path, manifestPlanMessage)
 	}
 
 	// Integrity check: when the file claims a planHash, recompute it from

@@ -923,7 +923,15 @@ func cleanYAMLError(err error, firstLine int) (line int, cleaned error) {
 			return firstLine + n - 1, errors.New(strings.TrimPrefix(text, m[0]))
 		}
 	}
-	return 0, errors.New(strings.TrimPrefix(text, "yaml: "))
+	// "invalid map key: map[interface {}]interface {}{...}" is what the
+	// library says when a key is itself a mapping, and it prints the Go
+	// value. The usual cause is `name: {{ .Values.name }}`: to YAML, {{ }}
+	// is a flow mapping inside a flow mapping.
+	text = strings.TrimPrefix(text, "yaml: ")
+	if strings.HasPrefix(text, "invalid map key:") {
+		return 0, errors.New("a mapping key is itself a mapping, not a string (YAML reads {{ ... }} that way)")
+	}
+	return 0, errors.New(text)
 }
 
 // cleanJSONError does the same for encoding/json, whose type errors name

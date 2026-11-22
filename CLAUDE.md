@@ -39,10 +39,11 @@ invocation more than twice, prefer extending a target.
 | `make check-device-cgroup` | Checks that every runsc sandbox on a node is confined to a device cgroup (gVisor 20261116.0 and newer): `/dev/null` opens, `/dev/kmsg` is refused. `NODE=<kind node>` runs it through `docker exec`; `make e2e` runs it on the kind worker. |
 | `make kind-up`    | Builds the gVisor-enabled kind worker image and creates the local cluster. Idempotent; an existing cluster is reused as is, so run `make kind-down` first after a gVisor pin bump. |
 | `make e2e`        | Builds, brings up kind, runs scan/plan/apply/rollback end-to-end against a real `runsc` runtime, tears down. Honors `KEEP_CLUSTER=1`. |
+| `make offline-smoke` | Builds, then runs `scan -f` and the `--fail-on` gate on the manifest fixtures in `test/testdata/manifests` with no cluster. Needs `jq`. CI runs it on every PR. Run it after changes to the manifest scanner or the gate. |
 | `make kind-down`  | Tear down the kind cluster from `make kind-up`. |
 
-CI (`.github/workflows/ci.yml`) gates on `make lint` and `make test`. Keep
-them green locally before pushing.
+CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
+`make offline-smoke`. Keep them green locally before pushing.
 
 ## Repository layout (where to look)
 
@@ -52,6 +53,9 @@ them green locally before pushing.
   live in `root.go`.
 - `pkg/agentmoat/`: orchestrator. One public function per verb
   (`Scan`, `Plan`, `Apply`, `Rollback`, ...). Both binaries call these.
+  `Scan` has two sources: a cluster, or manifest files
+  (`scan_manifests.go`, `scan -f`). `gate.go` holds the `--fail-on` decision
+  (`EvaluateGate`), so the exit code logic is not in `cmd/`.
 - `pkg/scanner/`: returns canonical `[]scanner.Workload` from one of two
   sources. `Enumerate` lists a cluster through `client-go`. `FromManifests`
   decodes YAML or JSON text with no cluster (`ReadManifestPaths` reads the
@@ -123,6 +127,17 @@ them green locally before pushing.
 8. **Schema stability.** `agentmoat.io/v1alpha1` is the active wire
    version. Add fields, do not rename or remove without bumping. Update
    `internal/schema/types_test.go` whenever shapes change.
+9. **`scan -f` reads no cluster.** With manifest paths, `Scan` builds no
+   Kubernetes client and reads no kubeconfig. Do not use a fake client
+   either: the report must not name a cluster that it did not read. A test
+   in `pkg/agentmoat/scan_manifests_test.go` sets a kubeconfig that points
+   at a dead server and a client that fails on any call.
+10. **A file scan fails closed.** Exit 0 from `scan -f` means the input was
+    read and nothing in it failed the gate. A document that does not parse
+    is an error, not a skip. A workload kind with no containers (an overlay
+    patch) is a partial object, never a compatible workload. `--fail-on
+    sandboxed` refuses input that is not rendered. Do not weaken these to
+    make a scan pass.
 
 ## Conventions (mirror the existing code)
 

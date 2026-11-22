@@ -580,6 +580,16 @@ func TestFromManifests_Problems(t *testing.T) {
 			wantTemplated: true,
 		},
 		{
+			// `name: {{ .Release.Name }}` IS valid YAML syntax: a mapping
+			// whose key is a mapping. The library reports it with a printed
+			// Go value; the message must not carry that.
+			name:          "a template in a value position gives a readable message",
+			inputs:        one("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {{ .Release.Name }}\n"),
+			wantProblems:  1,
+			wantSubstring: []string{"a mapping key is itself a mapping", "helm template"},
+			wantTemplated: true,
+		},
+		{
 			name:          "a templated JSON-looking file gets the hint too",
 			inputs:        one("{{- if .Values.enabled }}\napiVersion: v1\nkind: Pod\n{{- end }}\n"),
 			wantProblems:  1,

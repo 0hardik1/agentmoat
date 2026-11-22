@@ -114,6 +114,7 @@ E2E_REPLAY_SETUP=$'make kind-up\nkubectl apply -f test/e2e/manifests/runtimeclas
 E2E_REPLAY_PREFLIGHT="$E2E_REPLAY_AGENT preflight"
 E2E_REPLAY_PREFLIGHT_NEG="$E2E_REPLAY_AGENT preflight --runtime-class gvisor-noselector"
 E2E_REPLAY_SCAN="$E2E_REPLAY_AGENT scan --namespace $NAMESPACE"
+E2E_REPLAY_SCAN_FILE="bin/agentmoat scan -f test/e2e/manifests/workloads.yaml -n $NAMESPACE"
 E2E_REPLAY_PLAN="$E2E_REPLAY_AGENT plan --scan $E2E_ARTIFACT_REL/scan.json"
 E2E_REPLAY_APPLY_DRY="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --no-audit"
 E2E_REPLAY_APPLY_BLOCKED="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan-noselector.json --no-audit"
@@ -324,6 +325,44 @@ assert_eq "scan clusterFacts.runtimeClass.found" "true" \
 assert_eq "scan clusterFacts.nodes.matchingAndReady" 1 \
   "$(jq -r '.metadata.clusterFacts.nodes.matchingAndReady' "$WORK_DIR/scan.json")"
 e2e_step_pass "scan" "$E2E_REPLAY_SCAN"
+
+# -----------------------------------------------------------------------------
+# 1b. scan -f: the manifest file gives the verdicts the cluster gave.
+# -----------------------------------------------------------------------------
+#
+# `scan -f` reads the same workloads.yaml that setup applied, with no
+# cluster. A pull-request check trusts a file scan to say what the cluster
+# scan would say after the deploy, so this step compares the two, workload
+# by workload: kind, name, verdict, and the rule ids that fired. It runs
+# before `apply`, while the cluster still has what the file has.
+#
+# It compares those four fields and not the whole JSON on purpose. The two
+# reports differ where they should: only the cluster one has cluster facts,
+# only the file one has an origin for each workload.
+#
+# KUBECONFIG points at a file that does not exist, and --context is not
+# passed, so this run cannot reach the kind cluster by any path.
+
+e2e_step "scan -f: the manifest file gives the verdicts the cluster gave"
+SCAN_FILE_EXIT=0
+KUBECONFIG="$WORK_DIR/no-such-kubeconfig" "$AGENTMOAT_BIN" scan \
+  -f "$MANIFEST_DIR/workloads.yaml" --namespace "$NAMESPACE" --output json \
+  > "$WORK_DIR/scan-file.json" 2> "$WORK_DIR/scan-file.stderr" || SCAN_FILE_EXIT=$?
+assert_eq "scan -f exit code" 2 "$SCAN_FILE_EXIT"
+assert_eq "scan -f source" "manifests" "$(jq -r '.metadata.source.type' "$WORK_DIR/scan-file.json")"
+assert_eq "scan -f names no cluster" "false" \
+  "$(jq -r '.metadata | has("cluster") or has("clusterFacts")' "$WORK_DIR/scan-file.json")"
+
+# One line for each workload: kind, name, verdict, sorted rule ids.
+VERDICT_LINES='.spec.workloads | map("\(.kind) \(.name) \(.compatibility) \([.reasons[]?.ruleId] | sort | join(","))") | sort | .[]'
+jq -r "$VERDICT_LINES" "$WORK_DIR/scan.json" > "$WORK_DIR/verdicts-cluster.txt"
+jq -r "$VERDICT_LINES" "$WORK_DIR/scan-file.json" > "$WORK_DIR/verdicts-file.txt"
+assert_eq "scan -f workload count" "$E2E_TOTAL" "$(wc -l < "$WORK_DIR/verdicts-file.txt" | tr -d ' ')"
+if ! diff -u "$WORK_DIR/verdicts-cluster.txt" "$WORK_DIR/verdicts-file.txt" > "$WORK_DIR/verdicts.diff"; then
+  cat "$WORK_DIR/verdicts.diff"
+  fail "scan -f: verdicts from the file differ from the cluster scan (diff above: - cluster, + file)"
+fi
+e2e_step_pass "scan -f (file vs cluster)" "$E2E_REPLAY_SCAN_FILE"
 
 # -----------------------------------------------------------------------------
 # 2. plan: deterministic, compatible-only steps, non-empty PlanHash.

@@ -131,6 +131,67 @@ type ReportMetadata struct {
 	// and runtimeclasses; the scan itself still succeeds. `plan` reads
 	// this to warn when no node can host the plan.
 	ClusterFacts *ClusterFacts `json:"clusterFacts,omitempty" yaml:"clusterFacts,omitempty"`
+
+	// RuntimeClassName is the RuntimeClass this scan treats as "the
+	// sandbox" (--runtime-class, default "gvisor"). Summary.Sandboxed
+	// counts the workloads that ask for it, and `scan --fail-on sandboxed`
+	// looks only at those. Reports written before this field existed have
+	// it empty; readers then use DefaultRuntimeClassName.
+	RuntimeClassName string `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
+
+	// Source says where the workloads came from when that was not a
+	// cluster. Nil means a cluster scan (and then Cluster is the context).
+	Source *ReportSource `json:"source,omitempty" yaml:"source,omitempty"`
+}
+
+// SourceManifests is the ReportSource.Type of a scan that read manifest
+// files (or standard input) and no cluster.
+const SourceManifests = "manifests"
+
+// ReportSource describes a scan whose workloads did not come from a cluster.
+//
+// Everything here is something a person at a terminal reads on stderr. It
+// is on the wire as well because two important readers have no stderr: an
+// MCP client, and a CI job that turns the report into a summary. Both must
+// be able to say what the scan did NOT check.
+type ReportSource struct {
+	// Type is the kind of source. SourceManifests is the only value today.
+	Type string `json:"type" yaml:"type"`
+
+	// Inputs is the number of manifest inputs read: files, plus one for
+	// standard input.
+	Inputs int `json:"inputs,omitempty" yaml:"inputs,omitempty"`
+
+	// Skipped counts the objects that were read but not classified because
+	// they are not workloads, keyed by "Kind.group" ("Service",
+	// "Ingress.networking.k8s.io").
+	Skipped map[string]int `json:"skipped,omitempty" yaml:"skipped,omitempty"`
+
+	// Duplicates has one line for each workload identity that is defined
+	// more than once in the input. Every copy is in Spec.Workloads.
+	Duplicates []string `json:"duplicates,omitempty" yaml:"duplicates,omitempty"`
+
+	// Unrendered has one line for each sign that the input is not the
+	// final form of the objects: a kustomization file, or a partial object
+	// (a workload kind with no containers, which is the shape of an overlay
+	// patch). A file scan reads each object as complete and applies no
+	// overlay, so with entries here the verdicts describe the files and
+	// not what gets deployed. `scan --fail-on sandboxed` refuses to answer
+	// in that case.
+	Unrendered []string `json:"unrendered,omitempty" yaml:"unrendered,omitempty"`
+}
+
+// Origin is where in the manifest input a workload was defined.
+type Origin struct {
+	// File is the path as it was given to the scan. For standard input it
+	// is the path in the `# Source:` comment that `helm template` writes
+	// above each document, or "<stdin>" when there is no such comment.
+	File string `json:"file" yaml:"file"`
+
+	// Line is the 1-based line of the first line of the object's document.
+	// It is left out when File is a Helm source path: the line would count
+	// in the rendered stream, not in that template file.
+	Line int `json:"line,omitempty" yaml:"line,omitempty"`
 }
 
 // ReportSpec is the payload of a ScanReport: a summary plus the per-workload
@@ -147,6 +208,12 @@ type Summary struct {
 	Compatible   int `json:"compatible"   yaml:"compatible"`
 	NeedsReview  int `json:"needsReview"  yaml:"needsReview"`
 	Incompatible int `json:"incompatible" yaml:"incompatible"`
+
+	// Sandboxed is the number of workloads that ask for the scan's
+	// RuntimeClass (ReportMetadata.RuntimeClassName) in their pod spec. It
+	// cuts across the three buckets above: a sandboxed workload is also
+	// compatible, review, or incompatible.
+	Sandboxed int `json:"sandboxed" yaml:"sandboxed"`
 }
 
 // WorkloadResult is one row of a ScanReport. The classifier produces these
@@ -155,10 +222,22 @@ type Summary struct {
 type WorkloadResult struct {
 	// Identity. "Kind" is one of Pod/Deployment/StatefulSet/DaemonSet/Job/
 	// CronJob; agentmoat reports on the controller, not its child pods,
-	// when a controller exists, to avoid double-counting.
+	// when a controller exists, to avoid double-counting. A scan of
+	// manifests can also report any other kind that carries a pod template,
+	// written as "Kind.group" ("Rollout.argoproj.io"), and can leave
+	// Namespace empty when the manifest names none.
 	Kind      string `json:"kind"      yaml:"kind"`
 	Namespace string `json:"namespace" yaml:"namespace"`
 	Name      string `json:"name"      yaml:"name"`
+
+	// RuntimeClassName is the runtimeClassName in the workload's pod spec,
+	// as written. Empty means none is set (the cluster default runtime,
+	// normally runc).
+	RuntimeClassName string `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
+
+	// Origin is where the workload was defined, for a scan of manifests.
+	// Nil for a cluster scan.
+	Origin *Origin `json:"origin,omitempty" yaml:"origin,omitempty"`
 
 	// Compatibility is the verdict and the primary field operators look at.
 	Compatibility Compatibility `json:"compatibility" yaml:"compatibility"`
@@ -253,6 +332,13 @@ type PlanMetadata struct {
 	// `agentmoat.io/plan-hash` annotation. Re-applying an already-applied
 	// plan compares this against the annotation to short-circuit.
 	PlanHash string `json:"planHash" yaml:"planHash"`
+
+	// Source is copied from the scan report the plan was made from (only
+	// its Type). Nil means a cluster scan. A plan made from manifests is a
+	// preview: no cluster was read, so nothing says its workloads exist.
+	// apply, rollback, and verify refuse to load it. Source is not part of
+	// PlanHash.
+	Source *ReportSource `json:"source,omitempty" yaml:"source,omitempty"`
 }
 
 // PlanSpec is the payload of a MigrationPlan: the ordered batches of steps,

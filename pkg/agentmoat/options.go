@@ -88,6 +88,32 @@ type ScanOptions struct {
 	// clientset (pkg/applier/applier_test.go pattern). Production callers
 	// (CLI) leave this nil so the standard kubeconfig loader runs.
 	KubeClient kubernetes.Interface
+
+	// ManifestPaths, when non-empty, makes this a scan of manifests and
+	// not of a cluster. Each entry is a file, a directory (walked for
+	// *.yaml, *.yml, and *.json), or "-" for Stdin. The text can be YAML or
+	// JSON: files from a repository, or the output of `helm template`,
+	// `kustomize build`, or `kubectl get -o yaml`.
+	//
+	// In this mode Scan never builds a Kubernetes client and never reads a
+	// kubeconfig. KubeconfigPath, Context, KubeClient, IncludeSystem,
+	// AllNamespaces, and SkipClusterFacts have no effect. The other fields
+	// change meaning as little as they can:
+	//
+	//   - Namespaces: one value is the namespace for objects that name
+	//     none (as `kubectl apply -n`). It is not a filter. More than one
+	//     value is an error.
+	//   - LabelSelector: matched against each workload's own labels.
+	//   - RulesYAMLPath, RuntimeClassName: as for a cluster scan.
+	//   - FactsPath: as for a cluster scan (a saved report needs no
+	//     cluster). Without it there are no facts, so gpu-passthrough keeps
+	//     its base severity.
+	ManifestPaths []string
+
+	// Stdin is the reader for a "-" entry in ManifestPaths. Nil means
+	// standard input is not available, and "-" is then an error. The MCP
+	// server leaves it nil: its standard input is the JSON-RPC channel.
+	Stdin io.Reader
 }
 
 // PlanOptions configures pkg/agentmoat.Plan. The source of the plan is the

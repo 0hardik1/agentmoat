@@ -18,6 +18,7 @@ package agentmoat
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -38,45 +39,9 @@ func Plan(ctx context.Context, opts PlanOptions) (*schema.MigrationPlan, error) 
 		stderr = os.Stderr
 	}
 
-	report := opts.ScanReport
-	if report == nil && opts.ScanReportPath != "" {
-		r, err := loadScanReport(opts.ScanReportPath)
-		if err != nil {
-			return nil, fmt.Errorf("plan: loading scan report: %w", err)
-		}
-		report = r
-	}
-	if report != nil && opts.ScanOptions.FactsPath != "" {
-		// A stored scan plus fresher facts (typically a probe report):
-		// swap the facts block so the warnings below describe the
-		// cluster as it is now. Classification inside the stored report
-		// is left alone; re-scan with --facts to refine verdicts. Copy
-		// the envelope so the caller's report is not mutated.
-		facts, err := loadClusterFacts(opts.ScanOptions.FactsPath)
-		if err != nil {
-			return nil, fmt.Errorf("plan: loading --facts: %w", err)
-		}
-		r := *report
-		r.Metadata.ClusterFacts = facts
-		report = &r
-	}
-	if report == nil {
-		// Inline scan. We pass the caller-supplied scan options through;
-		// the caller can also pre-set opts.ScanOptions.Stderr to silence.
-		scanOpts := opts.ScanOptions
-		if scanOpts.Stderr == nil {
-			scanOpts.Stderr = stderr
-		}
-		// Collect facts for the RuntimeClass the plan will target, so the
-		// warnings below describe the right object.
-		if scanOpts.RuntimeClassName == "" {
-			scanOpts.RuntimeClassName = opts.Planner.RuntimeClassName
-		}
-		r, err := Scan(ctx, scanOpts)
-		if err != nil {
-			return nil, fmt.Errorf("plan: inline scan: %w", err)
-		}
-		report = r
+	report, err := planReport(ctx, opts, stderr)
+	if err != nil {
+		return nil, err
 	}
 
 	plan, err := planner.Plan(report, opts.Planner)
@@ -96,12 +61,75 @@ func Plan(ctx context.Context, opts PlanOptions) (*schema.MigrationPlan, error) 
 	// the scan ran. Apply re-checks the live cluster regardless.
 	plan.Spec.Warnings = planWarnings(report.Metadata.ClusterFacts, plan.Spec.Options.RuntimeClassName)
 
+	// A plan made from manifests is a preview. Mark it (loadPlan refuses a
+	// marked plan for apply, rollback, and verify) and say so in a warning,
+	// first in the list, because it is the one that changes what the
+	// reader can do with the file. Like every warning, and like Source, it
+	// is outside the plan hash.
+	if src := report.Metadata.Source; src != nil {
+		plan.Metadata.Source = &schema.ReportSource{Type: src.Type}
+		plan.Spec.Warnings = append([]schema.PlanWarning{{
+			ID:      WarningManifestSource,
+			Message: manifestPlanMessage,
+		}}, plan.Spec.Warnings...)
+	}
+
 	_, _ = fmt.Fprintf(stderr, "planned %d steps (%d workloads excluded)\n",
 		plan.Spec.Summary.Included,
 		plan.Spec.Summary.Excluded,
 	)
-	if n := len(plan.Spec.Warnings); n > 0 {
+	if plan.Metadata.Source != nil {
+		_, _ = fmt.Fprintf(stderr, "plan: %s\n", manifestPlanMessage)
+	} else if n := len(plan.Spec.Warnings); n > 0 {
 		_, _ = fmt.Fprintf(stderr, "plan: %d cluster warning(s); the cluster may not be able to host this plan yet (run 'agentmoat preflight')\n", n)
 	}
 	return plan, nil
+}
+
+// planReport resolves the ScanReport a plan is made from: opts.ScanReport,
+// else the file at opts.ScanReportPath, else an inline Scan. When
+// opts.ScanOptions.FactsPath is set and the report is a stored one, the
+// facts in it are replaced (on a copy).
+func planReport(ctx context.Context, opts PlanOptions, stderr io.Writer) (*schema.ScanReport, error) {
+	report := opts.ScanReport
+	if report == nil && opts.ScanReportPath != "" {
+		r, err := loadScanReport(opts.ScanReportPath)
+		if err != nil {
+			return nil, fmt.Errorf("plan: loading scan report: %w", err)
+		}
+		report = r
+	}
+	if report != nil && opts.ScanOptions.FactsPath != "" {
+		// A stored scan plus fresher facts (typically a probe report):
+		// swap the facts block so the warnings Plan derives describe the
+		// cluster as it is now. Classification inside the stored report
+		// is left alone; re-scan with --facts to refine verdicts. Copy
+		// the envelope so the caller's report is not mutated.
+		facts, err := loadClusterFacts(opts.ScanOptions.FactsPath)
+		if err != nil {
+			return nil, fmt.Errorf("plan: loading --facts: %w", err)
+		}
+		r := *report
+		r.Metadata.ClusterFacts = facts
+		report = &r
+	}
+	if report == nil {
+		// Inline scan. We pass the caller-supplied scan options through;
+		// the caller can also pre-set opts.ScanOptions.Stderr to silence.
+		scanOpts := opts.ScanOptions
+		if scanOpts.Stderr == nil {
+			scanOpts.Stderr = stderr
+		}
+		// Collect facts for the RuntimeClass the plan will target, so the
+		// warnings Plan derives describe the right object.
+		if scanOpts.RuntimeClassName == "" {
+			scanOpts.RuntimeClassName = opts.Planner.RuntimeClassName
+		}
+		r, err := Scan(ctx, scanOpts)
+		if err != nil {
+			return nil, fmt.Errorf("plan: inline scan: %w", err)
+		}
+		report = r
+	}
+	return report, nil
 }

@@ -69,6 +69,22 @@ make build                                            # produces ./bin/agentmoat
 `apply` and `rollback` are idempotent: re-running an applied plan reports every
 step as `already-applied` and exits 0.
 
+Against manifests, with no cluster and no kubeconfig:
+
+```bash
+./bin/agentmoat scan -f ./k8s                               # a file or a directory
+helm template ./chart | ./bin/agentmoat scan -f -           # rendered Helm output
+kustomize build ./overlays/prod | ./bin/agentmoat scan -f - # rendered Kustomize output
+./bin/agentmoat scan -f ./k8s --fail-on sandboxed           # the gate for a pull-request check
+```
+
+`scan -f` reads the six workload kinds and any other kind with a pod template
+(an Argo `Rollout`). It lists what it did not classify. It reads each object as
+written: render Helm templates and Kustomize overlays first, as above.
+`--fail-on sandboxed` exits 2 only when a workload that asks for the gVisor
+RuntimeClass is incompatible, so a CNI DaemonSet that will never move does not
+fail the check. See [`docs/exit-codes.md`](docs/exit-codes.md).
+
 ## What it does
 
 ```
@@ -336,7 +352,7 @@ make kind-down
 
 | Command              | Purpose                                                       |
 | -------------------- | ------------------------------------------------------------- |
-| `agentmoat scan`     | Enumerate workloads and classify gVisor compatibility. RO.    |
+| `agentmoat scan`     | Classify workloads for gVisor compatibility: a cluster, or manifests with `-f` (no cluster). RO. |
 | `agentmoat preflight`| Check that the RuntimeClass steers pods onto a Ready `runsc` node. RO. Exit 5 when not. |
 | `agentmoat probe nvproxy` | Read the nvproxy supported-driver list from `runsc` on a gVisor node via a one-shot pod. Default dry-run. |
 | `agentmoat plan`     | Produce a deterministic `MigrationPlan` from a scan. RO.      |
@@ -353,7 +369,7 @@ make kind-down
 | `--output / -o`            | `table`          | `table`, `json`, or `yaml`. `json`/`yaml` follow `agentmoat.io/v1alpha1`.|
 | `--kubeconfig`             | `$KUBECONFIG`    | Path to kubeconfig.                                                      |
 | `--context`                | current-context  | kubeconfig context to use.                                               |
-| `--namespace / -n`         | (all)            | Repeatable. Default: scan every namespace.                               |
+| `--namespace / -n`         | (all)            | Repeatable. Default: scan every namespace. With `scan -f`: one value, the namespace for objects that name none (not a filter). |
 | `--all-namespaces / -A`    | true if `-n` unset | Explicit all-namespaces flag.                                          |
 | `--selector / -l`          | (none)           | Kubernetes label selector applied to every list call.                    |
 | `--include-system`         | `false`          | Include `kube-system` and other `kube-*` namespaces.                     |
@@ -367,7 +383,9 @@ make kind-down
 | `--include-review`         | `plan`       | `false`     | Also include `review`-class workloads in the plan.                      |
 | `--runtime-class`          | `plan`       | `gvisor`    | RuntimeClass name to patch onto migrated workloads.                     |
 | `--add-toleration`         | `plan`       | `false`     | Also patch the `runtime=gvisor:NoSchedule` toleration into each pod template. Changes the plan hash. |
-| `--runtime-class`          | scan/preflight | `gvisor`  | RuntimeClass to inspect for cluster facts / the preflight.              |
+| `--filename / -f`          | `scan`       | (cluster)   | Scan manifests and no cluster: a file, a directory, or `-` for stdin. Repeatable. |
+| `--fail-on`                | `scan`       | `incompatible` | When to exit 2: `incompatible`, `sandboxed` (only workloads that ask for the gVisor RuntimeClass), or `none`. |
+| `--runtime-class`          | scan/preflight | `gvisor`  | RuntimeClass to inspect for cluster facts / the preflight. For `scan`, also the class that `--fail-on sandboxed` looks for. |
 | `--no-cluster-facts`       | `scan`       | `false`     | Skip the node and RuntimeClass reads; omit `metadata.clusterFacts`.     |
 | `--facts`                  | scan/plan/explain | (live)   | Load cluster facts from a saved `PreflightReport` (`probe nvproxy` output) or `ScanReport` instead of reading the cluster. |
 | `--dry-run`                | `probe nvproxy` | `true`   | Describe the probe pod without creating it.                             |
@@ -384,7 +402,7 @@ make kind-down
 
 | Format | Use case                                                                           |
 | ------ | ---------------------------------------------------------------------------------- |
-| `table`| Default human-readable view; per-workload row with verdict and top reason.         |
+| `table`| Default human-readable view; per-workload row with runtime class, verdict, and top reasons. |
 | `json` | Versioned, stable schema (`agentmoat.io/v1alpha1`). Pipe into `jq` or store as evidence. |
 | `yaml` | Byte-identical to JSON after canonicalisation; convenient for review/diff.         |
 

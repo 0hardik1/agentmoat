@@ -426,3 +426,131 @@ func TestEvidenceOmitempty(t *testing.T) {
 		t.Errorf("expected yaml output to include hostPaths, got: %s", ys)
 	}
 }
+
+// TestScanReportManifestSourceRoundTrip covers the fields a scan of manifest
+// files adds to the ScanReport: the source block, the per-workload runtime
+// class and origin, and the sandboxed count. JSON and YAML must both carry
+// them.
+func TestScanReportManifestSourceRoundTrip(t *testing.T) {
+	t.Parallel()
+	r := NewScanReport()
+	r.Metadata = ReportMetadata{
+		GeneratedAt:      "2026-11-22T12:00:00Z",
+		AgentmoatVersion: "test",
+		RuntimeClassName: "gvisor",
+		Source: &ReportSource{
+			Type:       SourceManifests,
+			Inputs:     3,
+			Skipped:    map[string]int{"Service": 2, "Ingress.networking.k8s.io": 1},
+			Duplicates: []string{"Deployment shop/web is defined 2 times (a.yaml:1, b.yaml:1)"},
+			Unrendered: []string{"kustomization file: k8s/kustomization.yaml"},
+		},
+	}
+	r.Spec = ReportSpec{
+		Summary: Summary{Total: 2, Compatible: 1, Incompatible: 1, Sandboxed: 1},
+		Workloads: []WorkloadResult{
+			{
+				Kind: "Deployment", Namespace: "shop", Name: "web",
+				Compatibility:    CompatibilityCompatible,
+				RuntimeClassName: "gvisor",
+				Origin:           &Origin{File: "k8s/web.yaml", Line: 12},
+			},
+			{
+				Kind: "Rollout.argoproj.io", Namespace: "", Name: "canary",
+				Compatibility: CompatibilityIncompatible,
+				Origin:        &Origin{File: "chart/templates/rollout.yaml"},
+			},
+		},
+	}
+
+	jsonBytes, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var fromJSON ScanReport
+	if err := json.Unmarshal(jsonBytes, &fromJSON); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromJSON) {
+		t.Errorf("json round-trip mismatch:\nwant: %#v\ngot:  %#v", *r, fromJSON)
+	}
+
+	yamlBytes, err := yaml.Marshal(r)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	var fromYAML ScanReport
+	if err := yaml.Unmarshal(yamlBytes, &fromYAML); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromYAML) {
+		t.Errorf("yaml round-trip mismatch:\nwant: %#v\ngot:  %#v", *r, fromYAML)
+	}
+
+	// The wire names are a public surface. Pin them.
+	for _, key := range []string{
+		`"runtimeClassName":"gvisor"`, `"source":{"type":"manifests"`, `"inputs":3`, `"skipped":{`,
+		`"duplicates":[`, `"unrendered":[`, `"sandboxed":1`, `"origin":{"file":"k8s/web.yaml","line":12}`,
+		// A Helm source path has no line.
+		`"origin":{"file":"chart/templates/rollout.yaml"}`,
+	} {
+		if !strings.Contains(string(jsonBytes), key) {
+			t.Errorf("JSON lacks %s:\n%s", key, jsonBytes)
+		}
+	}
+}
+
+// TestScanReportClusterSourceOmitsManifestFields: a cluster scan must not
+// grow a `source` or per-workload `origin` key. `sandboxed` is always there,
+// like the other counts.
+func TestScanReportClusterSourceOmitsManifestFields(t *testing.T) {
+	t.Parallel()
+	r := NewScanReport()
+	r.Metadata = ReportMetadata{GeneratedAt: "2026-11-22T12:00:00Z", Cluster: "kind-x", AgentmoatVersion: "test"}
+	r.Spec = ReportSpec{
+		Summary:   Summary{Total: 1, Compatible: 1},
+		Workloads: []WorkloadResult{{Kind: "Deployment", Namespace: "ns", Name: "web", Compatibility: CompatibilityCompatible}},
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, key := range []string{`"source"`, `"origin"`, `"runtimeClassName"`} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("a cluster report with none of these set has the key %s:\n%s", key, data)
+		}
+	}
+	if !strings.Contains(string(data), `"sandboxed":0`) {
+		t.Errorf("JSON lacks \"sandboxed\":0:\n%s", data)
+	}
+}
+
+// TestPlanMetadataSource: a plan carries the source type of its scan, and a
+// plan from a cluster scan has no `source` key.
+func TestPlanMetadataSource(t *testing.T) {
+	t.Parallel()
+	p := NewMigrationPlan()
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(data), `"source"`) {
+		t.Errorf("a plan with no source has the key:\n%s", data)
+	}
+
+	p.Metadata.Source = &ReportSource{Type: SourceManifests}
+	data, err = json.Marshal(p)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var back MigrationPlan
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if back.Metadata.Source == nil || back.Metadata.Source.Type != SourceManifests {
+		t.Errorf("source did not survive the round trip: %s", data)
+	}
+	if !strings.Contains(string(data), `"source":{"type":"manifests"}`) {
+		t.Errorf("JSON lacks the source block:\n%s", data)
+	}
+}

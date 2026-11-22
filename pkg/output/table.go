@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -63,16 +64,8 @@ func renderScanReportTable(report *schema.ScanReport, w io.Writer, useColor bool
 		return err
 	}
 
-	// Subtitle: cluster + namespaces chips when present. Both are
-	// optional; we skip the line entirely if no chips have content.
-	chips := []string{}
-	if c := report.Metadata.Cluster; c != "" {
-		chips = append(chips, "cluster: "+c)
-	}
-	if total := sum.Total; total > 0 {
-		chips = append(chips, fmt.Sprintf("scanned: %d", total))
-	}
-	if len(chips) > 0 {
+	// Subtitle chips. We skip the line entirely if no chips have content.
+	if chips := scanChips(report); len(chips) > 0 {
 		if _, err := fmt.Fprintln(w, s.Muted.Render(strings.Join(chips, "   "))); err != nil {
 			return err
 		}
@@ -98,13 +91,21 @@ func renderScanReportTable(report *schema.ScanReport, w io.Writer, useColor bool
 	}
 
 	if len(report.Spec.Workloads) == 0 {
-		_, err := fmt.Fprintln(w, s.Muted.Render("(no workloads found)"))
-		return err
+		if _, err := fmt.Fprintln(w, s.Muted.Render("(no workloads found)")); err != nil {
+			return err
+		}
+		return renderScanSource(s, report.Metadata.Source, w)
 	}
 
-	// Body table. Columns: NAMESPACE, KIND, NAME, VERDICT, REASONS.
+	// Body table. Columns: NAMESPACE, KIND, NAME, RUNTIME, VERDICT, REASONS.
 	// VERDICT is a pre-baked StatusBadge so column widths stay correct
 	// (lipgloss/table measures display width, ANSI-aware).
+	//
+	// RUNTIME is the runtimeClassName the pod spec asks for today ("-" for
+	// none). It is what tells a workload that is already in the sandbox
+	// from a candidate, and it sits next to VERDICT because the pair is
+	// the thing to read: "gvisor" beside "incompatible" is a workload that
+	// is about to break, or already has.
 	//
 	// The per-workload Recommendation field is deliberately omitted from
 	// the table. For "compatible" rows it is a canned line that repeats on
@@ -112,13 +113,14 @@ func renderScanReportTable(report *schema.ScanReport, w io.Writer, useColor bool
 	// width on large clusters; for review/incompatible rows the actionable
 	// signal is in REASONS. Recommendation is still emitted in the JSON
 	// and YAML payloads, the muted footer below points operators there.
-	headers := []string{"NAMESPACE", "KIND", "NAME", "VERDICT", "REASONS"}
+	headers := []string{"NAMESPACE", "KIND", "NAME", "RUNTIME", "VERDICT", "REASONS"}
 	t := newBaseTable(s, headers, nil /* numericCols: none here */)
 	for _, wl := range report.Spec.Workloads {
 		t.Row(
-			wl.Namespace,
+			displayNamespace(wl.Namespace),
 			wl.Kind,
 			truncateCell(wl.Name, maxNameWidth),
+			displayRuntime(wl.RuntimeClassName),
 			StatusBadge(s, string(wl.Compatibility)),
 			summarizeReasons(wl.Reasons),
 		)
@@ -126,8 +128,104 @@ func renderScanReportTable(report *schema.ScanReport, w io.Writer, useColor bool
 	if _, err := fmt.Fprintln(w, t.Render()); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintln(w, s.Muted.Render("(use --output json for full per-workload recommendations and reason details)"))
-	return err
+	if _, err := fmt.Fprintln(w, s.Muted.Render("(use --output json for full per-workload recommendations and reason details)")); err != nil {
+		return err
+	}
+	return renderScanSource(s, report.Metadata.Source, w)
+}
+
+// scanChips builds the subtitle of the scan table: where the workloads came
+// from (a cluster, or manifests), how many there are, and how many already
+// ask for the sandbox. Every chip is optional.
+func scanChips(report *schema.ScanReport) []string {
+	sum := report.Spec.Summary
+	chips := []string{}
+	if c := report.Metadata.Cluster; c != "" {
+		chips = append(chips, "cluster: "+c)
+	}
+	if src := report.Metadata.Source; src != nil {
+		chips = append(chips, fmt.Sprintf("source: %s (%d input(s), no cluster)", src.Type, src.Inputs))
+	}
+	if total := sum.Total; total > 0 {
+		chips = append(chips, fmt.Sprintf("scanned: %d", total))
+	}
+	if sum.Sandboxed > 0 {
+		chips = append(chips, fmt.Sprintf("sandboxed (%s): %d", displayRuntime(report.Metadata.RuntimeClassName), sum.Sandboxed))
+	}
+	return chips
+}
+
+// renderScanSource writes what a scan of manifests has to say beyond its
+// rows: what it read and did not classify, what is defined twice, and
+// whether the input is the rendered form of the objects. Nil (a cluster
+// scan) writes nothing.
+//
+// These lines are in the table, and not only on stderr, because the table
+// must be honest when it is read alone: with --quiet, or pasted into a
+// ticket. "0 incompatible" means little without "and 40 objects were not
+// workloads".
+func renderScanSource(s *Styles, src *schema.ReportSource, w io.Writer) error {
+	if src == nil {
+		return nil
+	}
+	if len(src.Skipped) > 0 {
+		line := "not classified (no pod template): " + formatCounts(src.Skipped)
+		if _, err := fmt.Fprintln(w, s.Muted.Render(line)); err != nil {
+			return err
+		}
+	}
+	for _, d := range src.Duplicates {
+		if _, err := fmt.Fprintf(w, "%s %s\n", s.Warn.Render(symbolWarn), d); err != nil {
+			return err
+		}
+	}
+	if len(src.Unrendered) > 0 {
+		head := fmt.Sprintf("%s not rendered: the verdicts describe the files, not what gets deployed (overlays are not applied)", symbolWarn)
+		if _, err := fmt.Fprintln(w, s.Warn.Render(head)); err != nil {
+			return err
+		}
+		for _, sign := range src.Unrendered {
+			if _, err := fmt.Fprintf(w, "    %s\n", sign); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintln(w, s.Muted.Render("    scan the rendered objects: kustomize build <dir> | agentmoat scan -f -")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// displayNamespace renders a namespace cell. A manifest that names no
+// namespace has none; "-" says so better than a blank cell.
+func displayNamespace(ns string) string {
+	if ns == "" {
+		return "-"
+	}
+	return ns
+}
+
+// displayRuntime renders a runtimeClassName cell, with "-" for none.
+func displayRuntime(runtimeClass string) string {
+	if runtimeClass == "" {
+		return "-"
+	}
+	return runtimeClass
+}
+
+// formatCounts renders a count map as "2 ConfigMap, 1 Service", sorted by
+// key so the line is the same on every run.
+func formatCounts(counts map[string]int) string {
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[k], k))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // renderMigrationPlanTable is the MigrationPlan-specific view: ordered

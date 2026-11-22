@@ -45,14 +45,22 @@ var Version = "dev"
 //
 // Steps 1, 3, and 4 are the "source": where the workloads and the facts
 // come from. Steps 2 and 5 do not know or care. That split is deliberate:
-// a second source (manifest files, with no cluster) can feed the same
-// buildReport and get the same verdicts.
+// a second source feeds the same buildReport and gets the same verdicts.
+//
+// The second source is manifest files. When opts.ManifestPaths is set, Scan
+// reads those and nothing else (scan_manifests.go): it builds no Kubernetes
+// client, reads no kubeconfig, and makes no network call. The check comes
+// first in this function so that no line of the cluster path can run.
 //
 // The caller is responsible for rendering the report (CLI uses pkg/output).
 func Scan(ctx context.Context, opts ScanOptions) (*schema.ScanReport, error) {
 	stderr := opts.Stderr
 	if stderr == nil {
 		stderr = os.Stderr
+	}
+
+	if len(opts.ManifestPaths) > 0 {
+		return scanManifests(opts, stderr)
 	}
 
 	// 1. Build the Kubernetes client. We pass --kubeconfig / --context
@@ -102,10 +110,11 @@ func Scan(ctx context.Context, opts ScanOptions) (*schema.ScanReport, error) {
 
 	// 5. Classify and assemble.
 	report := buildReport(scanInput{
-		Workloads:  workloads,
-		Facts:      facts,
-		Cluster:    kube.CurrentContext(opts.KubeconfigPath, opts.Context),
-		Namespaces: enumOpts.Namespaces, // nil when the scan was cluster-wide
+		Workloads:        workloads,
+		Facts:            facts,
+		Cluster:          kube.CurrentContext(opts.KubeconfigPath, opts.Context),
+		Namespaces:       enumOpts.Namespaces, // nil when the scan was cluster-wide
+		RuntimeClassName: opts.RuntimeClassName,
 	}, registry)
 
 	_, _ = fmt.Fprintf(stderr, "scanned %d workloads (compatible: %d, review: %d, incompatible: %d)\n",
@@ -138,12 +147,25 @@ type scanInput struct {
 	// Namespaces is the namespace filter that was applied, for
 	// ReportMetadata.Namespaces. Nil means cluster-wide.
 	Namespaces []string
+
+	// RuntimeClassName is the RuntimeClass the scan treats as the sandbox.
+	// Empty means schema.DefaultRuntimeClassName.
+	RuntimeClassName string
+
+	// Origins, when non-nil, is parallel to Workloads: Origins[i] is where
+	// Workloads[i] was defined. Nil for a cluster scan.
+	Origins []scanner.ManifestOrigin
+
+	// Source goes to ReportMetadata.Source. Nil for a cluster scan.
+	Source *schema.ReportSource
 }
 
 // buildReport classifies every workload in the input and assembles the
 // ScanReport. It is the half of a scan that is the same for every workload
 // source.
 func buildReport(in scanInput, registry *classifier.Registry) *schema.ScanReport {
+	runtimeClass := sandboxClassName(in.RuntimeClassName)
+
 	report := schema.NewScanReport()
 	report.Metadata = schema.ReportMetadata{
 		GeneratedAt:      time.Now().UTC().Format(time.RFC3339),
@@ -151,11 +173,19 @@ func buildReport(in scanInput, registry *classifier.Registry) *schema.ScanReport
 		Namespaces:       in.Namespaces,
 		AgentmoatVersion: Version,
 		ClusterFacts:     in.Facts,
+		RuntimeClassName: runtimeClass,
+		Source:           in.Source,
 	}
 
 	results := make([]schema.WorkloadResult, 0, len(in.Workloads))
-	for _, w := range in.Workloads {
-		results = append(results, workloadResult(w, classifier.ClassifyWithFacts(w, registry, in.Facts)))
+	for i, w := range in.Workloads {
+		result := workloadResult(w, classifier.ClassifyWithFacts(w, registry, in.Facts))
+		// Attach the origin here, by index, before the sort below moves
+		// the results: Origins is parallel to Workloads, not to results.
+		if in.Origins != nil {
+			result.Origin = originOf(in.Origins[i])
+		}
+		results = append(results, result)
 	}
 
 	// Defensive: keep results sorted even if the source's order changes in
@@ -171,17 +201,28 @@ func buildReport(in scanInput, registry *classifier.Registry) *schema.ScanReport
 	})
 
 	report.Spec = schema.ReportSpec{
-		Summary:   summarize(results),
+		Summary:   summarize(results, runtimeClass),
 		Workloads: results,
 	}
 	return report
+}
+
+// sandboxClassName resolves the RuntimeClass a scan treats as the sandbox:
+// the given name, or the default when it is empty. Everything that asks "is
+// this workload sandboxed?" (the summary count here, the gate in gate.go)
+// goes through this one function, so the two cannot disagree.
+func sandboxClassName(name string) string {
+	if name == "" {
+		return schema.DefaultRuntimeClassName
+	}
+	return name
 }
 
 // workloadResult projects a scanner.Workload and its verdict onto the wire
 // type. Scan and AssessWorkload both call it, so a single-workload verdict
 // and the cluster-wide one for the same object have the same shape.
 func workloadResult(w scanner.Workload, v classifier.Verdict) schema.WorkloadResult {
-	return schema.WorkloadResult{
+	result := schema.WorkloadResult{
 		Kind:           w.Kind,
 		Namespace:      w.Namespace,
 		Name:           w.Name,
@@ -190,13 +231,24 @@ func workloadResult(w scanner.Workload, v classifier.Verdict) schema.WorkloadRes
 		Recommendation: v.Recommendation,
 		Overhead:       v.Overhead,
 	}
+	// The runtime class the pod spec asks for today. No rule reads it (a
+	// rule says whether a workload CAN run under gVisor, not whether it
+	// does), but the report needs it to tell "already sandboxed" from "a
+	// candidate".
+	if rc := w.PodSpec.RuntimeClassName; rc != nil {
+		result.RuntimeClassName = *rc
+	}
+	return result
 }
 
-// summarize counts each compatibility bucket. Kept as a small helper so
-// the Scan() body stays readable.
-func summarize(results []schema.WorkloadResult) schema.Summary {
+// summarize counts each compatibility bucket, and the workloads that ask
+// for runtimeClass (already resolved by sandboxClassName).
+func summarize(results []schema.WorkloadResult, runtimeClass string) schema.Summary {
 	s := schema.Summary{Total: len(results)}
 	for _, r := range results {
+		if r.RuntimeClassName == runtimeClass {
+			s.Sandboxed++
+		}
 		switch r.Compatibility {
 		case schema.CompatibilityCompatible:
 			s.Compatible++

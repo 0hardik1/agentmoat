@@ -1,0 +1,23 @@
+# agentmoat: expected verdict = incompatible (host-network), sandboxed.
+# This workload asks for the gVisor RuntimeClass and cannot run in it.
+# `scan --fail-on sandboxed` must exit 2 for this file.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      runtimeClassName: gvisor
+      hostNetwork: true
+      containers:
+        - name: gateway
+          image: example.test/gateway:1.0

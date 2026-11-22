@@ -20,6 +20,16 @@ import (
 // stored facts say nothing about this plan.
 const WarningClusterFactsRuntimeClassMismatch = "cluster-facts-runtime-class-mismatch"
 
+// WarningManifestSource is emitted when the plan was made from a scan of
+// manifests and not of a cluster.
+const WarningManifestSource = "manifest-source"
+
+// manifestPlanMessage is the text of that warning. It is also what loadPlan
+// builds its refusal from, so the two say the same thing.
+const manifestPlanMessage = "this plan was made from a scan of manifests, not of a cluster, so it is a preview: " +
+	"it shows which workloads would move and in what order, but no cluster was read to make it. " +
+	"apply, rollback, and verify refuse it. For a plan they accept, run 'agentmoat plan' against the cluster"
+
 // planWarnings derives plan warnings from facts. Nil facts (scan ran with
 // --no-cluster-facts, or RBAC denied the reads) yields nil: absence of
 // evidence is not a warning, and apply re-checks the live cluster anyway.

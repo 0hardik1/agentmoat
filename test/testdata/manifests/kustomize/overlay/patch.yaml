@@ -1,0 +1,16 @@
+# A strategic-merge patch: it names the Deployment and carries only the
+# field it changes. It puts the base in the gVisor sandbox.
+#
+# What gets deployed is a sandboxed Deployment with host networking, which
+# is incompatible. No single file here says so. Read as a complete object,
+# this patch is a Deployment with no containers: nothing for a rule to
+# object to. That is why a file scan never reports such an object as a
+# workload, and why `scan --fail-on sandboxed` refuses this directory.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  template:
+    spec:
+      runtimeClassName: gvisor

@@ -35,7 +35,7 @@ byte-identical: same Go struct, same `json:` tags, same APIVersion
 
 | Tool                | Orchestrator                  | Mutating | Notes                                                                |
 |---------------------|-------------------------------|----------|----------------------------------------------------------------------|
-| `scan_cluster`      | `agentmoat.Scan`              | no       | Returns a `ScanReport` (with `metadata.clusterFacts`; `no_cluster_facts` skips them, `facts_path` loads them from a saved report). |
+| `scan_cluster`      | `agentmoat.Scan`              | no       | Returns a `ScanReport` (with `metadata.clusterFacts`; `no_cluster_facts` skips them, `facts_path` loads them from a saved report). With `manifest_paths` it reads manifest files or directories and contacts no cluster (the `scan -f` form): use it to check a repository. Standard input is not available; pass rendered output as a file. |
 | `preflight_cluster` | `agentmoat.Preflight`         | no       | Returns a `PreflightReport`. `spec.summary.ready=false` means `apply_plan` will refuse to run. |
 | `probe_nvproxy`     | `agentmoat.Probe`             | YES      | Creates and deletes one pod on a gVisor node to read the `runsc` nvproxy driver list (a second pod when that `runsc` needs its sidecar binaries). Defaults to dry-run; `"dry_run": false` runs it. Returns a `PreflightReport` with `spec.facts.gpu.nvproxy`. |
 | `assess_workload`   | `agentmoat.AssessWorkload`    | no       | Returns a `WorkloadResult` for one named workload. Accepts `facts_path`. |

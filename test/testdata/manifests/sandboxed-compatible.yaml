@@ -1,0 +1,34 @@
+# agentmoat: expected verdict = compatible, sandboxed.
+# This workload asks for the gVisor RuntimeClass and can run in it.
+# `scan --fail-on sandboxed` must exit 0 for this file.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-runner
+  namespace: agents
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-runner
+  template:
+    metadata:
+      labels:
+        app: agent-runner
+    spec:
+      runtimeClassName: gvisor
+      containers:
+        - name: runner
+          image: example.test/agent-runner:1.0
+---
+# Not a workload. The scan counts it as "not classified".
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-runner
+  namespace: agents
+spec:
+  selector:
+    app: agent-runner
+  ports:
+    - port: 8080

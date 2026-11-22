@@ -1,9 +1,14 @@
-// scan_cluster tool: read-only enumeration + classification of cluster workloads.
+// scan_cluster tool: read-only classification of workloads, from a cluster
+// or (with manifest_paths) from manifest files and no cluster.
 //
 // One-to-one mapping with agentmoat.Scan. The input schema mirrors
 // ScanOptions field-by-field, with snake_case names so they read naturally
 // in JSON-RPC. The result is the *schema.ScanReport serialized as JSON in
 // the tool result body.
+//
+// The tool keeps its name for both sources. A second tool for files would
+// be a second code path to keep in step; one tool with one more input is
+// the same function the CLI calls for `scan` and `scan -f`.
 package main
 
 import (
@@ -17,7 +22,11 @@ import (
 
 func registerScanCluster(srv *server.MCPServer, deps Deps) {
 	tool := mcp.NewTool("scan_cluster",
-		mcp.WithDescription("Enumerate Kubernetes workloads and classify each for gVisor compatibility. Returns a versioned ScanReport (apiVersion: agentmoat.io/v1alpha1, kind: ScanReport)."),
+		mcp.WithDescription("Classify Kubernetes workloads for gVisor compatibility. Reads a cluster by default. With manifest_paths it reads manifest files instead and contacts no cluster, which is the way to check a repository or a pull request. Returns a versioned ScanReport (apiVersion: agentmoat.io/v1alpha1, kind: ScanReport); each workload carries its runtimeClassName, and for manifests its origin (file and line)."),
+		mcp.WithArray("manifest_paths",
+			mcp.Description("Manifest files or directories to scan instead of a cluster (YAML or JSON; a directory is searched for *.yaml, *.yml, *.json). When set, no cluster is contacted and kubeconfig_path, context, include_system, and no_cluster_facts have no effect. 'namespaces' then takes at most one value: the namespace for objects that name none. Each file is read as written: Helm templates must be rendered first, and Kustomize overlays are not applied (the report lists such input under metadata.source.unrendered). Standard input is not available to this tool; write rendered output to a file and pass its path."),
+			mcp.WithStringItems(),
+		),
 		mcp.WithString("kubeconfig_path",
 			mcp.Description("Path to a kubeconfig file. Empty uses the standard search path (KUBECONFIG env, then ~/.kube/config) and falls back to in-cluster.")),
 		mcp.WithString("context",
@@ -60,6 +69,11 @@ func registerScanCluster(srv *server.MCPServer, deps Deps) {
 			FactsPath:        req.GetString("facts_path", ""),
 			Stderr:           deps.Stderr,
 			KubeClient:       deps.KubeClient,
+			// With manifest paths, Scan reads the files and ignores every
+			// cluster field above, the injected client included. Stdin
+			// stays nil: this process's standard input is the JSON-RPC
+			// channel, so a "-" path is an error and not a hang.
+			ManifestPaths: req.GetStringSlice("manifest_paths", nil),
 		}
 		report, err := agentmoat.Scan(ctx, opts)
 		if err != nil {

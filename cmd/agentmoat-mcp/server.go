@@ -22,6 +22,7 @@ import (
 const serverInstructions = `agentmoat-mcp moves Kubernetes workloads from runc to gVisor (runsc).
 Read-only tools: scan_cluster, preflight_cluster, assess_workload, propose_plan, verify_migration, explain.
 Mutating tools: apply_plan, rollback_plan, probe_nvproxy (default dry_run=true; must set "dry_run": false to mutate).
+To check the manifests in a repository with no cluster, call scan_cluster with manifest_paths (files or directories): it reads the files and contacts no cluster. A plan made from that report is a preview; apply_plan, rollback_plan, and verify_migration refuse it.
 Call preflight_cluster before apply_plan: apply refuses to run (every step skipped) when the cluster has no Ready node that can host the RuntimeClass.
 For GPU or systemd workloads, run probe_nvproxy (dry_run=false, creates and deletes one pod at a time), save its JSON, and pass the path as facts_path to scan_cluster: the gpu-passthrough verdict is then settled from the real card and driver list, and systemd-init is checked against the installed runsc release.
 Resources: agentmoat://compatibility-rules, agentmoat://known-gotchas.
