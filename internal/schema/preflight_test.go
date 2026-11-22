@@ -211,6 +211,53 @@ func TestRunscFactsRoundTripAndOmitEmpty(t *testing.T) {
 	}
 }
 
+func TestSandboxFactsRoundTripAndOmitEmpty(t *testing.T) {
+	// A cluster with no sandboxed pod (or facts from before this field
+	// existed) serializes exactly as before: no "sandbox" key.
+	plain, _ := json.Marshal(ClusterFacts{})
+	if strings.Contains(string(plain), `"sandbox"`) {
+		t.Fatalf("ClusterFacts without sandboxed pods must omit sandbox: %s", plain)
+	}
+
+	in := ClusterFacts{Sandbox: &SandboxFacts{Checked: true, Nodes: []SandboxNode{{
+		Name: "ns-1", RuntimeClasses: []string{"isolated-sandbox"}, SandboxedPods: 2,
+		SandboxedPodsWithAWSCredentials: []string{"agents/a"}, RuncWorkloadPods: []string{"web/frontend"}, RuncDaemonSetPods: 3,
+	}}}}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"sandbox":{`, `"checked":true`, `"runtimeClasses":["isolated-sandbox"]`,
+		`"sandboxedPods":2`, `"sandboxedPodsWithAWSCredentials":["agents/a"]`, `"runcWorkloadPods":["web/frontend"]`, `"runcDaemonSetPods":3`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("serialized sandbox facts missing %s: %s", key, data)
+		}
+	}
+	var out ClusterFacts
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(in, out) {
+		t.Fatalf("round trip mismatch:\n in %+v\nout %+v", in, out)
+	}
+
+	// Unchecked keeps the reason and omits the empty node list.
+	data, _ = json.Marshal(SandboxFacts{Checked: false, Reason: "forbidden"})
+	if string(data) != `{"checked":false,"reason":"forbidden"}` {
+		t.Fatalf("unchecked sandbox facts = %s", data)
+	}
+}
+
+func TestNitroSandboxConstants(t *testing.T) {
+	// These strings come from AWS (the EKS AL2023 pod-isolation AMI and the
+	// EKS Nitro Sandboxes RuntimeClasses); a typo would silently disable
+	// the check.
+	if NitroSandboxNodeLabel != "eks.amazonaws.com/nitro-sandbox" || NitroSandboxNodeLabelValue != "true" ||
+		NitroIsolatedSandboxRuntimeClass != "isolated-sandbox" || NitroConfidentialSandboxRuntimeClass != "confidential-sandbox" {
+		t.Fatal("Nitro Sandbox constants changed")
+	}
+}
+
 func TestProbeMetadataRoundTrip(t *testing.T) {
 	in := PreflightMetadata{RuntimeClassName: "gvisor", Probe: &ProbeMetadata{
 		DryRun: true, Namespace: "default", PodName: "agentmoat-nvproxy-probe", Node: "gv-1",

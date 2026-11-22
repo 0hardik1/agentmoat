@@ -94,7 +94,10 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   IDs (`Evaluate`, pure), and wraps both (`Run`). `apply` calls it as a gate
   and refuses to run on an error finding (exit 5); `scan` stores the facts
   and `plan` derives warnings from them. `gpu.go` adds the GPU inventory
-  from GPU Feature Discovery labels. See `docs/preflight.md`.
+  from GPU Feature Discovery labels. `sandbox.go` lists the pods on nodes
+  that run sandboxed pods (gVisor or EKS Nitro Sandboxes) and warns when
+  runc workloads share them; a failed pod list degrades to an info finding.
+  See `docs/preflight.md`.
 - `pkg/probe/`: the nvproxy probe. Creates one pod on a gVisor node that
   runs the host `runsc` (hostPath, read-only, non-root, under runc), parses
   `runsc --version` and `runsc nvproxy list-supported-drivers`, deletes the
