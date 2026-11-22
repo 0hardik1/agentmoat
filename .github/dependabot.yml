@@ -2,7 +2,7 @@
 # agentmoat: Dependabot configuration
 # ---------------------------------------------------------------------------
 #
-# Two ecosystems are watched, both weekly on Monday so bumps arrive in one
+# Three ecosystems are watched, all weekly on Monday so bumps arrive in one
 # batch rather than trickling in all week:
 #
 #   * github-actions: the `uses:` pins in .github/workflows/*.yml. Action
@@ -11,6 +11,11 @@
 #   * gomod: go.mod dependencies. The k8s.io/* and sigs.k8s.io/* modules are
 #     grouped because client-go, api, and apimachinery must move together;
 #     a PR that bumps only one of them does not compile.
+#   * docker: the base images in Dockerfile and Dockerfile.alpine (the
+#     release images on GHCR). A stale base image is a stale CA bundle and
+#     unpatched packages in an image that runs in other people's pipelines.
+#     kind/Dockerfile.gvisor-node is in a sub-directory and is not watched:
+#     its base is the kindest/node image, which `make kind-up` pins.
 #
 # Why the groups: one PR per dependency made the queue grow faster than it
 # was reviewed. Every Go PR touches go.mod and go.sum, so after one merged
@@ -66,3 +71,11 @@ updates:
         update-types:
           - "minor"
           - "patch"
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"

@@ -43,13 +43,19 @@ LDFLAGS := -X main.Version=$(VERSION) -X main.GitSHA=$(GIT_SHA)
 # release tarballs go elsewhere (goreleaser owns those paths).
 BIN_DIR := ./bin
 
+# GORELEASER_VERSION is the GoReleaser release that `make release-snapshot`
+# runs. The release workflow takes the newest v2 (`~> v2`); this pin only
+# makes the local check repeatable. Bump it when the workflow's GoReleaser
+# starts to reject or deprecate something this version accepts.
+GORELEASER_VERSION ?= v2.20.3
+
 # Default goal: print help. Newcomers running a bare `make` see usage, not a
 # 60-second test run.
 .DEFAULT_GOAL := help
 
 # Declare every target as phony. None of these targets produce a file at the
 # literal name of the target, so Make should always run the recipe.
-.PHONY: help build test lint tidy clean version check-gvisor-version check-gvisor-latest check-device-cgroup kind-build kind-up kind-down e2e scan mcp-smoke
+.PHONY: help build test lint tidy clean version release-snapshot check-gvisor-version check-gvisor-latest check-device-cgroup kind-build kind-up kind-down e2e scan mcp-smoke
 
 help: ## Print this help message (default target).
 	@# The awk pattern below scans this Makefile for lines of the form
@@ -105,6 +111,15 @@ clean: ## Remove build artifacts under ./bin.
 	@# Intentionally narrow: we only remove our own outputs, never the Go
 	@# build cache or module cache. Use `go clean -cache` if you need that.
 	rm -rf $(BIN_DIR)
+
+release-snapshot: ## Build every release artifact locally (archives, images); publishes nothing.
+	@# Runs the same .goreleaser.yaml the release workflow runs, in snapshot
+	@# mode: binaries for every platform, the archives, the checksums file,
+	@# the Homebrew and krew manifests, and the two container images (loaded
+	@# into the local Docker daemon as ghcr.io/0hardik1/agentmoat:*-<arch>).
+	@# Nothing is pushed or uploaded. Needs Docker with buildx. Output goes
+	@# to ./dist (git-ignored). `go run pkg@version` does not touch go.mod.
+	go run github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION) release --snapshot --clean
 
 version: ## Print the version string that build would embed.
 	@# Useful when reproducing a CI build locally, or when verifying that a

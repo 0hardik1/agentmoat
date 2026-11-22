@@ -33,6 +33,7 @@ invocation more than twice, prefer extending a target.
 | `make test`       | `go test -race -cover ./...`. Race detector is non-negotiable here (concurrent K8s + MCP code). |
 | `make lint`       | `golangci-lint run ./...` against [`.golangci.yml`](.golangci.yml). CI runs the same command. |
 | `make tidy`       | `go mod tidy`. Run after any import change. |
+| `make release-snapshot` | Runs GoReleaser in snapshot mode: every release archive, the Homebrew and krew manifests, and the two container images, built locally. Publishes nothing. Needs Docker. Run it after any change to `.goreleaser.yaml`, `Dockerfile`, or `Dockerfile.alpine`. |
 | `make check-gvisor-version` | Asserts the gVisor release pin agrees across packer/kind/scripts and that all release artifacts exist. CI runs it on every PR. |
 | `make check-gvisor-latest`  | Same, plus exit 2 when a newer gVisor release is published. The weekly `gvisor-drift.yml` workflow runs this and opens (or updates) a `gvisor-drift` issue when the pin is behind; the run fails only on a real error, and it does not open a PR. See `docs/gvisor-version.md`. |
 | `make check-device-cgroup` | Checks that every runsc sandbox on a node is confined to a device cgroup (gVisor 20261116.0 and newer): `/dev/null` opens, `/dev/kmsg` is refused. `NODE=<kind node>` runs it through `docker exec`; `make e2e` runs it on the kind worker. |
@@ -88,6 +89,11 @@ them green locally before pushing.
 - `internal/audit/`: `~/.agentmoat/audit.jsonl` append-only log.
 - `docs/`: public docs. Some are stubs marked as such.
 - `kind/`, `packer/`, `deploy/`, `scripts/`: cluster + AMI plumbing.
+- `Dockerfile`, `Dockerfile.alpine`, `.goreleaser.yaml`: the release. Each
+  tag publishes the archives and two images to `ghcr.io/0hardik1/agentmoat`:
+  the default one (distroless, no shell, non-root) and `-alpine` (has a
+  shell, for CI systems that run a script in the job image). The Dockerfiles
+  only copy prebuilt binaries; GoReleaser builds them.
 - `test/e2e/`: e2e harness invoked by `scripts/e2e.sh`.
 
 ## Architectural invariants (do not break)
