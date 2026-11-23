@@ -21,7 +21,7 @@
 # works with no extra package. There is no RUN line, so the arm64 image
 # builds on an amd64 runner without QEMU emulation.
 # ---------------------------------------------------------------------------
-FROM alpine:3.23
+FROM alpine:3.24
 
 ARG TARGETPLATFORM
 
