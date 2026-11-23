@@ -719,6 +719,15 @@ A Job from before the change keeps its pod template (the template of a Job
 cannot change). When the deploy did not replace such a Job, the Job in the
 cluster has no class, and the result is a `mismatch`.
 
+A Job that the cluster removes (a time to live, a hook) is not in the cluster
+at each run of the pipeline. Each run then uses the full wait time and exits
+`1`. Leave such a Job out of the input:
+
+- Plain manifests and Kustomize: `-l <selector>` limits verify to the
+  workloads of the files whose own labels match. With `-l 'app!=migrate'`, or
+  with a label of your own and `-l '!skip-verify'`, the Job is not looked at.
+- Helm: `helm template --no-hooks` keeps the hooks out of the output.
+
 A workload that is not checked has no result. The report lists it with the
 reason (`spec.notChecked`, and a block at the top of the table and of the
 Markdown report), and the exit code is `1` when no other workload failed.

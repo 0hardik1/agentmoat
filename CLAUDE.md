@@ -134,7 +134,8 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   list of what to check is a plan or `Options.Targets` (`verify -f`). A
   target of a kind with no reader has the selector of its manifest, and the
   verifier lists pods by it. A target with no verdict (that selector has no
-  pods) goes to `spec.notChecked` and never to the results.
+  pods, or a Job or a Pod from a manifest is not in the cluster) goes to
+  `spec.notChecked` and never to the results.
 - `pkg/output/`: the renderers. Table, JSON, and YAML for every document;
   Markdown (`markdown.go`, `markdown_pipeline.go`) for a CI job summary or a
   pull-request comment; SARIF (`sarif.go`) for `scan` only. `patch.go` has
