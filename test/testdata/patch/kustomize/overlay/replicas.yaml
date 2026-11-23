@@ -1,0 +1,8 @@
+# A strategic-merge patch: it names the Deployment and has only the field
+# that it changes. It is not a complete workload, so `patch` never edits it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 3

@@ -1,6 +1,14 @@
-// Package scanner enumerates Kubernetes workloads from a live cluster and
-// reduces each one to a canonical "Workload" value that the classifier can
-// consume without knowing anything about the K8s API.
+// Package scanner reads Kubernetes workloads and reduces each one to a
+// canonical "Workload" value that the classifier can consume without knowing
+// anything about the K8s API.
+//
+// There are two sources, and they give the same Workload for the same
+// object:
+//
+//   - a live cluster: Enumerate and GetByRef (scanner.go), through client-go;
+//   - manifest text with no cluster: FromManifests (manifests.go), fed by
+//     ReadManifestPaths (manifest_files.go) for files, directories, and
+//     standard input.
 //
 // Why a dedicated package
 //
@@ -14,8 +22,8 @@
 //     us cache them on disk and replay them deterministically in tests
 //     (determinism).
 //
-// This file declares the data shapes only. The actual cluster enumeration
-// lives in scanner.go.
+// This file declares the data shapes only. The cluster enumeration lives in
+// scanner.go and the manifest decoding in manifests.go.
 package scanner
 
 import (
@@ -32,8 +40,12 @@ import (
 // per Pod).
 type Workload struct {
 	// Kind is the K8s kind of the owning controller (or "Pod" for
-	// standalone pods). One of:
+	// standalone pods). From a cluster it is one of:
 	//   Pod | Deployment | StatefulSet | DaemonSet | Job | CronJob
+	//
+	// From manifests it can also be any other kind that carries a pod
+	// template, written as "Kind.group" so it cannot be mistaken for one
+	// of the six: "Rollout.argoproj.io", "ReplicaSet.apps".
 	Kind string
 
 	// Namespace and Name uniquely identify the workload within Kind.

@@ -9,6 +9,8 @@ package agentmoat
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -180,5 +182,50 @@ func TestRollback_NeverRunsPreflight(t *testing.T) {
 		if a.GetResource().Resource == "runtimeclasses" || a.GetResource().Resource == "nodes" {
 			t.Fatalf("rollback read %s; it must not run the preflight", a.GetResource().Resource)
 		}
+	}
+}
+
+// TestApplyAndRollback_RefuseAPlanWithNoHash: the applier records a plan on
+// the cluster by its hash, so a plan file with no metadata.planHash cannot
+// be applied or rolled back (dry-run too). The loader lets such a file
+// through for verify, which only reads the steps; Apply and Rollback refuse
+// it directly after the load. The fake client proves that the answer needs
+// no cluster: it must see no call, not the preflight and not a read of the
+// namespace.
+func TestApplyAndRollback_RefuseAPlanWithNoHash(t *testing.T) {
+	// #nosec G304 -- the path is a t.TempDir() join from writeTestPlan.
+	data, err := os.ReadFile(writeTestPlan(t))
+	if err != nil {
+		t.Fatalf("read plan: %v", err)
+	}
+	if !strings.Contains(string(data), "planHash:") {
+		t.Fatalf("the fixture has no planHash line to remove:\n%s", data)
+	}
+	path := filepath.Join(t.TempDir(), "nohash.yaml")
+	noHash := strings.ReplaceAll(string(data), "planHash:", "somethingElse:")
+	// #nosec G703 -- path is a t.TempDir() join; not attacker-controlled.
+	if err := os.WriteFile(path, []byte(noHash), 0o600); err != nil {
+		t.Fatalf("write plan: %v", err)
+	}
+
+	for _, dryRun := range []bool{true, false} {
+		client := fake.NewSimpleClientset(append(applyWorkload(), gvisorReady()...)...)
+
+		_, err := Apply(context.Background(), ApplyOptions{PlanPath: path, KubeClient: client, DryRun: dryRun, Stderr: io.Discard})
+		if err == nil || !strings.Contains(err.Error(), "planHash") {
+			t.Errorf("Apply (dry-run=%v): got %v, want an error that names planHash", dryRun, err)
+		}
+		_, err = Rollback(context.Background(), RollbackOptions{PlanPath: path, KubeClient: client, DryRun: dryRun, Stderr: io.Discard})
+		if err == nil || !strings.Contains(err.Error(), "planHash") {
+			t.Errorf("Rollback (dry-run=%v): got %v, want an error that names planHash", dryRun, err)
+		}
+		if n := len(client.Actions()); n != 0 {
+			t.Errorf("dry-run=%v: the refusal made %d API call(s), want 0", dryRun, n)
+		}
+	}
+
+	// verify still reads the file: it changes nothing and records nothing.
+	if _, err := loadPlan(path); err != nil {
+		t.Errorf("loadPlan of a plan with no hash: %v; verify must be able to read it", err)
 	}
 }

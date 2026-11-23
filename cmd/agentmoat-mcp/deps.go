@@ -40,4 +40,9 @@ type Deps struct {
 	KubeClient kubernetes.Interface
 	RestConfig *rest.Config
 	ExecRunner verifier.ExecRunner
+
+	// Clock is the same kind of injection point for the wait loop of
+	// verify_migration: a test gives a clock that does not sleep. Nil in
+	// production means the system clock.
+	Clock verifier.Clock
 }

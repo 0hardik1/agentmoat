@@ -22,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/agentmoat"
 	"github.com/0hardik1/agentmoat/pkg/output"
 )
@@ -56,7 +57,7 @@ node.k8s.io/runtimeclasses (deploy/clusterrole-readonly.yaml).`,
 }
 
 func runPreflight(cmd *cobra.Command, _ []string) error {
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindPreflightReport)
 	if err != nil {
 		return err
 	}

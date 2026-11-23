@@ -34,6 +34,7 @@ const (
 	KindVerifyReport    = "VerifyReport"
 	KindExplainDocument = "ExplainDocument"
 	KindPreflightReport = "PreflightReport"
+	KindPatchResult     = "PatchResult"
 )
 
 // DefaultRuntimeClassName is the RuntimeClass name that the applier writes
@@ -56,7 +57,16 @@ const (
 // PlanHashAnnotation is the namespace annotation key the applier writes to
 // record which MigrationPlan was last applied to that namespace. Used for
 // idempotency: re-applying an already-applied plan exits 0 without mutating.
+// It is written only when every step in the namespace is done.
 const PlanHashAnnotation = "agentmoat.io/plan-hash"
+
+// ApplyStartedAnnotation is the namespace annotation key that the applier
+// writes before its first patch in a namespace. Its value is the hash of the
+// plan. It is there for the rollback: an apply that did not finish (a step
+// failed, or the process was stopped) leaves no PlanHashAnnotation, and
+// without this mark a rollback could not tell that the plan changed
+// something. A complete apply removes it, and so does a complete rollback.
+const ApplyStartedAnnotation = "agentmoat.io/apply-started"
 
 // Compatibility is the per-workload verdict produced by the classifier.
 // The string values are stable: scripts and dashboards downstream may
@@ -131,6 +141,67 @@ type ReportMetadata struct {
 	// and runtimeclasses; the scan itself still succeeds. `plan` reads
 	// this to warn when no node can host the plan.
 	ClusterFacts *ClusterFacts `json:"clusterFacts,omitempty" yaml:"clusterFacts,omitempty"`
+
+	// RuntimeClassName is the RuntimeClass this scan treats as "the
+	// sandbox" (--runtime-class, default "gvisor"). Summary.Sandboxed
+	// counts the workloads that ask for it, and `scan --fail-on sandboxed`
+	// looks only at those. Reports written before this field existed have
+	// it empty; readers then use DefaultRuntimeClassName.
+	RuntimeClassName string `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
+
+	// Source says where the workloads came from when that was not a
+	// cluster. Nil means a cluster scan (and then Cluster is the context).
+	Source *ReportSource `json:"source,omitempty" yaml:"source,omitempty"`
+}
+
+// SourceManifests is the ReportSource.Type of a scan that read manifest
+// files (or standard input) and no cluster.
+const SourceManifests = "manifests"
+
+// ReportSource describes a scan whose workloads did not come from a cluster.
+//
+// Everything here is something a person at a terminal reads on stderr. It
+// is on the wire as well because two important readers have no stderr: an
+// MCP client, and a CI job that turns the report into a summary. Both must
+// be able to say what the scan did NOT check.
+type ReportSource struct {
+	// Type is the kind of source. SourceManifests is the only value today.
+	Type string `json:"type" yaml:"type"`
+
+	// Inputs is the number of manifest inputs read: files, plus one for
+	// standard input.
+	Inputs int `json:"inputs,omitempty" yaml:"inputs,omitempty"`
+
+	// Skipped counts the objects that were read but not classified because
+	// they are not workloads, keyed by "Kind.group" ("Service",
+	// "Ingress.networking.k8s.io").
+	Skipped map[string]int `json:"skipped,omitempty" yaml:"skipped,omitempty"`
+
+	// Duplicates has one line for each workload identity that is defined
+	// more than once in the input. Every copy is in Spec.Workloads.
+	Duplicates []string `json:"duplicates,omitempty" yaml:"duplicates,omitempty"`
+
+	// Unrendered has one line for each sign that the input is not the
+	// final form of the objects: a kustomization file, or a partial object
+	// (a workload kind with no containers, which is the shape of an overlay
+	// patch). A file scan reads each object as complete and applies no
+	// overlay, so with entries here the verdicts describe the files and
+	// not what gets deployed. `scan --fail-on sandboxed` refuses to answer
+	// in that case.
+	Unrendered []string `json:"unrendered,omitempty" yaml:"unrendered,omitempty"`
+}
+
+// Origin is where in the manifest input a workload was defined.
+type Origin struct {
+	// File is the path as it was given to the scan. For standard input it
+	// is the path in the `# Source:` comment that `helm template` writes
+	// above each document, or "<stdin>" when there is no such comment.
+	File string `json:"file" yaml:"file"`
+
+	// Line is the 1-based line of the first line of the object's document.
+	// It is left out when File is a Helm source path: the line would count
+	// in the rendered stream, not in that template file.
+	Line int `json:"line,omitempty" yaml:"line,omitempty"`
 }
 
 // ReportSpec is the payload of a ScanReport: a summary plus the per-workload
@@ -147,6 +218,12 @@ type Summary struct {
 	Compatible   int `json:"compatible"   yaml:"compatible"`
 	NeedsReview  int `json:"needsReview"  yaml:"needsReview"`
 	Incompatible int `json:"incompatible" yaml:"incompatible"`
+
+	// Sandboxed is the number of workloads that ask for the scan's
+	// RuntimeClass (ReportMetadata.RuntimeClassName) in their pod spec. It
+	// cuts across the three buckets above: a sandboxed workload is also
+	// compatible, review, or incompatible.
+	Sandboxed int `json:"sandboxed" yaml:"sandboxed"`
 }
 
 // WorkloadResult is one row of a ScanReport. The classifier produces these
@@ -155,10 +232,27 @@ type Summary struct {
 type WorkloadResult struct {
 	// Identity. "Kind" is one of Pod/Deployment/StatefulSet/DaemonSet/Job/
 	// CronJob; agentmoat reports on the controller, not its child pods,
-	// when a controller exists, to avoid double-counting.
+	// when a controller exists, to avoid double-counting. A scan of
+	// manifests can also report any other kind that carries a pod template,
+	// written as "Kind.group" ("Rollout.argoproj.io"), and can leave
+	// Namespace empty when the manifest names none.
 	Kind      string `json:"kind"      yaml:"kind"`
 	Namespace string `json:"namespace" yaml:"namespace"`
 	Name      string `json:"name"      yaml:"name"`
+
+	// RuntimeClassName is the runtimeClassName in the workload's pod spec,
+	// as written. Empty means none is set (the cluster default runtime,
+	// normally runc).
+	RuntimeClassName string `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
+
+	// Origin is where the workload was defined, for a scan of manifests.
+	// Nil for a cluster scan.
+	Origin *Origin `json:"origin,omitempty" yaml:"origin,omitempty"`
+
+	// ManagedBy names the tool that deploys this workload from a source,
+	// when the object has a marker of one. Nil means that no known marker
+	// is there, which is not proof that no tool owns the workload.
+	ManagedBy *ManagedBy `json:"managedBy,omitempty" yaml:"managedBy,omitempty"`
 
 	// Compatibility is the verdict and the primary field operators look at.
 	Compatibility Compatibility `json:"compatibility" yaml:"compatibility"`
@@ -177,6 +271,25 @@ type WorkloadResult struct {
 	// when the workload class is detectable.
 	Overhead string `json:"overhead,omitempty" yaml:"overhead,omitempty"`
 }
+
+// ManagedBy is the deploy tool that a workload has a marker of. `plan` uses
+// it to warn that a live `apply` changes the cluster and not the source that
+// the tool deploys from.
+type ManagedBy struct {
+	// Tool is one of the ManagedBy* constants: "argocd", "flux", "helm".
+	Tool string `json:"tool" yaml:"tool"`
+
+	// Evidence is the label or annotation key that the verdict is from,
+	// with its kind: "annotation argocd.argoproj.io/tracking-id".
+	Evidence string `json:"evidence" yaml:"evidence"`
+}
+
+// The values of ManagedBy.Tool. They are a public surface, like rule IDs.
+const (
+	ManagedByArgoCD = "argocd"
+	ManagedByFlux   = "flux"
+	ManagedByHelm   = "helm"
+)
 
 // Reason is a single classifier finding. The combination of (RuleID,
 // Severity, Description) tells an operator exactly which gotcha tripped and
@@ -253,6 +366,13 @@ type PlanMetadata struct {
 	// `agentmoat.io/plan-hash` annotation. Re-applying an already-applied
 	// plan compares this against the annotation to short-circuit.
 	PlanHash string `json:"planHash" yaml:"planHash"`
+
+	// Source is copied from the scan report the plan was made from (only
+	// its Type). Nil means a cluster scan. A plan made from manifests is a
+	// preview: no cluster was read, so nothing says its workloads exist.
+	// apply, rollback, and verify refuse to load it. Source is not part of
+	// PlanHash.
+	Source *ReportSource `json:"source,omitempty" yaml:"source,omitempty"`
 }
 
 // PlanSpec is the payload of a MigrationPlan: the ordered batches of steps,
@@ -376,8 +496,12 @@ type WorkloadRef struct {
 type ExcludedWorkload struct {
 	Target WorkloadRef `json:"target" yaml:"target"`
 
-	// Compatibility is the verdict from the source scan that drove the
-	// exclusion ("incompatible" or "review" when IncludeReview=false).
+	// Compatibility is the verdict of the workload in the source scan. It
+	// is the cause of the exclusion for "incompatible", and for "review"
+	// when IncludeReview=false. A workload can also be excluded for a
+	// cause that is not its verdict (it already has a RuntimeClass, or its
+	// kind cannot be patched in place), and then this can be "compatible".
+	// Reason always has the cause.
 	Compatibility Compatibility `json:"compatibility" yaml:"compatibility"`
 
 	// Reason is a one-sentence rationale ("workload is incompatible:
@@ -543,18 +667,25 @@ const (
 	// for. For controller steps every pod selected by the controller
 	// reports the expected runtimeClassName; for Pod steps the pod itself
 	// does. When --in-pod-probe is on, the probe also returned gVisor
-	// markers.
+	// markers. With a wait time (--wait), the pods are also Ready and
+	// stayed Ready (Readiness.Stable). A controller that wants no pods
+	// now is ok when its pod template has the class (Basis "template").
 	VerifyStatusOK VerifyStatus = "ok"
 
-	// VerifyStatusMismatch: the target exists but its (or its pods')
-	// runtimeClassName does not match Expected. Common after rollback or
-	// when the operator points verify at the wrong plan.
+	// VerifyStatusMismatch: the target exists but the cluster is not in
+	// the state that the plan asked for. Its pods (or, with no pods, its
+	// pod template) do not have the expected runtimeClassName: common
+	// after rollback, in a rollout that is in progress, or when the
+	// operator points verify at the wrong plan. Or the pods have the
+	// class and run on a node that the RuntimeClass does not select. Or,
+	// with a wait time, the pods have the class and are not Ready, or
+	// did not stay Ready; Readiness then says which pods and why.
 	VerifyStatusMismatch VerifyStatus = "mismatch"
 
 	// VerifyStatusError: the verifier could not reach a verdict. The
-	// controller was missing, the selector returned zero pods, the API
-	// server errored, or (when --in-pod-probe is on) the exec call
-	// itself failed. The Message field explains which.
+	// controller was missing, the controller wants pods and the selector
+	// returned none, the API server errored, or (when --in-pod-probe is
+	// on) the exec call itself failed. The Message field explains which.
 	VerifyStatusError VerifyStatus = "error"
 )
 
@@ -591,6 +722,37 @@ type VerifyMetadata struct {
 	// (kubectl exec into a pod and grep /proc/cmdline et al). When false,
 	// the verifier only checked the controller's runtimeClassName field.
 	InPodProbe bool `json:"inPodProbe" yaml:"inPodProbe"`
+
+	// Wait is set when the verify ran with a wait time (`verify --wait`).
+	// Nil means one look at the cluster, with no wait.
+	Wait *VerifyWait `json:"wait,omitempty" yaml:"wait,omitempty"`
+}
+
+// VerifyWait records a verify that looked at the cluster more than one time
+// (`verify --wait <duration>`). A job summary shows no stderr and no exit
+// code, so the fact that the result is "after a wait that timed out" must be
+// in the report.
+type VerifyWait struct {
+	// RequestedSeconds is the wait time that the caller gave.
+	RequestedSeconds int `json:"requestedSeconds" yaml:"requestedSeconds"`
+
+	// WaitedSeconds is the time from the first look to the last one.
+	WaitedSeconds int `json:"waitedSeconds" yaml:"waitedSeconds"`
+
+	// Rounds is the number of times the verifier looked at the cluster.
+	Rounds int `json:"rounds" yaml:"rounds"`
+
+	// TimedOut is true when the wait time ended and one or more steps
+	// were not ok.
+	TimedOut bool `json:"timedOut" yaml:"timedOut"`
+
+	// Interrupted is true when the caller canceled the verify. The
+	// results are then those of the last complete round, and a step that
+	// is not ok in them is not a verdict: the wait did not get its time.
+	// The CLI never writes this: an interrupt ends the process. It is
+	// for a caller that cancels the context of the library, such as an
+	// MCP client that cancels the tool call.
+	Interrupted bool `json:"interrupted,omitempty" yaml:"interrupted,omitempty"`
 }
 
 // VerifySpec is the payload of a VerifyReport: a summary plus the per-step
@@ -646,6 +808,50 @@ type VerifyResult struct {
 	// RuntimeClass nodeSelector selects (see preflight.go). Nil when the
 	// spec-level check already failed, so placement was not evaluated.
 	NodePlacement *NodePlacement `json:"nodePlacement,omitempty" yaml:"nodePlacement,omitempty"`
+
+	// Basis says what the verdict is about. Empty means the live pods,
+	// which is the usual case. VerifyBasisTemplate means the pod template
+	// of the controller, because the workload has no pods to look at now
+	// (replicas: 0, a CronJob between two runs).
+	Basis string `json:"basis,omitempty" yaml:"basis,omitempty"`
+
+	// Readiness reports whether the step's pods are Ready. It is set
+	// only with a wait time (`verify --wait`); nil in all other cases.
+	// It is about the live pods that have the expected runtimeClassName.
+	// In a rolling update that does not go on, those are the new pods,
+	// and their readiness is the reason that the old pods are still
+	// there.
+	Readiness *PodReadiness `json:"readiness,omitempty" yaml:"readiness,omitempty"`
+}
+
+// VerifyBasisTemplate is the VerifyResult.Basis of a verdict that comes from
+// the controller's pod template and not from live pods.
+const VerifyBasisTemplate = "template"
+
+// PodReadiness is the verifier's answer to "do the pods run?". A pod can
+// have runtimeClassName=gvisor and never start in the sandbox (a crash loop,
+// a node with no runsc). `verify --wait` reads the Ready condition of each
+// pod so that such a workload is not reported as ok.
+type PodReadiness struct {
+	// Pods is the number of pods that were checked (the live pods that
+	// have the expected runtimeClassName), and Ready is how many of them
+	// have the condition Ready=True.
+	Pods  int `json:"pods"  yaml:"pods"`
+	Ready int `json:"ready" yaml:"ready"`
+
+	// Stable is true when all the pods were Ready, with no restart and no
+	// replaced pod, for the settle time. One look that finds a pod Ready
+	// is not enough: a container with no readiness probe is Ready from
+	// its start until it crashes.
+	Stable bool `json:"stable" yaml:"stable"`
+
+	// NotReady names the pods that are not Ready, sorted. At most ten.
+	NotReady []string `json:"notReady,omitempty" yaml:"notReady,omitempty"`
+
+	// Message says why the first pod in NotReady is not Ready, for
+	// example "container web is waiting: CrashLoopBackOff". It is also
+	// set when the pods are Ready and not yet stable.
+	Message string `json:"message,omitempty" yaml:"message,omitempty"`
 }
 
 // ProbeResult is the output of one in-pod gVisor probe. The verifier picks a
@@ -831,4 +1037,187 @@ type CommandHit struct {
 	Container  string `json:"container"  yaml:"container"`
 	Field      string `json:"field"      yaml:"field"`
 	Executable string `json:"executable" yaml:"executable"`
+}
+
+// ---------------------------------------------------------------------------
+// PatchResult: output of `agentmoat patch`.
+// ---------------------------------------------------------------------------
+
+// PatchResult is the wire-shape of `agentmoat patch`: the move to the
+// sandbox as a change to manifest files. It says which workloads the change
+// is for, what happened to each, which workloads it left out and why, and it
+// carries the diff of each file.
+//
+// It is the file counterpart of MigrationPlan plus ApplyResult. There is no
+// plan file between the two halves, because the files are the record: a
+// reviewer reads the diff, and `git revert` is the rollback.
+type PatchResult struct {
+	APIVersion string        `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string        `json:"kind"       yaml:"kind"`
+	Metadata   PatchMetadata `json:"metadata"   yaml:"metadata"`
+	Spec       PatchSpec     `json:"spec"       yaml:"spec"`
+}
+
+// NewPatchResult returns an empty PatchResult with the envelope filled.
+func NewPatchResult() *PatchResult {
+	return &PatchResult{
+		APIVersion: APIVersion,
+		Kind:       KindPatchResult,
+	}
+}
+
+// PatchMetadata records how the patch ran.
+type PatchMetadata struct {
+	GeneratedAt      string `json:"generatedAt"      yaml:"generatedAt"`
+	AgentmoatVersion string `json:"agentmoatVersion" yaml:"agentmoatVersion"`
+
+	// DryRun is true when no file was written. Dry-run is the default, as
+	// for apply; the result then says what a real run would do.
+	DryRun bool `json:"dryRun" yaml:"dryRun"`
+
+	// RuntimeClassName is the value that the patch writes.
+	RuntimeClassName string `json:"runtimeClassName" yaml:"runtimeClassName"`
+
+	// IncludeReview is true when workloads that need review were selected
+	// too (--include-review).
+	IncludeReview bool `json:"includeReview,omitempty" yaml:"includeReview,omitempty"`
+
+	// KustomizeDir is set when the change is written as a Kustomize
+	// component and not as an edit of the source files (--kustomize): the
+	// directory of the component, as it was given. The source files are
+	// then not changed. Files lists the files of the component, and each
+	// change has its PatchFile.
+	KustomizeDir string `json:"kustomizeDir,omitempty" yaml:"kustomizeDir,omitempty"`
+
+	// Source says what was read, as in a ScanReport of manifests: the
+	// number of inputs, the objects that are not workloads, and the signs
+	// that the input is not rendered (a kustomization file, a partial
+	// object). A patch edits such input, because the files of a base are
+	// what a person changes; the verdicts then describe the files and not
+	// what an overlay makes of them.
+	Source *ReportSource `json:"source,omitempty" yaml:"source,omitempty"`
+}
+
+// PatchSpec is the payload of a PatchResult.
+type PatchSpec struct {
+	Summary PatchSummary `json:"summary" yaml:"summary"`
+
+	// Changes has one entry for each selected workload: a compatible
+	// workload (or one that needs review, with IncludeReview) that has no
+	// RuntimeClass. Sorted by (namespace, kind, name).
+	Changes []PatchChange `json:"changes" yaml:"changes"`
+
+	// Excluded lists the workloads that the patch did not select, with the
+	// reason, as a MigrationPlan does.
+	Excluded []ExcludedWorkload `json:"excluded" yaml:"excluded"`
+
+	// Files has one entry for each file with a change, sorted by path:
+	// the source files, or with a Kustomize component the patch files and
+	// the list (kustomization.yaml).
+	Files []PatchFile `json:"files" yaml:"files"`
+}
+
+// PatchSummary is the count of the outcomes.
+type PatchSummary struct {
+	// Total is the number of workloads read: Selected plus Excluded.
+	Total int `json:"total" yaml:"total"`
+
+	// Selected is the number of workloads that the patch is for.
+	Selected int `json:"selected" yaml:"selected"`
+
+	// Patched is the number of selected workloads whose file has the new
+	// line (in a dry-run: would have). With a Kustomize component: whose
+	// patch file is in the component and in its list.
+	Patched int `json:"patched" yaml:"patched"`
+
+	// NotEdited is the number of selected workloads in a form that the
+	// patch does not edit (JSON, flow-style YAML, a YAML anchor). With a
+	// Kustomize component: that can have no patch file (an object with no
+	// name of its own), or whose patch file is there with other content.
+	NotEdited int `json:"notEdited" yaml:"notEdited"`
+
+	// Failed is the number of selected workloads whose file could not be
+	// written.
+	Failed int `json:"failed" yaml:"failed"`
+
+	// Excluded is the number of workloads that were not selected.
+	Excluded int `json:"excluded" yaml:"excluded"`
+
+	// Files is the number of files with a change.
+	Files int `json:"files" yaml:"files"`
+}
+
+// PatchStatus is the outcome for one selected workload.
+type PatchStatus string
+
+const (
+	// PatchStatusPatched: the file has the runtimeClassName line for this
+	// workload (or, in a dry-run, would have).
+	PatchStatusPatched PatchStatus = "patched"
+
+	// PatchStatusNotEdited: the workload is in a form that the patch does
+	// not edit. PatchChange.Reason says which, and what to do by hand.
+	PatchStatusNotEdited PatchStatus = "not-edited"
+
+	// PatchStatusFailed: the edit was made in memory and the file could
+	// not be written. PatchChange.Reason has the error.
+	PatchStatusFailed PatchStatus = "failed"
+)
+
+// PatchChange is the outcome for one selected workload.
+type PatchChange struct {
+	Target WorkloadRef `json:"target" yaml:"target"`
+
+	// Compatibility is the verdict of the workload: "compatible", or
+	// "review" when IncludeReview selected it.
+	Compatibility Compatibility `json:"compatibility" yaml:"compatibility"`
+
+	// Origin is where the object starts in the input, before the change.
+	Origin *Origin `json:"origin,omitempty" yaml:"origin,omitempty"`
+
+	Status PatchStatus `json:"status" yaml:"status"`
+
+	// Line is the 1-based line of the added line in the file after the
+	// change. Zero when Status is not "patched", and with a Kustomize
+	// component (the source file has no new line).
+	Line int `json:"line,omitempty" yaml:"line,omitempty"`
+
+	// PatchFile is the path of the Kustomize patch file for this workload.
+	// Set only with a Kustomize component, when the workload has one.
+	PatchFile string `json:"patchFile,omitempty" yaml:"patchFile,omitempty"`
+
+	// Reason says why the workload was not edited, or why the write
+	// failed. Empty when Status is "patched".
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
+}
+
+// PatchFile is one file with a change.
+type PatchFile struct {
+	// Path is the path as it was given or found.
+	Path string `json:"path" yaml:"path"`
+
+	// Added is the number of lines that the change adds. An edit of a
+	// source file removes no line and changes no line.
+	Added int `json:"added" yaml:"added"`
+
+	// Removed is the number of lines that the change removes. It is zero
+	// for a source file and for a new file. The one file where it can be
+	// more is the list of a Kustomize component that had no entry: its
+	// line `patches: []` is replaced.
+	Removed int `json:"removed,omitempty" yaml:"removed,omitempty"`
+
+	// Created is true when the file is new: a file of a Kustomize
+	// component. The diff is then from /dev/null.
+	Created bool `json:"created,omitempty" yaml:"created,omitempty"`
+
+	// Written is true when the file on disk has the change. Always false
+	// in a dry-run.
+	Written bool `json:"written" yaml:"written"`
+
+	// Diff is the change as a unified diff.
+	Diff string `json:"diff" yaml:"diff"`
+
+	// Error says why the file was not written, when it was not and the
+	// run was not a dry-run.
+	Error string `json:"error,omitempty" yaml:"error,omitempty"`
 }

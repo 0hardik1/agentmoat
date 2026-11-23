@@ -45,6 +45,8 @@ func TestKindConstants(t *testing.T) {
 		{KindRollbackResult, "RollbackResult"},
 		{KindVerifyReport, "VerifyReport"},
 		{KindExplainDocument, "ExplainDocument"},
+		{KindPreflightReport, "PreflightReport"},
+		{KindPatchResult, "PatchResult"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -67,10 +69,31 @@ func TestVerifyReportRoundTrip(t *testing.T) {
 		AgentmoatVersion: "test",
 		PlanHash:         "abc123",
 		InPodProbe:       true,
+		Wait:             &VerifyWait{RequestedSeconds: 180, WaitedSeconds: 180, Rounds: 37, TimedOut: true},
 	}
 	r.Spec = VerifySpec{
-		Summary: VerifySummary{Total: 2, OK: 1, Mismatch: 1, Error: 0},
+		Summary: VerifySummary{Total: 4, OK: 2, Mismatch: 2, Error: 0},
 		Results: []VerifyResult{
+			{
+				Order:    3,
+				Target:   WorkloadRef{Kind: "CronJob", Namespace: "ns-a", Name: "report"},
+				Status:   VerifyStatusOK,
+				Expected: "gvisor",
+				Actual:   "gvisor",
+				Basis:    VerifyBasisTemplate,
+			},
+			{
+				Order:    4,
+				Target:   WorkloadRef{Kind: "StatefulSet", Namespace: "ns-a", Name: "db"},
+				Status:   VerifyStatusMismatch,
+				Expected: "gvisor",
+				Actual:   "gvisor",
+				Message:  "pod db-0 is not Ready: container app is waiting: CrashLoopBackOff, 4 restart(s)",
+				Readiness: &PodReadiness{
+					Pods: 2, Ready: 1, NotReady: []string{"db-0"},
+					Message: "pod db-0 is not Ready: container app is waiting: CrashLoopBackOff, 4 restart(s)",
+				},
+			},
 			{
 				Order:    1,
 				Target:   WorkloadRef{Kind: "Deployment", Namespace: "ns-a", Name: "web"},
@@ -424,5 +447,420 @@ func TestEvidenceOmitempty(t *testing.T) {
 	}
 	if !strings.Contains(ys, "hostPaths:") {
 		t.Errorf("expected yaml output to include hostPaths, got: %s", ys)
+	}
+}
+
+// TestScanReportManifestSourceRoundTrip covers the fields a scan of manifest
+// files adds to the ScanReport: the source block, the per-workload runtime
+// class and origin, and the sandboxed count. JSON and YAML must both carry
+// them.
+func TestScanReportManifestSourceRoundTrip(t *testing.T) {
+	t.Parallel()
+	r := NewScanReport()
+	r.Metadata = ReportMetadata{
+		GeneratedAt:      "2026-11-22T12:00:00Z",
+		AgentmoatVersion: "test",
+		RuntimeClassName: "gvisor",
+		Source: &ReportSource{
+			Type:       SourceManifests,
+			Inputs:     3,
+			Skipped:    map[string]int{"Service": 2, "Ingress.networking.k8s.io": 1},
+			Duplicates: []string{"Deployment shop/web is defined 2 times (a.yaml:1, b.yaml:1)"},
+			Unrendered: []string{"kustomization file: k8s/kustomization.yaml"},
+		},
+	}
+	r.Spec = ReportSpec{
+		Summary: Summary{Total: 2, Compatible: 1, Incompatible: 1, Sandboxed: 1},
+		Workloads: []WorkloadResult{
+			{
+				Kind: "Deployment", Namespace: "shop", Name: "web",
+				Compatibility:    CompatibilityCompatible,
+				RuntimeClassName: "gvisor",
+				Origin:           &Origin{File: "k8s/web.yaml", Line: 12},
+			},
+			{
+				Kind: "Rollout.argoproj.io", Namespace: "", Name: "canary",
+				Compatibility: CompatibilityIncompatible,
+				Origin:        &Origin{File: "chart/templates/rollout.yaml"},
+			},
+		},
+	}
+
+	jsonBytes, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var fromJSON ScanReport
+	if err := json.Unmarshal(jsonBytes, &fromJSON); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromJSON) {
+		t.Errorf("json round-trip mismatch:\nwant: %#v\ngot:  %#v", *r, fromJSON)
+	}
+
+	yamlBytes, err := yaml.Marshal(r)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	var fromYAML ScanReport
+	if err := yaml.Unmarshal(yamlBytes, &fromYAML); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromYAML) {
+		t.Errorf("yaml round-trip mismatch:\nwant: %#v\ngot:  %#v", *r, fromYAML)
+	}
+
+	// The wire names are a public surface. Pin them.
+	for _, key := range []string{
+		`"runtimeClassName":"gvisor"`, `"source":{"type":"manifests"`, `"inputs":3`, `"skipped":{`,
+		`"duplicates":[`, `"unrendered":[`, `"sandboxed":1`, `"origin":{"file":"k8s/web.yaml","line":12}`,
+		// A Helm source path has no line.
+		`"origin":{"file":"chart/templates/rollout.yaml"}`,
+	} {
+		if !strings.Contains(string(jsonBytes), key) {
+			t.Errorf("JSON lacks %s:\n%s", key, jsonBytes)
+		}
+	}
+}
+
+// TestScanReportClusterSourceOmitsManifestFields: a cluster scan must not
+// grow a `source` or per-workload `origin` key. `sandboxed` is always there,
+// like the other counts.
+func TestScanReportClusterSourceOmitsManifestFields(t *testing.T) {
+	t.Parallel()
+	r := NewScanReport()
+	r.Metadata = ReportMetadata{GeneratedAt: "2026-11-22T12:00:00Z", Cluster: "kind-x", AgentmoatVersion: "test"}
+	r.Spec = ReportSpec{
+		Summary:   Summary{Total: 1, Compatible: 1},
+		Workloads: []WorkloadResult{{Kind: "Deployment", Namespace: "ns", Name: "web", Compatibility: CompatibilityCompatible}},
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, key := range []string{`"source"`, `"origin"`, `"runtimeClassName"`} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("a cluster report with none of these set has the key %s:\n%s", key, data)
+		}
+	}
+	if !strings.Contains(string(data), `"sandboxed":0`) {
+		t.Errorf("JSON lacks \"sandboxed\":0:\n%s", data)
+	}
+}
+
+// TestPlanMetadataSource: a plan carries the source type of its scan, and a
+// plan from a cluster scan has no `source` key.
+func TestPlanMetadataSource(t *testing.T) {
+	t.Parallel()
+	p := NewMigrationPlan()
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(data), `"source"`) {
+		t.Errorf("a plan with no source has the key:\n%s", data)
+	}
+
+	p.Metadata.Source = &ReportSource{Type: SourceManifests}
+	data, err = json.Marshal(p)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var back MigrationPlan
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if back.Metadata.Source == nil || back.Metadata.Source.Type != SourceManifests {
+		t.Errorf("source did not survive the round trip: %s", data)
+	}
+	if !strings.Contains(string(data), `"source":{"type":"manifests"}`) {
+		t.Errorf("JSON lacks the source block:\n%s", data)
+	}
+}
+
+// TestVerifyWaitFields pins the wire names of the fields that `verify
+// --wait` adds, and checks that a verify with no wait has none of them: a
+// reader of the report must be able to tell "one look" from "a wait" by the
+// key alone.
+func TestVerifyWaitFields(t *testing.T) {
+	t.Parallel()
+	plain := NewVerifyReport()
+	plain.Spec.Results = []VerifyResult{{Order: 1, Status: VerifyStatusOK, Expected: "gvisor", Actual: "gvisor"}}
+	data, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, key := range []string{`"wait"`, `"basis"`, `"readiness"`} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("a verify with no wait has the key %s:\n%s", key, data)
+		}
+	}
+
+	waited := NewVerifyReport()
+	waited.Metadata.Wait = &VerifyWait{RequestedSeconds: 60, WaitedSeconds: 20, Rounds: 5}
+	waited.Spec.Results = []VerifyResult{
+		{Order: 1, Status: VerifyStatusOK, Basis: VerifyBasisTemplate},
+		{Order: 2, Status: VerifyStatusOK, Readiness: &PodReadiness{Pods: 2, Ready: 2, Stable: true}},
+	}
+	data, err = json.Marshal(waited)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, want := range []string{
+		// timedOut is always there in a wait block: false is an answer.
+		// interrupted is there only when it is true.
+		`"wait":{"requestedSeconds":60,"waitedSeconds":20,"rounds":5,"timedOut":false}`,
+		`"basis":"template"`,
+		`"readiness":{"pods":2,"ready":2,"stable":true}`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("JSON lacks %s:\n%s", want, data)
+		}
+	}
+}
+
+// TestWorkloadResultManagedBy pins the wire shape of the deploy tool marker
+// on a scan row, the three tool names, and its absence when there is no
+// marker.
+func TestWorkloadResultManagedBy(t *testing.T) {
+	t.Parallel()
+	for got, want := range map[string]string{ManagedByArgoCD: "argocd", ManagedByFlux: "flux", ManagedByHelm: "helm"} {
+		if got != want {
+			t.Errorf("tool name %q, want %q", got, want)
+		}
+	}
+	row := WorkloadResult{Kind: "Deployment", Namespace: "ns", Name: "web", Compatibility: CompatibilityCompatible}
+	data, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "managedBy") {
+		t.Errorf("a row with no marker has the key managedBy:\n%s", data)
+	}
+
+	row.ManagedBy = &ManagedBy{Tool: ManagedByArgoCD, Evidence: "annotation argocd.argoproj.io/tracking-id"}
+	data, err = json.Marshal(row)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if want := `"managedBy":{"tool":"argocd","evidence":"annotation argocd.argoproj.io/tracking-id"}`; !strings.Contains(string(data), want) {
+		t.Errorf("JSON lacks %s:\n%s", want, data)
+	}
+	yamlData, err := yaml.Marshal(row)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	var back WorkloadResult
+	if err := yaml.Unmarshal(yamlData, &back); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if back.ManagedBy == nil || *back.ManagedBy != *row.ManagedBy {
+		t.Errorf("managedBy did not survive the YAML round trip: %s", yamlData)
+	}
+}
+
+// TestPatchResultEmptyShape pins the wire shape of an empty result of
+// `agentmoat patch`: the envelope, the status strings, the keys that are
+// always there (a count of zero and "dryRun": false are answers), and the
+// keys that are left out when empty.
+func TestPatchResultEmptyShape(t *testing.T) {
+	t.Parallel()
+	for got, want := range map[PatchStatus]string{
+		PatchStatusPatched:   "patched",
+		PatchStatusNotEdited: "not-edited",
+		PatchStatusFailed:    "failed",
+	} {
+		if string(got) != want {
+			t.Errorf("patch status %q, want %q", got, want)
+		}
+	}
+
+	empty := NewPatchResult()
+	if empty.APIVersion != APIVersion || empty.Kind != KindPatchResult {
+		t.Errorf("envelope = %s %s", empty.APIVersion, empty.Kind)
+	}
+	empty.Metadata.RuntimeClassName = "gvisor"
+	empty.Spec.Changes = []PatchChange{}
+	empty.Spec.Excluded = []ExcludedWorkload{}
+	empty.Spec.Files = []PatchFile{}
+	data, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, want := range []string{
+		`"dryRun":false`,
+		`"summary":{"total":0,"selected":0,"patched":0,"notEdited":0,"failed":0,"excluded":0,"files":0}`,
+		`"changes":[]`, `"excluded":[]`, `"files":[]`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("the empty result lacks %s:\n%s", want, data)
+		}
+	}
+	for _, key := range []string{`"includeReview"`, `"source"`, `"kustomizeDir"`} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("the empty result has the key %s:\n%s", key, data)
+		}
+	}
+
+	// The fields of a Kustomize component are not in the result of an edit
+	// in place: a reader of the old shape sees no new key.
+	inPlace, err := json.Marshal(PatchSpec{
+		Changes: []PatchChange{{Status: PatchStatusPatched, Line: 9}},
+		Files:   []PatchFile{{Path: "web.yaml", Added: 1, Written: true}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, key := range []string{`"patchFile"`, `"created"`, `"removed"`} {
+		if strings.Contains(string(inPlace), key) {
+			t.Errorf("the result of an edit in place has the key %s:\n%s", key, inPlace)
+		}
+	}
+}
+
+// TestPatchResultKustomizeRoundTrip pins the fields that a result has when
+// the change is a Kustomize component (`patch --kustomize`).
+func TestPatchResultKustomizeRoundTrip(t *testing.T) {
+	t.Parallel()
+	r := NewPatchResult()
+	r.Metadata = PatchMetadata{
+		GeneratedAt:      "2026-11-22T12:00:00Z",
+		AgentmoatVersion: "test",
+		RuntimeClassName: "gvisor",
+		KustomizeDir:     "overlays/prod/gvisor",
+	}
+	r.Spec = PatchSpec{
+		Summary: PatchSummary{Total: 1, Selected: 1, Patched: 1, Files: 2},
+		Changes: []PatchChange{{
+			Target:        WorkloadRef{Kind: "Deployment", Namespace: "shop", Name: "web"},
+			Compatibility: CompatibilityCompatible,
+			Origin:        &Origin{File: "base/web.yaml", Line: 1},
+			Status:        PatchStatusPatched,
+			PatchFile:     "overlays/prod/gvisor/deployment.apps_web.yaml",
+		}},
+		Excluded: []ExcludedWorkload{},
+		Files: []PatchFile{
+			{Path: "overlays/prod/gvisor/deployment.apps_web.yaml", Added: 12, Written: true, Created: true, Diff: "--- /dev/null\n"},
+			{Path: "overlays/prod/gvisor/kustomization.yaml", Added: 1, Removed: 1, Written: true, Diff: "--- a/overlays/prod/gvisor/kustomization.yaml\n"},
+		},
+	}
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, want := range []string{
+		`"kustomizeDir":"overlays/prod/gvisor"`,
+		`"status":"patched","patchFile":"overlays/prod/gvisor/deployment.apps_web.yaml"`,
+		`"added":12,"created":true,"written":true`,
+		`"added":1,"removed":1,"written":true`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("JSON lacks %s:\n%s", want, data)
+		}
+	}
+	var fromJSON PatchResult
+	if err := json.Unmarshal(data, &fromJSON); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromJSON) {
+		t.Errorf("JSON round trip changed the result:\n got %+v\nwant %+v", fromJSON, *r)
+	}
+	yamlData, err := yaml.Marshal(r)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	var fromYAML PatchResult
+	if err := yaml.Unmarshal(yamlData, &fromYAML); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromYAML) {
+		t.Errorf("YAML round trip changed the result:\n got %+v\nwant %+v", fromYAML, *r)
+	}
+}
+
+// TestPatchResultRoundTrip pins the wire shape of a full result of
+// `agentmoat patch`, and the JSON and YAML round trips.
+func TestPatchResultRoundTrip(t *testing.T) {
+	t.Parallel()
+	r := NewPatchResult()
+	r.Metadata = PatchMetadata{
+		GeneratedAt:      "2026-11-22T12:00:00Z",
+		AgentmoatVersion: "test",
+		DryRun:           true,
+		RuntimeClassName: "gvisor",
+		IncludeReview:    true,
+		Source:           &ReportSource{Type: SourceManifests, Inputs: 2},
+	}
+	r.Spec = PatchSpec{
+		Summary: PatchSummary{Total: 4, Selected: 3, Patched: 1, NotEdited: 1, Failed: 1, Excluded: 1, Files: 2},
+		Changes: []PatchChange{
+			{
+				Target:        WorkloadRef{Kind: "Deployment", Namespace: "shop", Name: "web"},
+				Compatibility: CompatibilityCompatible,
+				Origin:        &Origin{File: "k8s/web.yaml", Line: 1},
+				Status:        PatchStatusPatched,
+				Line:          9,
+			},
+			{
+				Target:        WorkloadRef{Kind: "Pod", Namespace: "shop", Name: "once"},
+				Compatibility: CompatibilityReview,
+				Origin:        &Origin{File: "k8s/once.json", Line: 1},
+				Status:        PatchStatusNotEdited,
+				Reason:        "JSON is not edited",
+			},
+			{
+				Target:        WorkloadRef{Kind: "Deployment", Namespace: "shop", Name: "api"},
+				Compatibility: CompatibilityCompatible,
+				Origin:        &Origin{File: "k8s/api.yaml", Line: 1},
+				Status:        PatchStatusFailed,
+				Reason:        "the file was not written: permission denied",
+			},
+		},
+		Excluded: []ExcludedWorkload{{
+			Target:        WorkloadRef{Kind: "DaemonSet", Namespace: "kube-system", Name: "cni"},
+			Compatibility: CompatibilityIncompatible,
+			Reason:        "workload is incompatible: host-network",
+		}},
+		Files: []PatchFile{
+			{Path: "k8s/api.yaml", Added: 1, Diff: "--- a/k8s/api.yaml\n+++ b/k8s/api.yaml\n", Error: "permission denied"},
+			{Path: "k8s/web.yaml", Added: 1, Written: true, Diff: "--- a/k8s/web.yaml\n+++ b/k8s/web.yaml\n"},
+		},
+	}
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, want := range []string{
+		`"kind":"PatchResult"`,
+		`"dryRun":true`, `"runtimeClassName":"gvisor"`, `"includeReview":true`,
+		`"status":"patched","line":9`,
+		`"status":"not-edited","reason":"JSON is not edited"`,
+		`"path":"k8s/web.yaml","added":1,"written":true,"diff":`,
+		`"written":false`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("JSON lacks %s:\n%s", want, data)
+		}
+	}
+	var fromJSON PatchResult
+	if err := json.Unmarshal(data, &fromJSON); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromJSON) {
+		t.Errorf("JSON round trip changed the result:\n got %+v\nwant %+v", fromJSON, *r)
+	}
+
+	yamlData, err := yaml.Marshal(r)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	var fromYAML PatchResult
+	if err := yaml.Unmarshal(yamlData, &fromYAML); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromYAML) {
+		t.Errorf("YAML round trip changed the result:\n got %+v\nwant %+v", fromYAML, *r)
 	}
 }

@@ -9,11 +9,9 @@ package main
 
 import (
 	"context"
-	"os"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"sigs.k8s.io/yaml"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/agentmoat"
@@ -21,7 +19,7 @@ import (
 
 func registerProposePlan(srv *server.MCPServer, deps Deps) {
 	tool := mcp.NewTool("propose_plan",
-		mcp.WithDescription("Produce a deterministic MigrationPlan from a scan. Same scan in produces the same planHash. The plan is read-only: this tool never mutates the cluster (use apply_plan for that)."),
+		mcp.WithDescription("Produce a deterministic MigrationPlan from a scan. Same scan in produces the same planHash. The plan is read-only: this tool never mutates the cluster (use apply_plan for that). A workload that already has a RuntimeClass gets no step and is listed in spec.excluded with the reason, so the plan covers only the workloads it would change."),
 		mcp.WithString("kubeconfig_path",
 			mcp.Description("Path to a kubeconfig file (used when scan_report_path is empty and an inline scan must run).")),
 		mcp.WithString("context",
@@ -84,15 +82,9 @@ func registerProposePlan(srv *server.MCPServer, deps Deps) {
 			Stderr: deps.Stderr,
 		}
 
-		// If the caller supplied a scan_report_path, load and use it as the
-		// source. Mirrors how `cmd/agentmoat/plan.go --scan <file>` works.
-		if path := req.GetString("scan_report_path", ""); path != "" {
-			report, err := loadScanReport(path)
-			if err != nil {
-				return toolErr(err)
-			}
-			opts.ScanReport = report
-		}
+		// scan_report_path names a saved ScanReport. The library loads it,
+		// exactly as it does for `agentmoat plan --scan <file>`.
+		opts.ScanReportPath = req.GetString("scan_report_path", "")
 
 		plan, err := agentmoat.Plan(ctx, opts)
 		if err != nil {
@@ -100,36 +92,4 @@ func registerProposePlan(srv *server.MCPServer, deps Deps) {
 		}
 		return marshalResult(plan)
 	})
-}
-
-// loadScanReport reads a ScanReport from disk (JSON or YAML; sigs.k8s.io/yaml
-// accepts both). The schema sanity-check is light: we trust the caller's
-// path, but a wrong-Kind file should surface a clean error rather than a
-// silently-empty plan.
-func loadScanReport(path string) (*schema.ScanReport, error) {
-	// #nosec G304 -- path is operator-supplied and intentionally
-	// configurable; this mirrors the CLI's --scan flag behavior.
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	report := &schema.ScanReport{}
-	if err := yaml.Unmarshal(data, report); err != nil {
-		return nil, err
-	}
-	if report.Kind != schema.KindScanReport {
-		return nil, &kindMismatchError{got: report.Kind, want: schema.KindScanReport}
-	}
-	return report, nil
-}
-
-// kindMismatchError is the typed error returned when a loaded document's
-// Kind does not match what the caller asked for. Kept as a private type
-// so callers don't depend on it (string matching against Error() is fine).
-type kindMismatchError struct {
-	got, want string
-}
-
-func (e *kindMismatchError) Error() string {
-	return "scan_report_path: expected Kind=" + e.want + ", got Kind=" + e.got
 }

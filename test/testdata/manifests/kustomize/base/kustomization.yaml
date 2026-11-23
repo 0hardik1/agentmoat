@@ -1,0 +1,3 @@
+# Most kustomization files look like this: no apiVersion and no kind.
+resources:
+  - web.yaml

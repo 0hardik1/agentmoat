@@ -16,6 +16,13 @@
 #     a single dimension today (go-version: 1.26 on ubuntu-latest) but is
 #     written as a matrix so we can add more Go versions or OSes later
 #     without restructuring the workflow.
+#   * `offline-smoke`: builds the binaries and runs scripts/offline-smoke.sh,
+#     which drives `agentmoat scan -f` (manifests, no cluster) and the
+#     --fail-on gate through the real binary and checks exit codes. A CI job
+#     is where that command runs for users, so it is tested in one. The same
+#     target then runs scripts/action-smoke.sh: the script of the GitHub
+#     Action (action.yml), with a model of how the runner reads its log.
+#     The action on a real runner is in action-test.yml.
 #   * `gvisor-pin`: runs scripts/check-gvisor-version.sh, which asserts the
 #     three gVisor release pins agree and that the release tarball and its
 #     checksum exist in the bucket for both archs. It does NOT fail on drift
@@ -119,6 +126,33 @@ jobs:
       # packages early. Coverage uploading is added in a later phase.
       - name: Run unit tests
         run: go test -race -cover ./...
+
+  # -------------------------- offline-smoke -------------------------------
+  # The no-cluster checks: `scan -f` on manifest fixtures, the three
+  # --fail-on settings, unreadable input, unrendered Kustomize input, and the
+  # refusal of a plan made from manifests. Then the script of the GitHub
+  # Action: each exit code, the job summary, the outputs, and a log that no
+  # text from a manifest can put a workflow command into. The runner image
+  # has jq, kubectl, and helm; kubectl and helm are used only for local
+  # renders (`kubectl kustomize`, `helm template`).
+  # There is no cluster in this job, which is the point.
+  offline-smoke:
+    name: Offline smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # `make offline-smoke` depends on `make build`, so this one command
+      # builds ./bin/agentmoat and then runs the script against it.
+      - name: Run the offline smoke test
+        run: make offline-smoke
 
   # --------------------------- gvisor-pin ---------------------------------
   # Guards the gVisor release pin: the three defaults must agree and every

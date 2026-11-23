@@ -103,7 +103,9 @@ info, then by ID, so the same cluster state renders identically.
 - **`agentmoat plan`**: turns the scan's facts into `spec.warnings` (error
   and warn findings, plus `cluster-facts-runtime-class-mismatch` when the
   scan inspected a different RuntimeClass than the plan targets). Warnings do
-  not change the steps or the plan hash.
+  not change the steps or the plan hash. One more warning is not about the
+  cluster: `source-managed`, when a workload in the plan has the marker of a
+  deploy tool (see [Plan warnings](#plan-warnings-that-are-not-from-the-preflight)).
 - **`agentmoat verify`**: checks each step's hosting nodes against the
   RuntimeClass nodeSelector and reports `nodePlacement` per result. A node
   outside the selector demotes the step to `mismatch`. Without node RBAC the
@@ -174,3 +176,52 @@ for that: it execs into a migrated pod and looks for gVisor's markers.
 Nor can it tell which NVIDIA driver versions that `runsc` can proxy: the
 list is compiled into the binary. `agentmoat probe nvproxy` reads it by
 running the binary on a node; see [`gpu-nvproxy.md`](gpu-nvproxy.md).
+
+## Plan warnings that are not from the preflight
+
+`spec.warnings` of a MigrationPlan has two more IDs. They are here so that
+all the warning IDs are in one document.
+
+| ID | When | What to do |
+| --- | --- | --- |
+| `manifest-source` | The plan was made from `scan -f` (manifests, no cluster). | The plan is a preview. `apply`, `rollback`, and `verify` refuse it. Run `agentmoat plan` against the cluster. |
+| `source-managed` | One or more workloads in the plan have the marker of a deploy tool. | Add `runtimeClassName` to the source that the tool deploys from (the git repository, the chart values) too. `agentmoat patch -f <path>` adds it to manifest files. |
+
+### `source-managed`
+
+`apply` patches the live object. When a tool deploys that object from a
+source, the source does not get the change. What the tool does with a live
+change that is not in its source depends on the tool and on its settings, so
+the warning makes no statement about that. It tells you, before the apply,
+that there is a second place to change.
+
+For manifest files, `agentmoat patch -f <path>` makes that change: it adds
+`runtimeClassName` to the pod spec of each workload that can run in the
+sandbox, and prints the diff. For a Helm chart, set the chart value. See
+[The move through the repository](ci-cd.md#3-the-move-through-the-repository).
+
+`scan` reads these markers from the labels and annotations of the workload
+(not of its pods), and records the first match as `managedBy` (`tool` and
+`evidence`) in the report:
+
+| Tool | Marker | Source of the key |
+| --- | --- | --- |
+| `argocd` | annotation `argocd.argoproj.io/tracking-id` | The default resource tracking method from Argo CD 3.0, and the `annotation` and `annotation+label` methods before that. |
+| `argocd` | label `argocd.argoproj.io/instance` | The custom instance label in the Argo CD documents. |
+| `flux` | label `kustomize.toolkit.fluxcd.io/name` | Written by the kustomize-controller on each object that it applies. |
+| `flux` | label `helm.toolkit.fluxcd.io/name` | Written by the helm-controller on each object of a release. |
+| `helm` | annotation `meta.helm.sh/release-name` | Written by Helm on install and upgrade. |
+
+The order is Argo CD, Flux, Helm. An object that Flux installed from a chart
+has the Flux marker and the Helm marker; Flux owns the source, so the report
+names Flux.
+
+The label `app.kubernetes.io/instance` is not a marker here. It is the default
+tracking label of Argo CD 2.x, but charts and operators write it too, so it is
+not evidence of Argo CD. An Argo CD 2.x install with its default settings
+leaves no marker that `scan` reads.
+
+No marker is not proof of no owner. A pipeline that runs `kubectl apply`
+leaves no marker, and each tool can use another key. The warning says so.
+The warning is not in the plan hash, and a plan from manifests does not get
+it (a preview changes no live object).

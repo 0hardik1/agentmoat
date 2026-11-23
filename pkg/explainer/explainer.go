@@ -29,6 +29,7 @@ import (
 // markdown filenames. Add a new topic by adding an entry here AND a matching
 // docs/<file>.md.
 var topicFiles = map[string]string{
+	"ci-cd":         "ci-cd.md",
 	"compatibility": "compatibility-checklist.md",
 	"gpu":           "gpu-nvproxy.md",
 	"gvisor":        "gvisor-101.md",

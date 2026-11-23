@@ -28,7 +28,8 @@ rules:
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch"]
   # Namespaces: enumerated as scan targets and read for the
-  # agentmoat.io/plan-hash annotation (read-only here).
+  # agentmoat.io/plan-hash and agentmoat.io/apply-started annotations
+  # (read-only here).
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]

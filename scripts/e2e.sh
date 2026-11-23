@@ -13,6 +13,8 @@
 #   2. `agentmoat plan`     over the stored ScanReport (deterministic
 #                           ordering, eight compatible steps, PlanHash
 #                           present, no toleration, no cluster warnings).
+#                           One workload has the marker of a deploy tool,
+#                           so the plan has the `source-managed` warning.
 #   3. `agentmoat apply`    in dry-run mode (default; patch carries only
 #                           runtimeClassName), then again with
 #                           --dry-run=false (real strategic-merge patch),
@@ -20,6 +22,14 @@
 #                           targeting the selector-less RuntimeClass is
 #                           refused (exit 5, nothing patched) unless
 #                           --skip-preflight is passed.
+#   3b. `agentmoat verify --wait`  directly after the real apply, with
+#                           the rollout in progress. This is the pipeline
+#                           form: it must wait for the rollout and exit 0,
+#                           where one look at that moment gives exit 4.
+#                           Run again after the re-apply (with the probe:
+#                           a steady cluster needs only the settle time)
+#                           and after rollback (a short wait that must
+#                           time out and exit 4).
 #   4. `agentmoat verify --in-pod-probe`  confirms each patched workload
 #                           actually runs on runsc by exec-ing a probe
 #                           inside the pod and grepping dmesg / proc for
@@ -35,8 +45,17 @@
 #                           /dev/kmsg by the host kernel (runsc
 #                           20261116.0 and newer confine the sandbox to a
 #                           device cgroup; see docs/gvisor-version.md).
+#   4c. scan and plan again  after the apply, the plan has no step for a
+#                           workload that has the class (the start of a
+#                           second pipeline run).
 #   5. `agentmoat rollback` to clear the patches and restore the
 #                           pre-apply spec.
+#   5b. a partial apply     one workload of the plan is deleted, so its
+#                           patch fails and `apply` exits 3. The namespace
+#                           then has apply-started and no plan-hash, and
+#                           `rollback` with the same plan undoes the
+#                           patches that worked. This is the pipeline
+#                           case "apply failed, roll back".
 #   6. `agentmoat explain`  smoke: list mode, known topic, unknown topic
 #                           (exit non-zero, stderr lists topics).
 #   7. `agentmoat probe nvproxy`  dry-run creates nothing; the real run
@@ -114,14 +133,17 @@ E2E_REPLAY_SETUP=$'make kind-up\nkubectl apply -f test/e2e/manifests/runtimeclas
 E2E_REPLAY_PREFLIGHT="$E2E_REPLAY_AGENT preflight"
 E2E_REPLAY_PREFLIGHT_NEG="$E2E_REPLAY_AGENT preflight --runtime-class gvisor-noselector"
 E2E_REPLAY_SCAN="$E2E_REPLAY_AGENT scan --namespace $NAMESPACE"
+E2E_REPLAY_SCAN_FILE="bin/agentmoat scan -f test/e2e/manifests/workloads.yaml -n $NAMESPACE"
 E2E_REPLAY_PLAN="$E2E_REPLAY_AGENT plan --scan $E2E_ARTIFACT_REL/scan.json"
 E2E_REPLAY_APPLY_DRY="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --no-audit"
 E2E_REPLAY_APPLY_BLOCKED="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan-noselector.json --no-audit"
 E2E_REPLAY_APPLY="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
 E2E_REPLAY_VERIFY_PROBE="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json --in-pod-probe"
 E2E_REPLAY_VERIFY="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json"
+E2E_REPLAY_VERIFY_WAIT="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json --wait 3m"
 E2E_REPLAY_DEVICE_CGROUP="scripts/check-device-cgroup.sh --node <gvisor-worker>"
 E2E_REPLAY_ROLLBACK="$E2E_REPLAY_AGENT rollback --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
+E2E_REPLAY_PARTIAL=$'kubectl -n '"$NAMESPACE"$' delete deployment worker\n'"$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"$'   # exit 3\n'"$E2E_REPLAY_AGENT rollback --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
 E2E_REPLAY_EXPLAIN="bin/agentmoat explain"
 E2E_REPLAY_EXPLAIN_NS="$E2E_REPLAY_AGENT explain namespace $NAMESPACE"
 E2E_REPLAY_EXPLAIN_WL="$E2E_REPLAY_AGENT explain workload ${NAMESPACE}/host-net"
@@ -323,7 +345,51 @@ assert_eq "scan clusterFacts.runtimeClass.found" "true" \
   "$(jq -r '.metadata.clusterFacts.runtimeClass.found' "$WORK_DIR/scan.json")"
 assert_eq "scan clusterFacts.nodes.matchingAndReady" 1 \
   "$(jq -r '.metadata.clusterFacts.nodes.matchingAndReady' "$WORK_DIR/scan.json")"
+
+# The analytics Deployment has the tracking annotation of Argo CD. The scan
+# records the tool and the key, and no other workload has a marker.
+assert_eq "scan managedBy (workloads with a deploy tool marker)" \
+  "analytics argocd annotation argocd.argoproj.io/tracking-id" \
+  "$(jq -r '.spec.workloads | map(select(.managedBy != null) | "\(.name) \(.managedBy.tool) \(.managedBy.evidence)") | join(";")' "$WORK_DIR/scan.json")"
 e2e_step_pass "scan" "$E2E_REPLAY_SCAN"
+
+# -----------------------------------------------------------------------------
+# 1b. scan -f: the manifest file gives the verdicts the cluster gave.
+# -----------------------------------------------------------------------------
+#
+# `scan -f` reads the same workloads.yaml that setup applied, with no
+# cluster. A pull-request check trusts a file scan to say what the cluster
+# scan would say after the deploy, so this step compares the two, workload
+# by workload: kind, name, verdict, and the rule ids that fired. It runs
+# before `apply`, while the cluster still has what the file has.
+#
+# It compares those four fields and not the whole JSON on purpose. The two
+# reports differ where they should: only the cluster one has cluster facts,
+# only the file one has an origin for each workload.
+#
+# KUBECONFIG points at a file that does not exist, and --context is not
+# passed, so this run cannot reach the kind cluster by any path.
+
+e2e_step "scan -f: the manifest file gives the verdicts the cluster gave"
+SCAN_FILE_EXIT=0
+KUBECONFIG="$WORK_DIR/no-such-kubeconfig" "$AGENTMOAT_BIN" scan \
+  -f "$MANIFEST_DIR/workloads.yaml" --namespace "$NAMESPACE" --output json \
+  > "$WORK_DIR/scan-file.json" 2> "$WORK_DIR/scan-file.stderr" || SCAN_FILE_EXIT=$?
+assert_eq "scan -f exit code" 2 "$SCAN_FILE_EXIT"
+assert_eq "scan -f source" "manifests" "$(jq -r '.metadata.source.type' "$WORK_DIR/scan-file.json")"
+assert_eq "scan -f names no cluster" "false" \
+  "$(jq -r '.metadata | has("cluster") or has("clusterFacts")' "$WORK_DIR/scan-file.json")"
+
+# One line for each workload: kind, name, verdict, sorted rule ids.
+VERDICT_LINES='.spec.workloads | map("\(.kind) \(.name) \(.compatibility) \([.reasons[]?.ruleId] | sort | join(","))") | sort | .[]'
+jq -r "$VERDICT_LINES" "$WORK_DIR/scan.json" > "$WORK_DIR/verdicts-cluster.txt"
+jq -r "$VERDICT_LINES" "$WORK_DIR/scan-file.json" > "$WORK_DIR/verdicts-file.txt"
+assert_eq "scan -f workload count" "$E2E_TOTAL" "$(wc -l < "$WORK_DIR/verdicts-file.txt" | tr -d ' ')"
+if ! diff -u "$WORK_DIR/verdicts-cluster.txt" "$WORK_DIR/verdicts-file.txt" > "$WORK_DIR/verdicts.diff"; then
+  cat "$WORK_DIR/verdicts.diff"
+  fail "scan -f: verdicts from the file differ from the cluster scan (diff above: - cluster, + file)"
+fi
+e2e_step_pass "scan -f (file vs cluster)" "$E2E_REPLAY_SCAN_FILE"
 
 # -----------------------------------------------------------------------------
 # 2. plan: deterministic, compatible-only steps, non-empty PlanHash.
@@ -360,17 +426,23 @@ PLAN_HASH_2=$(jq -r '.metadata.planHash' "$WORK_DIR/plan2.json")
 assert_eq "plan determinism (re-run hash)" "$PLAN_HASH" "$PLAN_HASH_2"
 
 # Placement is the RuntimeClass's job: no step injects the toleration, and
-# a ready cluster produces no plan-level warnings.
+# a ready cluster produces no cluster warning. The one warning is about the
+# workload that a deploy tool owns: `apply` changes the live object, and the
+# source that the tool deploys from does not get the change.
 assert_eq "plan steps addToleration values" "false" \
   "$(jq -r '.spec.steps | map(.addToleration) | unique | join(",")' "$WORK_DIR/plan.json")"
-assert_eq "plan spec.warnings length" 0 \
-  "$(jq -r '.spec.warnings // [] | length' "$WORK_DIR/plan.json")"
+assert_eq "plan warning ids" "source-managed" \
+  "$(jq -r '.spec.warnings // [] | map(.id) | join(",")' "$WORK_DIR/plan.json")"
+SOURCE_MANAGED_MSG=$(jq -r '.spec.warnings[0].message' "$WORK_DIR/plan.json")
+if [[ "$SOURCE_MANAGED_MSG" != "1 of $E2E_COMPAT workload(s) in this plan have the marker of a deploy tool (Argo CD: 1)."* ]]; then
+  fail "plan source-managed warning: unexpected text: $SOURCE_MANAGED_MSG"
+fi
 
 # A plan that targets the selector-less RuntimeClass: the scan's facts
 # describe "gvisor", so the planner flags the mismatch. Used by 3b below.
 "${AGENT[@]}" plan --scan "$WORK_DIR/scan.json" --runtime-class gvisor-noselector --output json \
   >"$WORK_DIR/plan-noselector.json"
-assert_eq "plan (noselector) warning ids" "cluster-facts-runtime-class-mismatch" \
+assert_eq "plan (noselector) warning ids" "cluster-facts-runtime-class-mismatch,source-managed" \
   "$(jq -r '.spec.warnings // [] | map(.id) | join(",")' "$WORK_DIR/plan-noselector.json")"
 e2e_step_pass "plan" "$E2E_REPLAY_PLAN"
 
@@ -454,6 +526,57 @@ assert_eq "apply summary.applied" "$E2E_COMPAT" "$REAL_APPLIED"
 assert_eq "apply summary.alreadyApplied" 0 "$REAL_ALREADY"
 assert_eq "apply summary.failed" 0 "$REAL_FAILED"
 
+# -----------------------------------------------------------------------------
+# 4a. verify --wait, directly after the apply: the pipeline form.
+# -----------------------------------------------------------------------------
+#
+# A pipeline runs verify as the next command after apply. At that moment the
+# rollout is in progress: old pods with no class, or no pods at all. One
+# look reports a mismatch (exit 4) for a migration that is correct. With
+# --wait, verify looks again until every step is ok and its pods stayed
+# Ready, so its exit code is one that a pipeline can act on.
+#
+# Nothing in this script waits for the rollout before this command. The
+# `rollout status` loops below run after it and must find nothing to wait
+# for.
+#
+# The checks:
+#   - exit 0, every step ok, and no timeout.
+#   - every step has pods that are Ready and stable (no step passed on the
+#     class alone).
+#   - more than 3 looks. This is the proof that the command waited for the
+#     rollout. A cluster that is already in the wanted state needs exactly 3
+#     looks (at 0, 5, and 10 seconds: the settle time; step 5b pins that).
+#     A fourth look means that in the first look one step or more did not
+#     have all its pods Ready with the class, which is a rollout in
+#     progress. A progress line on stderr is not such a proof: the first
+#     look never makes a step final, so "0 of 8 step(s) ok" is on stderr in
+#     every run.
+
+e2e_step "verify --wait 3m (directly after apply): expect ok=$E2E_COMPAT, exit 0"
+VERIFY_WAIT_EXIT=0
+"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --wait 3m --output json \
+  >"$WORK_DIR/verify-wait.json" 2>"$WORK_DIR/verify-wait.stderr" || VERIFY_WAIT_EXIT=$?
+sed 's/^/    /' "$WORK_DIR/verify-wait.stderr"
+assert_eq "verify --wait exit code" 0 "$VERIFY_WAIT_EXIT"
+assert_eq "verify --wait summary.ok" "$E2E_COMPAT" \
+  "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-wait.json")"
+assert_eq "verify --wait metadata.wait.requestedSeconds" 180 \
+  "$(jq -r '.metadata.wait.requestedSeconds' "$WORK_DIR/verify-wait.json")"
+assert_eq "verify --wait metadata.wait.timedOut" "false" \
+  "$(jq -r '.metadata.wait.timedOut' "$WORK_DIR/verify-wait.json")"
+assert_eq "verify --wait steps with Ready and stable pods" "$E2E_COMPAT" \
+  "$(jq -r '[.spec.results[] | select(.readiness.stable == true and .readiness.pods > 0 and .readiness.ready == .readiness.pods)] | length' "$WORK_DIR/verify-wait.json")"
+VERIFY_WAIT_ROUNDS=$(jq -r '.metadata.wait.rounds' "$WORK_DIR/verify-wait.json")
+if (( VERIFY_WAIT_ROUNDS <= 3 )); then
+  fail "verify --wait: $VERIFY_WAIT_ROUNDS look(s); more than 3 expected, because the rollout was in progress at the first look"
+fi
+if ! grep -q "^verify: waiting: " "$WORK_DIR/verify-wait.stderr"; then
+  fail "verify --wait: stderr has no progress line"
+fi
+e2e_infra "verify --wait: $VERIFY_WAIT_ROUNDS look(s) in $(jq -r '.metadata.wait.waitedSeconds' "$WORK_DIR/verify-wait.json")s"
+e2e_step_pass "verify --wait (post-apply)" "$E2E_REPLAY_VERIFY_WAIT"
+
 wait_runtime_class deployment web "gvisor"
 wait_runtime_class statefulset cache "gvisor"
 
@@ -461,9 +584,15 @@ wait_runtime_class statefulset cache "gvisor"
 NS_HASH=$("${KCTL[@]}" get namespace "$NAMESPACE" \
   -o jsonpath='{.metadata.annotations.agentmoat\.io/plan-hash}')
 assert_eq "namespace plan-hash annotation" "$PLAN_HASH" "$NS_HASH"
+# apply-started is on the namespace only while an apply is not complete. The
+# write of the stamp removes it.
+NS_STARTED=$("${KCTL[@]}" get namespace "$NAMESPACE" \
+  -o jsonpath='{.metadata.annotations.agentmoat\.io/apply-started}')
+assert_eq "namespace apply-started annotation after a complete apply" "" "$NS_STARTED"
 
-# Wait for the rolled workloads to be Ready again so the next apply runs
-# against a steady-state spec.
+# The rolled workloads are Ready again: `verify --wait` above returned only
+# when they were. These loops are a second opinion from kubectl on that, and
+# they keep the next apply on a steady-state spec.
 for dep in "${E2E_COMPAT_DEPLOYMENTS[@]}"; do
   "${KCTL[@]}" -n "$NAMESPACE" rollout status "deployment/$dep" --timeout=180s
 done
@@ -566,6 +695,37 @@ assert_eq "re-apply summary.failed" 0 "$RE_FAILED"
 e2e_step_pass "apply (re-run)" "$E2E_REPLAY_APPLY"
 
 # -----------------------------------------------------------------------------
+# 5a. scan and plan again: a workload that has the class gets no step.
+# -----------------------------------------------------------------------------
+#
+# This is the start of the second run of a pipeline: the scan finds the
+# workloads that the first run moved. The plan must have no step for them.
+# A step would change nothing in apply, and a rollback of that plan (for
+# example because one new workload fails) would take them out of the
+# sandbox again.
+#
+# The check needs the real cluster: it proves that the cluster scan reads
+# runtimeClassName from the live pod templates, which is what the planner
+# decides on.
+
+e2e_step "scan and plan after the apply: no step for a workload that has the class"
+RESCAN_EXIT=0
+"${AGENT[@]}" scan --namespace "$NAMESPACE" --output json \
+  >"$WORK_DIR/scan-after-apply.json" 2>/dev/null || RESCAN_EXIT=$?
+assert_eq "scan (post-apply) exit code" 2 "$RESCAN_EXIT"
+assert_eq "scan (post-apply) summary.sandboxed" "$E2E_COMPAT" \
+  "$(jq -r '.spec.summary.sandboxed' "$WORK_DIR/scan-after-apply.json")"
+"${AGENT[@]}" plan --scan "$WORK_DIR/scan-after-apply.json" --output json \
+  >"$WORK_DIR/plan-after-apply.json" 2>/dev/null
+assert_eq "plan (post-apply) summary.included" 0 \
+  "$(jq -r '.spec.summary.included' "$WORK_DIR/plan-after-apply.json")"
+assert_eq "plan (post-apply) workloads excluded because they have the class" \
+  "$(printf '%s\n' "${E2E_COMPAT_DEPLOYMENTS[@]}" "${E2E_COMPAT_STATEFULSETS[@]}" | sort | paste -sd, -)" \
+  "$(jq -r '[.spec.excluded[] | select(.reason | startswith("already has RuntimeClass \"gvisor\"")) | .target.name] | sort | join(",")' \
+    "$WORK_DIR/plan-after-apply.json")"
+e2e_step_pass "scan and plan (post-apply)" "$E2E_REPLAY_SCAN"$'\n'"$E2E_REPLAY_AGENT plan --scan <that scan>"
+
+# -----------------------------------------------------------------------------
 # 5b. verify (post-idempotent-apply): still all-ok.
 # -----------------------------------------------------------------------------
 #
@@ -580,6 +740,23 @@ assert_eq "verify summary.ok (post-reapply)" "$E2E_COMPAT" \
   "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-after-reapply.json")"
 assert_eq "verify summary.mismatch (post-reapply)" 0 \
   "$(jq -r '.spec.summary.mismatch' "$WORK_DIR/verify-after-reapply.json")"
+
+# The same check with a wait time, on a cluster that is already in the
+# wanted state. The wait is then the settle time and no more: three looks
+# (at 0, 5, and 10 seconds), and not the 30 seconds that it may use. The
+# in-pod probe runs when the pods have settled, one time for each step.
+VERIFY_STEADY_EXIT=0
+"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --wait 30s --in-pod-probe --output json \
+  >"$WORK_DIR/verify-wait-steady.json" 2>"$WORK_DIR/verify-wait-steady.stderr" || VERIFY_STEADY_EXIT=$?
+assert_eq "verify --wait (steady) exit code" 0 "$VERIFY_STEADY_EXIT"
+assert_eq "verify --wait (steady) summary.ok" "$E2E_COMPAT" \
+  "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-wait-steady.json")"
+assert_eq "verify --wait (steady) looks" 3 \
+  "$(jq -r '.metadata.wait.rounds' "$WORK_DIR/verify-wait-steady.json")"
+assert_eq "verify --wait (steady) timedOut" "false" \
+  "$(jq -r '.metadata.wait.timedOut' "$WORK_DIR/verify-wait-steady.json")"
+assert_eq "verify --wait (steady) probe detected count" "$E2E_COMPAT" \
+  "$(jq -r '[.spec.results[] | select(.probe.detected == true and .readiness.stable == true)] | length' "$WORK_DIR/verify-wait-steady.json")"
 e2e_step_pass "verify (post-idempotent-apply)" "$E2E_REPLAY_VERIFY_PROBE"
 
 # -----------------------------------------------------------------------------
@@ -639,7 +816,105 @@ assert_eq "verify summary.mismatch (post-rollback)" "$E2E_COMPAT" \
 STATUSES_RB=$(jq -r '.spec.results | map(.status) | sort | unique | join(",")' \
   "$WORK_DIR/verify-after-rollback.json")
 assert_eq "verify result statuses (post-rollback)" "mismatch" "$STATUSES_RB"
+
+# A wait cannot make a wrong state right. With a short wait time the same
+# verify uses all of it, says that it timed out (in the report and on
+# stderr), and exits 4: the signal that a pipeline rolls back on.
+VERIFY_RB_WAIT_EXIT=0
+"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --wait 6s --output json \
+  >"$WORK_DIR/verify-wait-rollback.json" 2>"$WORK_DIR/verify-wait-rollback.stderr" || VERIFY_RB_WAIT_EXIT=$?
+assert_eq "verify --wait (post-rollback) exit code" 4 "$VERIFY_RB_WAIT_EXIT"
+assert_eq "verify --wait (post-rollback) timedOut" "true" \
+  "$(jq -r '.metadata.wait.timedOut' "$WORK_DIR/verify-wait-rollback.json")"
+assert_eq "verify --wait (post-rollback) summary.mismatch" "$E2E_COMPAT" \
+  "$(jq -r '.spec.summary.mismatch' "$WORK_DIR/verify-wait-rollback.json")"
+if ! grep -q "wait of 6s timed out" "$WORK_DIR/verify-wait-rollback.stderr"; then
+  fail "verify --wait (post-rollback): stderr does not say that the wait timed out: $(cat "$WORK_DIR/verify-wait-rollback.stderr")"
+fi
 e2e_step_pass "verify (post-rollback)" "$E2E_REPLAY_VERIFY"
+
+# -----------------------------------------------------------------------------
+# 6c. an apply that fails on one step, and the rollback after it.
+# -----------------------------------------------------------------------------
+#
+# The pipeline case: `apply` fails in the middle, and the next step of the
+# pipeline is `rollback` with the same plan. The rollback must undo the
+# patches that worked.
+#
+# To make one step fail on a real cluster, one workload of the plan is
+# deleted first; the patch of that step gets "not found". The namespace
+# stamp (plan-hash) is written only when every step is done, so after this
+# apply the namespace has no stamp. What it has is apply-started, which
+# `apply` wrote before its first patch. `rollback` reads it, and un-patches
+# each workload that has the class.
+#
+# The checks:
+#   - apply: exit 3, one step failed, the others applied.
+#   - the namespace: apply-started has the plan hash, plan-hash is not set.
+#   - rollback: exit 0, the applied steps are undone, the step of the
+#     deleted workload is already-applied.
+#   - the cluster: no workload of the plan has the class, and the namespace
+#     has none of the two annotations.
+
+e2e_step "apply with one step that fails, then rollback: the rollback undoes the steps that worked"
+PARTIAL_VICTIM="worker"
+"${KCTL[@]}" -n "$NAMESPACE" delete deployment "$PARTIAL_VICTIM" --wait=true >/dev/null
+
+PARTIAL_APPLY_EXIT=0
+"${AGENT[@]}" apply --plan "$WORK_DIR/plan.json" --dry-run=false --output json --no-audit \
+  >"$WORK_DIR/apply-partial.json" 2>"$WORK_DIR/apply-partial.stderr" || PARTIAL_APPLY_EXIT=$?
+assert_eq "partial apply exit code" 3 "$PARTIAL_APPLY_EXIT"
+assert_eq "partial apply summary.applied" "$((E2E_COMPAT - 1))" \
+  "$(jq -r '.spec.summary.applied' "$WORK_DIR/apply-partial.json")"
+assert_eq "partial apply summary.failed" 1 \
+  "$(jq -r '.spec.summary.failed' "$WORK_DIR/apply-partial.json")"
+assert_eq "partial apply: the step that failed" "$PARTIAL_VICTIM" \
+  "$(jq -r '[.spec.steps[] | select(.status == "failed") | .target.name] | join(",")' "$WORK_DIR/apply-partial.json")"
+wait_runtime_class deployment web "gvisor"
+
+assert_eq "namespace plan-hash after a partial apply" "" \
+  "$("${KCTL[@]}" get namespace "$NAMESPACE" -o jsonpath='{.metadata.annotations.agentmoat\.io/plan-hash}')"
+assert_eq "namespace apply-started after a partial apply" "$PLAN_HASH" \
+  "$("${KCTL[@]}" get namespace "$NAMESPACE" -o jsonpath='{.metadata.annotations.agentmoat\.io/apply-started}')"
+
+PARTIAL_RB_EXIT=0
+"${AGENT[@]}" rollback --plan "$WORK_DIR/plan.json" --dry-run=false --output json --no-audit \
+  >"$WORK_DIR/rollback-partial.json" 2>"$WORK_DIR/rollback-partial.stderr" || PARTIAL_RB_EXIT=$?
+assert_eq "rollback after a partial apply: exit code" 0 "$PARTIAL_RB_EXIT"
+assert_eq "rollback after a partial apply: summary.applied" "$((E2E_COMPAT - 1))" \
+  "$(jq -r '.spec.summary.applied' "$WORK_DIR/rollback-partial.json")"
+assert_eq "rollback after a partial apply: summary.alreadyApplied" 1 \
+  "$(jq -r '.spec.summary.alreadyApplied' "$WORK_DIR/rollback-partial.json")"
+assert_eq "rollback after a partial apply: summary.failed" 0 \
+  "$(jq -r '.spec.summary.failed' "$WORK_DIR/rollback-partial.json")"
+
+# No workload of the plan has the class now. Read every one of them: the
+# report says what rollback sent, and this says what the cluster has.
+for dep in "${E2E_COMPAT_DEPLOYMENTS[@]}"; do
+  if [[ "$dep" == "$PARTIAL_VICTIM" ]]; then
+    continue
+  fi
+  wait_runtime_class deployment "$dep" ""
+done
+for sts in "${E2E_COMPAT_STATEFULSETS[@]}"; do
+  wait_runtime_class statefulset "$sts" ""
+done
+assert_eq "namespace plan-hash after the rollback" "" \
+  "$("${KCTL[@]}" get namespace "$NAMESPACE" -o jsonpath='{.metadata.annotations.agentmoat\.io/plan-hash}')"
+assert_eq "namespace apply-started after the rollback" "" \
+  "$("${KCTL[@]}" get namespace "$NAMESPACE" -o jsonpath='{.metadata.annotations.agentmoat\.io/apply-started}')"
+
+# Put the deleted workload back, and let the two rollouts (the apply and
+# the rollback) end, so the steps below start from the state that the
+# setup made.
+"${KCTL[@]}" -n "$NAMESPACE" apply -f "$MANIFEST_DIR/workloads.yaml" >/dev/null
+for dep in "${E2E_COMPAT_DEPLOYMENTS[@]}"; do
+  "${KCTL[@]}" -n "$NAMESPACE" rollout status "deployment/$dep" --timeout=180s
+done
+for sts in "${E2E_COMPAT_STATEFULSETS[@]}"; do
+  "${KCTL[@]}" -n "$NAMESPACE" rollout status "statefulset/$sts" --timeout=180s
+done
+e2e_step_pass "partial apply, then rollback" "$E2E_REPLAY_PARTIAL"
 
 # -----------------------------------------------------------------------------
 # 7. explain smoke: list mode, valid topic, unknown topic.
@@ -676,7 +951,7 @@ set -e
 if (( EXPLAIN_BOGUS_EXIT == 0 )); then
   fail "explain bogus-topic should exit non-zero (got 0); output: $EXPLAIN_BOGUS"
 fi
-for want in runtimeclass gvisor threat-model performance compatibility preflight gpu; do
+for want in runtimeclass gvisor threat-model performance compatibility preflight gpu ci-cd; do
   if ! printf '%s' "$EXPLAIN_BOGUS" | grep -q "$want"; then
     fail "explain bogus-topic stderr missing topic '$want':\n$EXPLAIN_BOGUS"
   fi
@@ -883,7 +1158,7 @@ assert_eq "preflight (V100) gpu finding" "gpu-product-unsupported" \
 agentmoat_table_and_json "$WORK_DIR/plan-v100.json" \
   "${AGENT[@]}" plan --scan "$WORK_DIR/scan-v100.json"
 assert_eq "plan (V100) exit code" 0 "$AGENT_EXIT"
-assert_eq "plan (V100) warning ids" "gpu-product-unsupported" \
+assert_eq "plan (V100) warning ids" "gpu-product-unsupported,source-managed" \
   "$(jq -r '[.spec.warnings[].id] | join(",")' "$WORK_DIR/plan-v100.json")"
 
 e2e_step "gpu facts: remove the simulated GFD labels from $WORKER_NODE"

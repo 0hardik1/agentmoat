@@ -28,7 +28,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/0hardik1/agentmoat/internal/kube"
 	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/classifier"
 	"github.com/0hardik1/agentmoat/pkg/explainer"
@@ -107,29 +106,18 @@ func explainNamespace(ctx context.Context, opts ExplainOptions) (*schema.Explain
 		stderr = os.Stderr
 	}
 
-	// Build the kube client and the classifier registry the same way
-	// Scan() does. Keeping these inline (rather than factoring a shared
-	// helper) keeps the call graph easy to read; if a third command
-	// needs the same plumbing we can extract then.
-	client, _, err := kube.NewClient(scanOpts.KubeconfigPath, scanOpts.Context)
+	// The kube client and the classifier registry come from the same two
+	// helpers Scan() uses, so a verdict here never disagrees with the one
+	// `scan` prints for the same workload. An injected scanOpts.KubeClient
+	// (tests, the MCP harness) is honored.
+	client, err := newKubeClient(scanOpts.KubeClient, scanOpts.KubeconfigPath, scanOpts.Context)
 	if err != nil {
-		return nil, fmt.Errorf("building kubernetes client: %w", err)
+		return nil, err
 	}
 
-	registry := classifier.NewRegistry()
-	classifier.RegisterBuiltins(registry)
-	if scanOpts.RulesYAMLPath != "" {
-		data, err := os.ReadFile(scanOpts.RulesYAMLPath)
-		if err != nil {
-			return nil, fmt.Errorf("reading rules override %s: %w", scanOpts.RulesYAMLPath, err)
-		}
-		warns, err := registry.LoadYAML(data)
-		if err != nil {
-			return nil, fmt.Errorf("parsing rules override %s: %w", scanOpts.RulesYAMLPath, err)
-		}
-		for _, msg := range warns {
-			_, _ = fmt.Fprintf(stderr, "warning: %s\n", msg)
-		}
+	registry, err := buildRegistry(scanOpts.RulesYAMLPath, stderr)
+	if err != nil {
+		return nil, err
 	}
 
 	enumOpts := scanner.EnumerateOptions{

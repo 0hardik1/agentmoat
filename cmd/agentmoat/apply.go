@@ -57,9 +57,20 @@ RuntimeClass. An error finding (no RuntimeClass, no matching Ready node,
 EKS Auto Mode nodes, ...) blocks the apply with exit 5 and every step
 reported as skipped; nothing is mutated. --skip-preflight bypasses this.
 
-The apply writes the plan hash to each affected namespace as the
-'agentmoat.io/plan-hash' annotation, emits one Kubernetes Event per
-mutation, and appends one line per mutation to ~/.agentmoat/audit.jsonl.`,
+The apply records itself on each affected namespace. Before its first patch
+in a namespace it writes the plan hash as the 'agentmoat.io/apply-started'
+annotation; if it cannot write it, it patches nothing in that namespace.
+When every step in the namespace is done, it writes the plan hash as the
+'agentmoat.io/plan-hash' annotation and removes 'apply-started'. An apply
+that does not finish leaves 'apply-started', and 'agentmoat rollback' with
+the same plan then undoes the steps that were applied.
+
+The two annotations hold one plan. When a namespace has the annotation of
+another plan, this apply replaces it and prints a note on stderr. A plan
+with no metadata.planHash cannot be recorded, and is refused (exit 1).
+
+It also emits one Kubernetes Event per mutation, and appends one line per
+mutation to ~/.agentmoat/audit.jsonl.`,
 		RunE: runApply,
 	}
 	cmd.Flags().StringVar(&flagApplyPlanPath, "plan", "",
@@ -77,7 +88,7 @@ mutation, and appends one line per mutation to ~/.agentmoat/audit.jsonl.`,
 }
 
 func runApply(cmd *cobra.Command, _ []string) error {
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindApplyResult)
 	if err != nil {
 		return err
 	}

@@ -11,7 +11,10 @@
 #
 #   Compatible (planner includes; applier patches runtimeClassName=gvisor):
 #
-#     analytics        Deployment, busybox (vanilla).
+#     analytics        Deployment, busybox (vanilla). It has the tracking
+#                      annotation that Argo CD writes, so that scan records
+#                      `managedBy` and plan gives the `source-managed`
+#                      warning. No Argo CD runs in the e2e cluster.
 #     api              Deployment, nginx (info: network-throughput).
 #     auth             Deployment, busybox (vanilla).
 #     billing          Deployment, memcached (info: syscall-heavy).
@@ -254,6 +257,10 @@ metadata:
   name: analytics
   labels:
     app: analytics
+  annotations:
+    # The marker of a deploy tool (see pkg/agentmoat/managed.go). The value
+    # has the form that Argo CD uses: <app>:<group>/<kind>:<namespace>/<name>.
+    argocd.argoproj.io/tracking-id: "agentmoat-e2e:apps/Deployment:agentmoat-e2e/analytics"
 spec:
   replicas: 1
   selector:

@@ -31,6 +31,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/agentmoat"
 	"github.com/0hardik1/agentmoat/pkg/output"
 )
@@ -52,6 +53,7 @@ Run with a topic name to print that topic's content:
     agentmoat explain threat-model
     agentmoat explain performance
     agentmoat explain compatibility
+    agentmoat explain ci-cd
 
 Topic lookup is case-insensitive. The text is sourced from docs/*.md in
 the agentmoat repo, embedded into the binary at build time so the CLI and
@@ -88,7 +90,7 @@ matters.`,
 var flagExplainFactsPath string
 
 func runExplain(cmd *cobra.Command, args []string) error {
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindExplainDocument)
 	if err != nil {
 		return err
 	}

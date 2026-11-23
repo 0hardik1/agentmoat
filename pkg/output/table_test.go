@@ -18,6 +18,7 @@ package output
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -798,5 +799,103 @@ func TestRenderUnknownType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no table renderer") {
 		t.Errorf("error should mention unknown type: %v", err)
+	}
+}
+
+// waitedVerifyReport is a verify after a wait: one step that is ok with its
+// pods Ready, one from the pod template, and one whose pod does not start.
+func waitedVerifyReport(wait schema.VerifyWait) *schema.VerifyReport {
+	r := schema.NewVerifyReport()
+	r.Metadata = schema.VerifyMetadata{PlanHash: "hash-1", Cluster: "prod-eu", Wait: &wait}
+	r.Spec = schema.VerifySpec{
+		Summary: schema.VerifySummary{Total: 3, OK: 2, Mismatch: 1},
+		Results: []schema.VerifyResult{
+			{
+				Order: 1, Target: schema.WorkloadRef{Kind: "Deployment", Namespace: "shop", Name: "web"},
+				Status: schema.VerifyStatusOK, Expected: "gvisor", Actual: "gvisor",
+				Readiness: &schema.PodReadiness{Pods: 2, Ready: 2, Stable: true},
+			},
+			{
+				Order: 2, Target: schema.WorkloadRef{Kind: "CronJob", Namespace: "shop", Name: "report"},
+				Status: schema.VerifyStatusOK, Expected: "gvisor", Actual: "gvisor", Basis: schema.VerifyBasisTemplate,
+				Message: `no pods to check (no Job of the CronJob runs now); the pod template has runtimeClassName="gvisor"`,
+			},
+			{
+				Order: 3, Target: schema.WorkloadRef{Kind: "StatefulSet", Namespace: "shop", Name: "cache"},
+				Status: schema.VerifyStatusMismatch, Expected: "gvisor", Actual: "gvisor",
+				Readiness: &schema.PodReadiness{Pods: 3, Ready: 1, NotReady: []string{"cache-1", "cache-2"},
+					Message: "pod cache-1 is not Ready: container app is waiting: CrashLoopBackOff, 4 restart(s) (and 1 more pod(s) not Ready)"},
+				Message: "pod cache-1 is not Ready: container app is waiting: CrashLoopBackOff, 4 restart(s) (and 1 more pod(s) not Ready)",
+			},
+		},
+	}
+	return r
+}
+
+// TestRenderVerifyReportTable_Wait: after a wait the table says how the
+// wait ended and has a READY column. Without a wait it has neither.
+func TestRenderVerifyReportTable_Wait(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		wait     schema.VerifyWait
+		wantChip string
+	}{
+		{"all steps settled", schema.VerifyWait{RequestedSeconds: 180, WaitedSeconds: 20, Rounds: 5}, "wait: done after 20s of 3m0s"},
+		{"timed out", schema.VerifyWait{RequestedSeconds: 180, WaitedSeconds: 180, Rounds: 37, TimedOut: true}, "wait: timed out after 3m0s"},
+		{"interrupted", schema.VerifyWait{RequestedSeconds: 180, WaitedSeconds: 45, Rounds: 10, Interrupted: true}, "wait: interrupted after 45s of 3m0s"},
+	}
+	for _, tc := range tests {
+		out := renderToString(t, waitedVerifyReport(tc.wait))
+		for _, want := range []string{tc.wantChip, "READY", "2/2", "1/3", "no pods", "CrashLoopBackOff"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s: the output lacks %q:\n%s", tc.name, want, out)
+			}
+		}
+	}
+
+	plain := renderToString(t, sampleVerifyReport())
+	for _, bad := range []string{"READY", "wait:"} {
+		if strings.Contains(plain, bad) {
+			t.Errorf("a verify with no wait must not show %q:\n%s", bad, plain)
+		}
+	}
+}
+
+// TestRenderVerifyReportTable_NotOKBlock: the MESSAGE cell is cut, and the
+// reason is at the end of the message. The block below the table has the
+// full message of each step that is not ok.
+func TestRenderVerifyReportTable_NotOKBlock(t *testing.T) {
+	t.Parallel()
+	out := renderToString(t, waitedVerifyReport(schema.VerifyWait{RequestedSeconds: 180, WaitedSeconds: 180, Rounds: 37, TimedOut: true}))
+	want := "NOT OK\n  3  StatefulSet/shop/cache: pod cache-1 is not Ready: container app is waiting: CrashLoopBackOff, 4 restart(s) (and 1 more pod(s) not Ready)\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("the output lacks the full message of the step that is not ok:\n%s", out)
+	}
+	// An ok step is not in the block, with or without a message.
+	if strings.Contains(out, "  2  CronJob/shop/report:") {
+		t.Errorf("an ok step is in the NOT OK block:\n%s", out)
+	}
+
+	// No step that is not ok: no block.
+	ok := waitedVerifyReport(schema.VerifyWait{RequestedSeconds: 180, WaitedSeconds: 20, Rounds: 5})
+	ok.Spec.Results = ok.Spec.Results[:2]
+	ok.Spec.Summary = schema.VerifySummary{Total: 2, OK: 2}
+	if strings.Contains(renderToString(t, ok), "NOT OK") {
+		t.Errorf("a verify with every step ok has a NOT OK block")
+	}
+
+	// The block has a limit.
+	many := schema.NewVerifyReport()
+	for i := 1; i <= maxVerifyNotOK+3; i++ {
+		many.Spec.Results = append(many.Spec.Results, schema.VerifyResult{
+			Order: i, Target: schema.WorkloadRef{Kind: "Deployment", Namespace: "ns", Name: fmt.Sprintf("w%02d", i)},
+			Status: schema.VerifyStatusError, Message: "no pods matched",
+		})
+	}
+	many.Spec.Summary = schema.VerifySummary{Total: maxVerifyNotOK + 3, Error: maxVerifyNotOK + 3}
+	manyOut := renderToString(t, many)
+	if !strings.Contains(manyOut, "  ... and 3 more (use --output json)") || strings.Contains(manyOut, "Deployment/ns/w11: ") {
+		t.Errorf("the NOT OK block must stop after %d steps:\n%s", maxVerifyNotOK, manyOut)
 	}
 }

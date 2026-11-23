@@ -19,19 +19,21 @@ import (
 	"github.com/0hardik1/agentmoat/pkg/agentmoat"
 )
 
-// These two are overridden at build time via -ldflags. Defaults give a
-// useful answer in `go run` scenarios.
+// These two are overridden at build time via -ldflags. They are empty by
+// default on purpose: an empty value tells ResolveBuildInfo to read the
+// version and commit that the Go toolchain recorded in the binary, so a
+// plain `go install ...@v0.2.0` reports 0.2.0 and not "dev".
 var (
-	Version = "dev"
-	GitSHA  = "unknown"
+	Version = ""
+	GitSHA  = ""
 )
 
-// init copies our ldflag-injected Version into the library package so
-// scan reports carry the same string that `agentmoat version` prints.
-// We could `-X` both vars from the Makefile, but a single source of truth
-// at the binary boundary keeps the Makefile simpler.
+// init resolves the version and commit once (ldflags first, then the Go
+// build record, then "dev"/"unknown") and stores the version in the library
+// package, so scan reports carry the same string that `agentmoat version`
+// prints. cmd/agentmoat-mcp makes the same call.
 func init() {
-	agentmoat.Version = Version
+	Version, GitSHA = agentmoat.ResolveBuildInfo(Version, GitSHA)
 }
 
 func main() {
@@ -41,6 +43,7 @@ func main() {
 	//   2 compatibility issues found
 	//   3 partial apply
 	//   4 verify failed
+	//   5 cluster not ready (preflight, probe, apply)
 	code := Execute()
 	if code != 0 {
 		// Already printed a message via Cobra/our error handler; nothing

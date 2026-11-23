@@ -88,19 +88,53 @@ type ScanOptions struct {
 	// clientset (pkg/applier/applier_test.go pattern). Production callers
 	// (CLI) leave this nil so the standard kubeconfig loader runs.
 	KubeClient kubernetes.Interface
+
+	// ManifestPaths, when non-empty, makes this a scan of manifests and
+	// not of a cluster. Each entry is a file, a directory (walked for
+	// *.yaml, *.yml, and *.json), or "-" for Stdin. The text can be YAML or
+	// JSON: files from a repository, or the output of `helm template`,
+	// `kustomize build`, or `kubectl get -o yaml`.
+	//
+	// In this mode Scan never builds a Kubernetes client and never reads a
+	// kubeconfig. KubeconfigPath, Context, KubeClient, IncludeSystem,
+	// AllNamespaces, and SkipClusterFacts have no effect. The other fields
+	// change meaning as little as they can:
+	//
+	//   - Namespaces: one value is the namespace for objects that name
+	//     none (as `kubectl apply -n`). It is not a filter. More than one
+	//     value is an error.
+	//   - LabelSelector: matched against each workload's own labels.
+	//   - RulesYAMLPath, RuntimeClassName: as for a cluster scan.
+	//   - FactsPath: as for a cluster scan (a saved report needs no
+	//     cluster). Without it there are no facts, so gpu-passthrough keeps
+	//     its base severity.
+	ManifestPaths []string
+
+	// Stdin is the reader for a "-" entry in ManifestPaths. Nil means
+	// standard input is not available, and "-" is then an error. The MCP
+	// server leaves it nil: its standard input is the JSON-RPC channel.
+	Stdin io.Reader
 }
 
-// PlanOptions configures pkg/agentmoat.Plan. Plan() either reads a
-// ScanReport directly (when ScanReport is non-nil) or runs Scan() inline
-// with the embedded ScanOptions.
+// PlanOptions configures pkg/agentmoat.Plan. The source of the plan is the
+// first of these that is set: ScanReport (an in-memory report),
+// ScanReportPath (a report file), or an inline Scan() with the embedded
+// ScanOptions.
 type PlanOptions struct {
-	// ScanOptions is the scan configuration to use when ScanReport is
-	// nil. Ignored when ScanReport is supplied.
+	// ScanOptions is the scan configuration to use when neither ScanReport
+	// nor ScanReportPath is set. Its FactsPath is honored in every case.
 	ScanOptions ScanOptions
 
-	// ScanReport, when non-nil, is used as the source for the plan.
-	// This is how the CLI feeds in a stored scan from disk.
+	// ScanReport, when non-nil, is used as the source for the plan. For
+	// callers that already hold a report in memory (library users, tests).
 	ScanReport *schema.ScanReport
+
+	// ScanReportPath, when non-empty and ScanReport is nil, names a saved
+	// ScanReport (YAML or JSON) to load and use as the source. This is how
+	// `agentmoat plan --scan <file>` and the propose_plan tool's
+	// scan_report_path feed in a stored scan: both pass the path and let
+	// Plan load it, so both reject a wrong file the same way.
+	ScanReportPath string
 
 	// Planner controls ordering, inclusion, and the RuntimeClass name.
 	Planner schema.PlannerOptions
@@ -192,6 +226,17 @@ type VerifyOptions struct {
 	// to skip in CI; opt-in by default so the standard run is purely
 	// API-side.
 	InPodProbe bool
+
+	// Wait, when it is more than zero, makes Verify look at the cluster
+	// again until every step is ok or this much time passed. With a wait
+	// time, a step is ok only when its pods are also Ready and stay
+	// Ready. Zero means one look, with no readiness check. This is what a
+	// pipeline uses directly after `apply --dry-run=false`.
+	Wait time.Duration
+
+	// Clock is the testing seam for the wait loop. Nil means the system
+	// clock.
+	Clock verifier.Clock
 
 	// Stderr is the writer for progress messages. Defaults to os.Stderr
 	// in cmd/. Set to io.Discard to silence.

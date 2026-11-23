@@ -36,6 +36,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/agentmoat"
 	"github.com/0hardik1/agentmoat/pkg/output"
 	"github.com/0hardik1/agentmoat/pkg/probe"
@@ -120,7 +121,7 @@ on pods/log in that namespace, plus the preflight's node reads.`,
 }
 
 func runProbeNvproxy(cmd *cobra.Command, _ []string) error {
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindPreflightReport)
 	if err != nil {
 		return err
 	}

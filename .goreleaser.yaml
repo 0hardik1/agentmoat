@@ -96,7 +96,13 @@ archives:
   # `ids` here selects which build's output goes into the archive.
   # `format_overrides` switches to zip on windows (not built today, but correct
   # the day we add it). `name_template` yields names like
-  # `agentmoat_0.1.0_linux_amd64.tar.gz`. LICENSE + README ride along so
+  # `agentmoat_linux_amd64.tar.gz`. The version is left out of the name on
+  # purpose: GitHub serves the newest release at a fixed URL,
+  #   https://github.com/0hardik1/agentmoat/releases/latest/download/agentmoat_linux_amd64.tar.gz
+  # and that URL only stays valid from release to release when the asset name
+  # does not change. The README install line and CI recipes use it. (v0.1.0
+  # assets carried the version in the name; the fixed URL works from the
+  # first release after this change.) LICENSE + README ride along so
   # consumers can verify provenance offline.
   - id: agentmoat
     ids:
@@ -109,7 +115,6 @@ archives:
           - zip
     name_template: >-
       {{ .Binary }}_
-      {{- .Version }}_
       {{- .Os }}_
       {{- .Arch }}
     files:
@@ -126,7 +131,6 @@ archives:
           - zip
     name_template: >-
       {{ .Binary }}_
-      {{- .Version }}_
       {{- .Os }}_
       {{- .Arch }}
     files:
@@ -139,6 +143,74 @@ archives:
 checksum:
   name_template: 'checksums.txt'
   algorithm: sha256
+
+# ---------------------------------------------------------------------------
+# Container images (ghcr.io/0hardik1/agentmoat).
+#
+# CI/CD is the main way agentmoat is used, and a pipeline that is not GitHub
+# Actions takes a tool as a container image. Two images come out of each
+# release, both with the two binaries inside:
+#
+#   <tag>, latest                 Dockerfile         distroless, no shell,
+#                                                    non-root. For `docker run`
+#                                                    and Kubernetes Jobs.
+#   <tag>-alpine, latest-alpine   Dockerfile.alpine  Alpine with /bin/sh. For
+#                                                    CI systems that run a
+#                                                    script in the job image
+#                                                    (GitLab CI, Jenkins,
+#                                                    Tekton).
+#
+# `dockers_v2` is the current GoReleaser image block (`dockers` and
+# `docker_manifests` are deprecated). One block gives one multi-platform
+# image: GoReleaser copies the linux binaries selected by `ids` into a
+# temporary build context, one directory for each platform, and runs
+# `docker buildx build --platform linux/amd64,linux/arm64`. The Dockerfiles
+# read TARGETPLATFORM to pick the correct binary.
+#
+# Tags: `{{ .Tag }}` is the git tag ("v0.2.0"). A template that renders to
+# an empty string is dropped, so the two `latest` tags do not move on a
+# prerelease tag (v0.3.0-rc.1).
+#
+# Publishing needs `packages: write` and a GHCR login in the release
+# workflow (.github/workflows/release.yml). A snapshot run
+# (`goreleaser release --snapshot --clean`) builds the images into the local
+# Docker daemon and pushes nothing.
+#
+# The org.opencontainers.image.source label links the GHCR package to this
+# repository.
+# ---------------------------------------------------------------------------
+dockers_v2:
+  - id: agentmoat
+    ids:
+      - agentmoat
+      - agentmoat-mcp
+    dockerfile: Dockerfile
+    images:
+      - ghcr.io/0hardik1/agentmoat
+    tags:
+      - "{{ .Tag }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    labels: &image_labels
+      org.opencontainers.image.title: agentmoat
+      org.opencontainers.image.description: "Find out which Kubernetes workloads can run in a gVisor sandbox, then move them: scan, plan, apply, rollback, verify."
+      org.opencontainers.image.url: "https://github.com/0hardik1/agentmoat"
+      org.opencontainers.image.source: "https://github.com/0hardik1/agentmoat"
+      org.opencontainers.image.licenses: Apache-2.0
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+
+  - id: agentmoat-alpine
+    ids:
+      - agentmoat
+      - agentmoat-mcp
+    dockerfile: Dockerfile.alpine
+    images:
+      - ghcr.io/0hardik1/agentmoat
+    tags:
+      - "{{ .Tag }}-alpine"
+      - "{{ if not .Prerelease }}latest-alpine{{ end }}"
+    labels: *image_labels
 
 # `snapshot` controls the version string used when running goreleaser without
 # a tag (e.g. local `goreleaser release --snapshot`). The `{{ incpatch }}`

@@ -1,0 +1,97 @@
+# ---------------------------------------------------------------------------
+# agentmoat: a check for pull requests (GitHub Actions)
+# ---------------------------------------------------------------------------
+#
+# Copy this file to .github/workflows/agentmoat.yml in your repository, and
+# change `k8s` to the directory of your manifests.
+#
+# What it does: on each pull request, it scans the Kubernetes manifests in
+# the repository and fails when a workload that asks for the gVisor
+# RuntimeClass cannot run in it. The report is in the job summary, and each
+# workload that makes the check fail gets an error annotation on its file.
+#
+# What it needs: nothing. The scan reads files only. It reads no cluster,
+# uses no secret, and needs no token permission, so it also works for a pull
+# request from a fork.
+#
+# The full description of the action is in docs/ci-cd.md.
+# ---------------------------------------------------------------------------
+
+name: agentmoat
+
+on:
+  pull_request:
+    # Run only when a manifest changes. Remove `paths` to run on every
+    # pull request.
+    paths:
+      - 'k8s/**'
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: gVisor compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: 0hardik1/agentmoat@v0
+        with:
+          path: k8s
+
+# ---------------------------------------------------------------------------
+# Other inputs. Each block replaces the `uses:` step above.
+# ---------------------------------------------------------------------------
+#
+# A Kustomize overlay. The action renders it first (`kubectl kustomize`),
+# because an overlay can add or remove runtimeClassName:
+#
+#       - uses: 0hardik1/agentmoat@v0
+#         with:
+#           kustomize: deploy/overlays/production
+#
+# A Helm chart. The action renders it first (`helm template`):
+#
+#       - uses: 0hardik1/agentmoat@v0
+#         with:
+#           helm-chart: charts/my-app
+#           helm-values: |
+#             charts/my-app/values.yaml
+#             charts/my-app/values-production.yaml
+#
+# More than one source: use the action one time for each.
+#
+# A stricter gate. `sandboxed` (the default) fails only for a workload that
+# asks for the sandbox. `incompatible` fails for every workload that cannot
+# run in gVisor, also one that does not ask for it:
+#
+#       - uses: 0hardik1/agentmoat@v0
+#         with:
+#           path: k8s
+#           fail-on: incompatible
+#
+# A fixed version. `@v0` follows the newest 0.x release. To pin, name a full
+# release: the action and the agentmoat binary are then from that release.
+#
+#       - uses: 0hardik1/agentmoat@v0.3.0
+#         with:
+#           path: k8s
+#
+# Code scanning (optional). The action writes a SARIF file, and the upload
+# step sends it to GitHub. The job then needs `security-events: write`, and
+# the upload does not work for a pull request from a fork (its token is
+# read-only). `if: always()` sends the file also when the gate failed.
+#
+#     permissions:
+#       contents: read
+#       security-events: write
+#     ...
+#       - uses: 0hardik1/agentmoat@v0
+#         with:
+#           path: k8s
+#           sarif-file: agentmoat.sarif
+#       - uses: github/codeql-action/upload-sarif@v4
+#         if: always()
+#         with:
+#           sarif_file: agentmoat.sarif

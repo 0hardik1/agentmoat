@@ -1,6 +1,8 @@
 // agentmoat version: prints the binary version and build provenance.
 //
-// Version + GitSHA are injected at build time via -ldflags. See main.go.
+// Version + GitSHA are injected at build time via -ldflags, with a fallback
+// to the Go build record for `go install` and plain `go build`. See main.go
+// and pkg/agentmoat/version.go.
 
 package main
 

@@ -1,0 +1,33 @@
+# ---------------------------------------------------------------------------
+# agentmoat: CI container image (ghcr.io/0hardik1/agentmoat:<tag>-alpine)
+# ---------------------------------------------------------------------------
+#
+# Same binaries as the default image (see Dockerfile for how GoReleaser lays
+# out the build context). The differences are for CI systems that start the
+# job image and then run a script inside it (GitLab CI, Jenkins, Tekton):
+#
+#   * Alpine base: it has /bin/sh, which those systems need.
+#   * No ENTRYPOINT: GitLab CI does not replace an image entrypoint, so an
+#     entrypoint that is not a shell makes the job fail before the script
+#     starts. With no entrypoint, a job line is just `agentmoat scan -f k8s/`.
+#   * It runs as root, as CI job images usually do, so the job can write
+#     artifacts (a plan file, the audit log) into a workspace that the CI
+#     system created as root. Pass `--user` to run it as a different user.
+#
+# For `docker run`, a Kubernetes Job, or any other use that calls the binary
+# directly, use the default image: it has no shell and does not run as root.
+#
+# Alpine ships the CA bundle in the base image, so TLS to an API server
+# works with no extra package. There is no RUN line, so the arm64 image
+# builds on an amd64 runner without QEMU emulation.
+# ---------------------------------------------------------------------------
+FROM alpine:3.23
+
+ARG TARGETPLATFORM
+
+COPY ${TARGETPLATFORM}/agentmoat     /usr/local/bin/agentmoat
+COPY ${TARGETPLATFORM}/agentmoat-mcp /usr/local/bin/agentmoat-mcp
+
+# Not an ENTRYPOINT (see above). `docker run <image>` with no arguments
+# prints the CLI help.
+CMD ["agentmoat", "--help"]

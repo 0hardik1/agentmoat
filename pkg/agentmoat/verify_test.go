@@ -5,14 +5,20 @@
 package agentmoat
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
 	"github.com/0hardik1/agentmoat/pkg/planner"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/yaml"
 )
 
@@ -83,8 +89,9 @@ func TestLoadPlanRejectsTamperedHash(t *testing.T) {
 		t.Errorf("error should mention the integrity check: %v", err)
 	}
 
-	// A plan with no hash at all is allowed through: the applier never
-	// short-circuits on an empty hash.
+	// A plan with no hash at all is allowed through by the loader: verify
+	// only reads the steps. Apply and Rollback refuse it after the load
+	// (TestApplyAndRollback_RefuseAPlanWithNoHash in apply_test.go).
 	noHash := strings.ReplaceAll(string(data), "planHash:", "somethingElse:")
 	noHashPath := filepath.Join(t.TempDir(), "nohash.yaml")
 	// #nosec G703 -- noHashPath is a t.TempDir() join; not attacker-controlled.
@@ -148,5 +155,165 @@ func TestVerifyLoadsPlanAndFailsKubeconfig(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "verify") {
 		t.Errorf("error should be wrapped with 'verify': %v", err)
+	}
+}
+
+// jumpClock is a verifier.Clock that moves only when the wait loop sleeps,
+// so a wait of minutes runs in no time.
+type jumpClock struct{ now time.Time }
+
+func (c *jumpClock) Now() time.Time { return c.now }
+
+func (c *jumpClock) Sleep(_ context.Context, d time.Duration) { c.now = c.now.Add(d) }
+
+// verifyCluster is a fake cluster for the plan of writeTestPlan: the
+// Deployment ns-a/web and one pod with the class. ready sets the condition
+// Ready on the pod.
+func verifyCluster(ready bool) *fake.Clientset {
+	labels := map[string]string{"app": "web"}
+	class := "gvisor"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "web-1", Labels: labels},
+		Spec:       corev1.PodSpec{RuntimeClassName: &class},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	if ready {
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	}
+	return fake.NewSimpleClientset(
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns-a", Name: "web"},
+			Spec:       appsv1.DeploymentSpec{Selector: &metav1.LabelSelector{MatchLabels: labels}},
+		},
+		pod,
+	)
+}
+
+// TestVerify_Wait: the orchestrator gives the wait time to the verifier,
+// and the report and the stderr summary say how the wait ended.
+func TestVerify_Wait(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		ready      bool
+		wantOK     int
+		wantWait   schema.VerifyWait
+		wantStderr string
+	}{
+		{
+			name: "pods that are Ready", ready: true, wantOK: 1,
+			wantWait:   schema.VerifyWait{RequestedSeconds: 30, WaitedSeconds: 10, Rounds: 3},
+			wantStderr: "verify: 1 ok, 0 mismatch, 0 error (in-pod-probe=false, waited 10s of 30s)",
+		},
+		{
+			name: "a pod that is never Ready", ready: false, wantOK: 0,
+			wantWait:   schema.VerifyWait{RequestedSeconds: 30, WaitedSeconds: 30, Rounds: 7, TimedOut: true},
+			wantStderr: "verify: 0 ok, 1 mismatch, 0 error (in-pod-probe=false, wait of 30s timed out)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stderr := &bytes.Buffer{}
+			report, err := Verify(context.Background(), VerifyOptions{
+				PlanPath:   writeTestPlan(t),
+				KubeClient: verifyCluster(tc.ready),
+				Wait:       30 * time.Second,
+				Clock:      &jumpClock{now: time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)},
+				Stderr:     stderr,
+			})
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if report.Spec.Summary.OK != tc.wantOK {
+				t.Errorf("summary = %+v, want %d ok", report.Spec.Summary, tc.wantOK)
+			}
+			if report.Metadata.Wait == nil || *report.Metadata.Wait != tc.wantWait {
+				t.Errorf("metadata.wait = %+v, want %+v", report.Metadata.Wait, tc.wantWait)
+			}
+			if !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr lacks %q:\n%s", tc.wantStderr, stderr.String())
+			}
+		})
+	}
+}
+
+// TestVerify_NoWaitIsOneLook: with no wait time the report has no wait
+// block, and a pod that is not Ready is not a failure. This is the behavior
+// from before the wait option.
+func TestVerify_NoWaitIsOneLook(t *testing.T) {
+	t.Parallel()
+	stderr := &bytes.Buffer{}
+	report, err := Verify(context.Background(), VerifyOptions{
+		PlanPath: writeTestPlan(t), KubeClient: verifyCluster(false), Stderr: stderr,
+	})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if report.Metadata.Wait != nil || report.Spec.Summary.OK != 1 || report.Spec.Results[0].Readiness != nil {
+		t.Errorf("wait = %+v, summary = %+v, readiness = %+v; want no wait block, 1 ok, no readiness",
+			report.Metadata.Wait, report.Spec.Summary, report.Spec.Results[0].Readiness)
+	}
+	if want := "verify: 1 ok, 0 mismatch, 0 error (in-pod-probe=false)\n"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
+	}
+}
+
+// TestVerify_APlanWithNoStepsSaysThatNothingWasVerified: a plan with no
+// steps gives "0 ok, 0 mismatch" and exit 0. That result must not read as
+// "every workload is in the sandbox": verify looked at no workload. The
+// usual cause is a plan from a scan after the workloads got the class (the
+// planner makes no step for a workload that has a RuntimeClass). stderr
+// says it; the Markdown report says it too (pkg/output).
+func TestVerify_APlanWithNoStepsSaysThatNothingWasVerified(t *testing.T) {
+	t.Parallel()
+	plan := schema.NewMigrationPlan()
+	plan.Spec = schema.PlanSpec{
+		Options:  schema.PlannerOptions{RuntimeClassName: "gvisor"},
+		Steps:    []schema.PlanStep{},
+		Excluded: []schema.ExcludedWorkload{},
+	}
+	hash, err := planner.ComputePlanHash(plan.Spec.Steps, plan.Spec.Options)
+	if err != nil {
+		t.Fatalf("compute plan hash: %v", err)
+	}
+	plan.Metadata = schema.PlanMetadata{GeneratedAt: "2026-05-22T12:00:00Z", PlanHash: hash}
+	data, err := yaml.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "empty-plan.yaml")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	stderr := &bytes.Buffer{}
+	report, err := Verify(context.Background(), VerifyOptions{PlanPath: path, KubeClient: verifyCluster(false), Stderr: stderr})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if n := len(report.Spec.Results); n != 0 {
+		t.Fatalf("results = %d, want 0", n)
+	}
+	if want := "verify: nothing was verified: the plan has no steps."; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
+	}
+
+	// A plan with steps does not get the line.
+	stderr.Reset()
+	if _, err := Verify(context.Background(), VerifyOptions{PlanPath: writeTestPlan(t), KubeClient: verifyCluster(false), Stderr: stderr}); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if strings.Contains(stderr.String(), "nothing was verified") {
+		t.Errorf("a plan with a step must not say that nothing was verified:\n%s", stderr.String())
+	}
+}
+
+// TestVerify_NegativeWaitIsRefusedFirst: before the plan file is read.
+func TestVerify_NegativeWaitIsRefusedFirst(t *testing.T) {
+	t.Parallel()
+	_, err := Verify(context.Background(), VerifyOptions{Wait: -time.Second})
+	if err == nil || !strings.Contains(err.Error(), "the wait time is -1s") {
+		t.Errorf("err = %v, want an error about the wait time", err)
 	}
 }

@@ -31,25 +31,26 @@ byte-identical: same Go struct, same `json:` tags, same APIVersion
 
 ## 3. Tools, resources, prompts
 
-### Tools (9)
+### Tools (10)
 
 | Tool                | Orchestrator                  | Mutating | Notes                                                                |
 |---------------------|-------------------------------|----------|----------------------------------------------------------------------|
-| `scan_cluster`      | `agentmoat.Scan`              | no       | Returns a `ScanReport` (with `metadata.clusterFacts`; `no_cluster_facts` skips them, `facts_path` loads them from a saved report). |
+| `scan_cluster`      | `agentmoat.Scan`              | no       | Returns a `ScanReport` (with `metadata.clusterFacts`; `no_cluster_facts` skips them, `facts_path` loads them from a saved report). With `manifest_paths` it reads manifest files or directories and contacts no cluster (the `scan -f` form): use it to check a repository. Standard input is not available; pass rendered output as a file. |
 | `preflight_cluster` | `agentmoat.Preflight`         | no       | Returns a `PreflightReport`. `spec.summary.ready=false` means `apply_plan` will refuse to run. |
 | `probe_nvproxy`     | `agentmoat.Probe`             | YES      | Creates and deletes one pod on a gVisor node to read the `runsc` nvproxy driver list (a second pod when that `runsc` needs its sidecar binaries). Defaults to dry-run; `"dry_run": false` runs it. Returns a `PreflightReport` with `spec.facts.gpu.nvproxy`. |
 | `assess_workload`   | `agentmoat.AssessWorkload`    | no       | Returns a `WorkloadResult` for one named workload. Accepts `facts_path`. |
 | `propose_plan`      | `agentmoat.Plan`              | no       | Same scan in -> same `planHash`. Accepts `scan_report_path` to reuse a saved scan, `facts_path` for the facts, `add_toleration` for the pod toleration. |
+| `patch_manifests`   | `agentmoat.Patch`             | YES (files) | Adds `runtimeClassName` to the manifest files of the workloads that can run in gVisor (the `patch` command), so that the move goes through a pull request. Contacts no cluster. Defaults to dry-run and returns a `PatchResult` with the unified diff of each file; `"dry_run": false` writes the files. With `kustomize_dir` it edits no source file and writes the change into that directory as a Kustomize component (the `--kustomize` form). |
 | `apply_plan`        | `agentmoat.Apply`             | YES      | Defaults to dry-run. Must set `"dry_run": false` explicitly to mutate. Runs the preflight first; `skip_preflight` bypasses it. |
 | `rollback_plan`     | `agentmoat.Rollback`          | YES      | Same dry-run gate as `apply_plan`.                                   |
-| `verify_migration`  | `agentmoat.Verify`            | no       | Set `in_pod_probe=true` to also exec a /proc-and-uname probe.        |
+| `verify_migration`  | `agentmoat.Verify`            | no       | Set `in_pod_probe=true` to also exec a /proc-and-uname probe. Set `wait` (a duration such as `"2m"`) directly after `apply_plan`: the tool then looks again until every step is ok and its pods stay Ready, and the report has `metadata.wait`. The call does not return before that, so keep `wait` below the time limit that your client has for a tool call. |
 | `explain`           | `agentmoat.Explain`           | no       | Offline; reads the embedded docs.                                    |
 
 **Safety gate.** The mutating tools (`apply_plan`, `rollback_plan`,
-`probe_nvproxy`) inspect the raw JSON-RPC arguments for the `dry_run` field. The handler
+`probe_nvproxy`, and `patch_manifests`) inspect the raw JSON-RPC arguments for the `dry_run` field. The handler
 distinguishes "field omitted" from "field set to `false`":
 
-- field absent OR `"dry_run": true` -> dry-run (no cluster mutation).
+- field absent OR `"dry_run": true` -> dry-run (no cluster mutation, no file written).
 - `"dry_run": false` (explicit) -> mutation allowed.
 
 A non-boolean `dry_run` value is rejected with a structured tool-result
@@ -63,6 +64,30 @@ nothing is mutated. An agent should call `preflight_cluster` first, show the
 operator the remediation text, and only pass `"skip_preflight": true` when
 the operator has confirmed the cluster can host the RuntimeClass anyway.
 See [`preflight.md`](preflight.md) for the finding ids.
+
+**The move through a repository.** `patch_manifests` is the tool for an agent
+that works in a repository: call it with `manifest_paths` as a dry-run, show
+the person the diff from `spec.files[].diff`, and call it again with
+`"dry_run": false` when the person agrees. The change is one added line for
+each workload, and a second call changes nothing. `spec.changes` lists the
+workloads that the tool could not edit (JSON, flow-style YAML, a pod spec
+behind a YAML anchor) with the reason; make those edits by hand. Then call
+`scan_cluster` with the same `manifest_paths` to check the result. The tool
+does not commit and does not open a pull request. See
+[`ci-cd.md`](ci-cd.md#3-the-move-through-the-repository).
+
+With Kustomize, when one overlay must move and not each overlay of the base,
+pass `kustomize_dir` (for example `overlays/staging/gvisor`). The tool then
+edits no source file. It writes one patch file for each selected workload
+and a `kustomization.yaml` of kind `Component` into that directory; each
+change has `patchFile`. Two things are left for the agent or the person: add
+the directory to `components:` in the kustomization that must move, and
+build that kustomization. `manifest_paths` must be what that kustomization
+reads from its `resources:` and nothing more, because a patch for an object
+that it does not read stops its build, and the tool does not run Kustomize.
+The CLI reads standard input in this form; the tool does not (its standard
+input is the protocol channel), so pass rendered output as a file. See
+[Kustomize](ci-cd.md#kustomize).
 
 **GPU workloads.** `gpu-passthrough` is refined from cluster facts (card,
 driver, MIG). The driver list lives only in the `runsc` binary, so the flow
@@ -104,7 +129,7 @@ claude mcp add agentmoat -- /absolute/path/to/agentmoat-mcp
 Alternatively, declare the server in a checked-in `.mcp.json` at the
 project root (shared with your team) or in your user-level
 `~/.claude.json`. All three accept the same `mcpServers` shape. (Claude
-Desktop — the chat app, not Claude Code — uses
+Desktop, which is the chat app and not Claude Code, uses
 `claude_desktop_config.json` with the same entry format.)
 
 ```json

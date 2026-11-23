@@ -5,10 +5,10 @@
 // spec (https://modelcontextprotocol.io/). Every tool, resource, and prompt
 // here is a thin shell over the same pkg/agentmoat library that powers the
 // CLI (`agentmoat`); the two surfaces share orchestrator functions
-// (Scan, Preflight, Probe, AssessWorkload, Plan, Apply, Rollback, Verify,
-// Explain) so they cannot drift.
+// (Scan, Preflight, Probe, AssessWorkload, Plan, Patch, Apply, Rollback,
+// Verify, Explain) so they cannot drift.
 //
-// The nine tools and two resources form the MCP contract; see
+// The ten tools and two resources form the MCP contract; see
 // docs/mcp-integration.md for the full surface. The one prompt
 // (audit-cluster-for-agentic-workloads)
 // is a curated heuristic for identifying workloads that benefit most from
@@ -22,4 +22,5 @@
 //	Omitting the field, or sending `"dry_run": true`, runs the orchestrator
 //	in dry-run mode and returns the would-be patches without applying them.
 //	This mirrors the CLI's load-bearing `--dry-run=true` default.
+//	patch_manifests has the same rule for the manifest files that it edits.
 package main

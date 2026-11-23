@@ -43,6 +43,7 @@ package verifier
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
 	"k8s.io/client-go/kubernetes"
@@ -74,6 +75,24 @@ type Options struct {
 	// privileged grant the operator must opt into. With InPodProbe off the
 	// verifier only checks the live pods' .spec.runtimeClassName.
 	InPodProbe bool
+
+	// Wait, when it is more than zero, makes Verify look at the cluster
+	// again until every step is ok or this much time passed. With a wait
+	// time, a step is ok only when its pods are also Ready and stay Ready
+	// (see wait.go). Zero means one look, with no readiness check.
+	Wait time.Duration
+
+	// PollInterval is the time between two looks. Zero means
+	// DefaultPollInterval.
+	PollInterval time.Duration
+
+	// Settle is how long the pods of a step must stay Ready before the
+	// step is ok. Zero means DefaultSettle. It is never more than Wait.
+	Settle time.Duration
+
+	// Clock is the test seam for the wait loop. Nil means the system
+	// clock.
+	Clock Clock
 
 	// Exec is the test seam for the in-pod probe. Tests supply a fake
 	// implementation that returns canned stdout/stderr/exit. When nil and

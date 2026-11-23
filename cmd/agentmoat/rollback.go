@@ -1,9 +1,10 @@
 // agentmoat rollback: undo a previously applied MigrationPlan.
 //
 // rollback removes runtimeClassName from each workload listed in the plan
-// and clears the agentmoat.io/plan-hash annotation on each affected
-// namespace. Idempotent: a second rollback reports every step as
-// already-applied. Defaults to --dry-run=true.
+// and clears the annotations of the plan (agentmoat.io/plan-hash and
+// agentmoat.io/apply-started) on each affected namespace. It also undoes an
+// apply that did not finish. Idempotent: a second rollback reports every
+// step as already-applied. Defaults to --dry-run=true.
 //
 // Exit codes (docs/exit-codes.md):
 //   0  rollback complete (or dry-run preview)
@@ -37,8 +38,32 @@ func newRollbackCmd() *cobra.Command {
 		Use:   "rollback",
 		Short: "Rollback a previously applied MigrationPlan (mutating; default dry-run)",
 		Long: `rollback walks the plan in reverse order and removes runtimeClassName
-from each workload's pod template. The agentmoat.io/plan-hash annotation
-is cleared on every affected namespace.
+from each workload's pod template. The annotations of the plan
+(agentmoat.io/plan-hash and agentmoat.io/apply-started) are cleared on
+every affected namespace.
+
+rollback acts on a namespace only when one of the two annotations has the
+hash of the plan:
+
+    plan-hash      the apply was complete: every step is undone
+    apply-started  the apply did not finish (a step failed, or the process
+                   was stopped): a step is undone when its workload has the
+                   RuntimeClass of the plan now
+    none           the namespace has no record of the plan: nothing is
+                   changed, every step is reported as already-applied, and
+                   stderr has a note
+
+So a pipeline can run "apply, and on a failure rollback" with the same plan
+file, also when the apply stopped in the middle.
+
+The two annotations hold one plan. A later apply of another plan replaces
+them, and a rollback with the older plan then changes nothing (its steps
+are skipped, or already-applied when no annotation is left). To roll back
+that older plan, apply it again first.
+
+rollback has no record for each workload: it removes the RuntimeClass of
+the plan from the workloads of the plan, also from one that had that class
+before the apply. See docs/exit-codes.md.
 
 By default --dry-run=true: the patches are computed and reported but no
 mutation is sent to the API server. Pass --dry-run=false to mutate.
@@ -63,7 +88,7 @@ controllers re-ordered the list since apply ran.`,
 }
 
 func runRollback(cmd *cobra.Command, _ []string) error {
-	format, err := output.Parse(flagOutput)
+	format, err := output.ParseFor(flagOutput, schema.KindRollbackResult)
 	if err != nil {
 		return err
 	}

@@ -13,16 +13,18 @@
 #     (agentmoat, agentmoat-mcp) for the configured OS / arch matrix,
 #     produces tar.gz archives, a sha256 checksums file, and an auto-
 #     generated changelog, then uploads everything to a GitHub Release
-#     keyed off the pushed tag.
+#     keyed off the pushed tag. It also builds the two container images
+#     (default and -alpine, linux/amd64 + linux/arm64) and pushes them to
+#     ghcr.io/0hardik1/agentmoat. See the `dockers_v2` block in
+#     .goreleaser.yaml.
 #
 # Tokens:
 #   * `GITHUB_TOKEN` (provided automatically by Actions) is sufficient for
-#     uploading release assets to the same repo.
-#   * If we later push container images to GHCR or to a third-party registry
-#     such as Docker Hub, we will need a Personal Access Token with
-#     `write:packages` (commonly called `CR_PAT`). Add it as a repo secret
-#     and expose it to the release step as `GITHUB_TOKEN`-equivalent env
-#     variable for that step.
+#     uploading release assets to the same repo, and for pushing images to
+#     GHCR under the same owner once the job has `packages: write`. No
+#     Personal Access Token is necessary.
+#   * A third-party registry such as Docker Hub would need its own secret
+#     and a second login step.
 #
 # Checkout depth:
 #   * `fetch-depth: 0` clones the full git history. GoReleaser needs every
@@ -42,9 +44,11 @@ on:
       - 'v*.*.*'
 
 # `contents: write` is required so GoReleaser can create the GitHub Release
-# and upload assets. Other scopes stay at their default (read or none).
+# and upload assets. `packages: write` lets the job push the container
+# images to GHCR. Other scopes stay at their default (read or none).
 permissions:
   contents: write
+  packages: write
 
 jobs:
   release:
@@ -66,6 +70,24 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      # Buildx with the docker-container driver. GoReleaser's image step
+      # runs one `docker buildx build` for linux/amd64 and linux/arm64 and
+      # attaches an SBOM attestation; the default `docker` driver on the
+      # runner can do neither. No QEMU step is needed: the Dockerfiles have
+      # no RUN line, so nothing executes for the foreign architecture.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Log in to GHCR as the workflow, so `docker buildx build --push` can
+      # write ghcr.io/0hardik1/agentmoat. The password is the per-job
+      # GITHUB_TOKEN; it works because of `packages: write` above.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # goreleaser-action@v7 wraps the official goreleaser binary. `args` is
       # the literal command-line; `release --clean` is the standard release
       # invocation (build, archive, publish, and clean the dist/ dir first).
@@ -79,6 +101,5 @@ jobs:
         env:
           # GITHUB_TOKEN is provisioned per-job by Actions and is scoped to
           # this repo. It is sufficient for creating a Release and uploading
-          # assets. If we later push container images to a registry, swap to
-          # a PAT with package:write (e.g. secrets.CR_PAT) for that step.
+          # assets. (The image push uses the GHCR login step above.)
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

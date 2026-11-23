@@ -26,8 +26,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
@@ -63,16 +65,8 @@ func renderScanReportTable(report *schema.ScanReport, w io.Writer, useColor bool
 		return err
 	}
 
-	// Subtitle: cluster + namespaces chips when present. Both are
-	// optional; we skip the line entirely if no chips have content.
-	chips := []string{}
-	if c := report.Metadata.Cluster; c != "" {
-		chips = append(chips, "cluster: "+c)
-	}
-	if total := sum.Total; total > 0 {
-		chips = append(chips, fmt.Sprintf("scanned: %d", total))
-	}
-	if len(chips) > 0 {
+	// Subtitle chips. We skip the line entirely if no chips have content.
+	if chips := scanChips(report); len(chips) > 0 {
 		if _, err := fmt.Fprintln(w, s.Muted.Render(strings.Join(chips, "   "))); err != nil {
 			return err
 		}
@@ -98,13 +92,21 @@ func renderScanReportTable(report *schema.ScanReport, w io.Writer, useColor bool
 	}
 
 	if len(report.Spec.Workloads) == 0 {
-		_, err := fmt.Fprintln(w, s.Muted.Render("(no workloads found)"))
-		return err
+		if _, err := fmt.Fprintln(w, s.Muted.Render("(no workloads found)")); err != nil {
+			return err
+		}
+		return renderScanSource(s, report.Metadata.Source, w)
 	}
 
-	// Body table. Columns: NAMESPACE, KIND, NAME, VERDICT, REASONS.
+	// Body table. Columns: NAMESPACE, KIND, NAME, RUNTIME, VERDICT, REASONS.
 	// VERDICT is a pre-baked StatusBadge so column widths stay correct
 	// (lipgloss/table measures display width, ANSI-aware).
+	//
+	// RUNTIME is the runtimeClassName the pod spec asks for today ("-" for
+	// none). It is what tells a workload that is already in the sandbox
+	// from a candidate, and it sits next to VERDICT because the pair is
+	// the thing to read: "gvisor" beside "incompatible" is a workload that
+	// is about to break, or already has.
 	//
 	// The per-workload Recommendation field is deliberately omitted from
 	// the table. For "compatible" rows it is a canned line that repeats on
@@ -112,13 +114,14 @@ func renderScanReportTable(report *schema.ScanReport, w io.Writer, useColor bool
 	// width on large clusters; for review/incompatible rows the actionable
 	// signal is in REASONS. Recommendation is still emitted in the JSON
 	// and YAML payloads, the muted footer below points operators there.
-	headers := []string{"NAMESPACE", "KIND", "NAME", "VERDICT", "REASONS"}
+	headers := []string{"NAMESPACE", "KIND", "NAME", "RUNTIME", "VERDICT", "REASONS"}
 	t := newBaseTable(s, headers, nil /* numericCols: none here */)
 	for _, wl := range report.Spec.Workloads {
 		t.Row(
-			wl.Namespace,
+			displayNamespace(wl.Namespace),
 			wl.Kind,
 			truncateCell(wl.Name, maxNameWidth),
+			displayRuntime(wl.RuntimeClassName),
 			StatusBadge(s, string(wl.Compatibility)),
 			summarizeReasons(wl.Reasons),
 		)
@@ -126,8 +129,104 @@ func renderScanReportTable(report *schema.ScanReport, w io.Writer, useColor bool
 	if _, err := fmt.Fprintln(w, t.Render()); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintln(w, s.Muted.Render("(use --output json for full per-workload recommendations and reason details)"))
-	return err
+	if _, err := fmt.Fprintln(w, s.Muted.Render("(use --output json for full per-workload recommendations and reason details)")); err != nil {
+		return err
+	}
+	return renderScanSource(s, report.Metadata.Source, w)
+}
+
+// scanChips builds the subtitle of the scan table: where the workloads came
+// from (a cluster, or manifests), how many there are, and how many already
+// ask for the sandbox. Every chip is optional.
+func scanChips(report *schema.ScanReport) []string {
+	sum := report.Spec.Summary
+	chips := []string{}
+	if c := report.Metadata.Cluster; c != "" {
+		chips = append(chips, "cluster: "+c)
+	}
+	if src := report.Metadata.Source; src != nil {
+		chips = append(chips, fmt.Sprintf("source: %s (%d input(s), no cluster)", src.Type, src.Inputs))
+	}
+	if total := sum.Total; total > 0 {
+		chips = append(chips, fmt.Sprintf("scanned: %d", total))
+	}
+	if sum.Sandboxed > 0 {
+		chips = append(chips, fmt.Sprintf("sandboxed (%s): %d", displayRuntime(report.Metadata.RuntimeClassName), sum.Sandboxed))
+	}
+	return chips
+}
+
+// renderScanSource writes what a scan of manifests has to say beyond its
+// rows: what it read and did not classify, what is defined twice, and
+// whether the input is the rendered form of the objects. Nil (a cluster
+// scan) writes nothing.
+//
+// These lines are in the table, and not only on stderr, because the table
+// must be honest when it is read alone: with --quiet, or pasted into a
+// ticket. "0 incompatible" means little without "and 40 objects were not
+// workloads".
+func renderScanSource(s *Styles, src *schema.ReportSource, w io.Writer) error {
+	if src == nil {
+		return nil
+	}
+	if len(src.Skipped) > 0 {
+		line := "not classified (no pod template): " + formatCounts(src.Skipped)
+		if _, err := fmt.Fprintln(w, s.Muted.Render(line)); err != nil {
+			return err
+		}
+	}
+	for _, d := range src.Duplicates {
+		if _, err := fmt.Fprintf(w, "%s %s\n", s.Warn.Render(symbolWarn), d); err != nil {
+			return err
+		}
+	}
+	if len(src.Unrendered) > 0 {
+		head := fmt.Sprintf("%s not rendered: the verdicts describe the files, not what gets deployed (overlays are not applied)", symbolWarn)
+		if _, err := fmt.Fprintln(w, s.Warn.Render(head)); err != nil {
+			return err
+		}
+		for _, sign := range src.Unrendered {
+			if _, err := fmt.Fprintf(w, "    %s\n", sign); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintln(w, s.Muted.Render("    scan the rendered objects: kustomize build <dir> | agentmoat scan -f -")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// displayNamespace renders a namespace cell. A manifest that names no
+// namespace has none; "-" says so better than a blank cell.
+func displayNamespace(ns string) string {
+	if ns == "" {
+		return "-"
+	}
+	return ns
+}
+
+// displayRuntime renders a runtimeClassName cell, with "-" for none.
+func displayRuntime(runtimeClass string) string {
+	if runtimeClass == "" {
+		return "-"
+	}
+	return runtimeClass
+}
+
+// formatCounts renders a count map as "2 ConfigMap, 1 Service", sorted by
+// key so the line is the same on every run.
+func formatCounts(counts map[string]int) string {
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[k], k))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // renderMigrationPlanTable is the MigrationPlan-specific view: ordered
@@ -410,6 +509,13 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 		"plan-hash: " + report.Metadata.PlanHash,
 		fmt.Sprintf("in-pod-probe: %v", report.Metadata.InPodProbe),
 	}
+	// A report after a wait says so, and says how the wait ended: "3 not
+	// ok" after one look and "3 not ok after 3 minutes" are different
+	// facts for the person who decides on a rollback.
+	waited := report.Metadata.Wait != nil
+	if waited {
+		chips = append(chips, "wait: "+describeWait(report.Metadata.Wait))
+	}
 	if _, err := fmt.Fprintln(w, s.Muted.Render(strings.Join(chips, "   "))); err != nil {
 		return err
 	}
@@ -440,11 +546,16 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 
 	var tr trackingTruncator
 
-	// "#" right-aligned.
-	headers := []string{"#", "STATUS", "KIND/NS/NAME", "EXPECTED", "ACTUAL", "PROBE", "NODE", "MESSAGE"}
+	// "#" right-aligned. The READY column is there only after a wait:
+	// without one the verifier does not read readiness.
+	headers := []string{"#", "STATUS", "KIND/NS/NAME", "EXPECTED", "ACTUAL", "PROBE", "NODE"}
+	if waited {
+		headers = append(headers, "READY")
+	}
+	headers = append(headers, "MESSAGE")
 	t := newBaseTable(s, headers, map[int]bool{0: true})
 	for _, r := range report.Spec.Results {
-		t.Row(
+		row := []string{
 			strconv.Itoa(r.Order),
 			StatusBadge(s, string(r.Status)),
 			tr.cell(fmt.Sprintf("%s/%s/%s", r.Target.Kind, r.Target.Namespace, r.Target.Name), maxNameWidth),
@@ -452,13 +563,85 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 			displayActual(r.Actual),
 			summarizeProbe(r.Probe),
 			summarizeNodePlacement(r.NodePlacement),
-			tr.cell(r.Message, maxFreeformWidth),
-		)
+		}
+		if waited {
+			row = append(row, summarizeReadiness(r))
+		}
+		row = append(row, tr.cell(r.Message, maxFreeformWidth))
+		t.Row(row...)
 	}
 	if _, err := fmt.Fprintln(w, t.Render()); err != nil {
 		return err
 	}
+	if err := writeVerifyNotOK(s, w, report.Spec.Results); err != nil {
+		return err
+	}
 	return maybePrintTruncationHint(s, w, tr, "messages")
+}
+
+// maxVerifyNotOK is the most steps that the NOT OK block below the verify
+// table lists in full.
+const maxVerifyNotOK = 10
+
+// writeVerifyNotOK prints, below the table, the full message of each step
+// that is not ok. The MESSAGE cell of the table is cut at maxFreeformWidth
+// to keep the columns in line, and that cut removes the part that a person
+// needs: in "pod cache-1 is not Ready: container app is waiting:
+// CrashLoopBackOff" the reason is at the end. A pipeline log shows this
+// table, and the person who reads it decides on a rollback.
+func writeVerifyNotOK(s *Styles, w io.Writer, results []schema.VerifyResult) error {
+	var notOK []schema.VerifyResult
+	for _, r := range results {
+		if r.Status != schema.VerifyStatusOK && r.Message != "" {
+			notOK = append(notOK, r)
+		}
+	}
+	if len(notOK) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, s.Bold.Render("NOT OK")); err != nil {
+		return err
+	}
+	for i, r := range notOK {
+		if i == maxVerifyNotOK {
+			_, err := fmt.Fprintln(w, s.Muted.Render(fmt.Sprintf("  ... and %d more (use --output json)", len(notOK)-maxVerifyNotOK)))
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "  %d  %s/%s/%s: %s\n", r.Order, r.Target.Kind, r.Target.Namespace, r.Target.Name, r.Message); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// describeWait says in a few words how the wait of a verify ended. The
+// table and the Markdown view share it. Every part is made from numbers in
+// the report, so the text needs no escape.
+func describeWait(w *schema.VerifyWait) string {
+	requested := time.Duration(w.RequestedSeconds) * time.Second
+	waited := time.Duration(w.WaitedSeconds) * time.Second
+	switch {
+	case w.Interrupted:
+		return fmt.Sprintf("interrupted after %s of %s", waited, requested)
+	case w.TimedOut:
+		return fmt.Sprintf("timed out after %s", requested)
+	default:
+		return fmt.Sprintf("done after %s of %s", waited, requested)
+	}
+}
+
+// summarizeReadiness condenses the readiness of one step into a table cell:
+// "2/2" (Ready pods of all pods), "no pods" when the verdict is from the pod
+// template, "-" when the verifier did not get as far as the readiness check.
+func summarizeReadiness(r schema.VerifyResult) string {
+	switch {
+	case r.Readiness != nil:
+		return fmt.Sprintf("%d/%d", r.Readiness.Ready, r.Readiness.Pods)
+	case r.Basis == schema.VerifyBasisTemplate:
+		return "no pods"
+	default:
+		return "-"
+	}
 }
 
 // displayActual returns "(empty)" for an unset Actual so the table row is

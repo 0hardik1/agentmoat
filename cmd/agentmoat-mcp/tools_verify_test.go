@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -146,5 +147,106 @@ func TestVerifyMigrationHandler_InPodProbe(t *testing.T) {
 	}
 	if report.Spec.Summary.OK != 1 {
 		t.Errorf("Summary.OK: got %d, want 1", report.Spec.Summary.OK)
+	}
+}
+
+// jumpClock is a verifier.Clock that moves only when the wait loop sleeps,
+// so a wait of minutes runs in no time.
+type jumpClock struct{ now time.Time }
+
+func (c *jumpClock) Now() time.Time { return c.now }
+
+func (c *jumpClock) Sleep(_ context.Context, d time.Duration) { c.now = c.now.Add(d) }
+
+// TestVerifyMigrationHandler_Wait: the wait input is the --wait flag of the
+// CLI. The report says how the wait ended, and a pod that has the class and
+// is not Ready is a mismatch with the reason.
+func TestVerifyMigrationHandler_Wait(t *testing.T) {
+	t.Parallel()
+	ns, name := "agentmoat-test", "web"
+	labels := map[string]string{"app": "web"}
+	notReady := runningPodWithRCN(ns, "web-0", labels, strPtr("gvisor"))
+	notReady.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "app", RestartCount: 6,
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+	}}
+	srv := newServer(Deps{
+		Stderr:     io.Discard,
+		Version:    "test",
+		KubeClient: fake.NewSimpleClientset(deploymentWithSelector(ns, name, labels), notReady),
+		Clock:      &jumpClock{now: time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)},
+	})
+
+	result, err := callTool(t, srv, "verify_migration", map[string]any{
+		"plan_path": writeVerifyPlan(t, ns, name),
+		"wait":      "20s",
+	})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var report schema.VerifyReport
+	readTool(t, result, &report)
+	want := schema.VerifyWait{RequestedSeconds: 20, WaitedSeconds: 20, Rounds: 5, TimedOut: true}
+	if report.Metadata.Wait == nil || *report.Metadata.Wait != want {
+		t.Errorf("metadata.wait = %+v, want %+v", report.Metadata.Wait, want)
+	}
+	r := report.Spec.Results[0]
+	if r.Status != schema.VerifyStatusMismatch || r.Readiness == nil || r.Readiness.Ready != 0 {
+		t.Fatalf("result = %+v, want a mismatch with readiness", r)
+	}
+	if wantMsg := "pod web-0 is not Ready: container app is waiting: CrashLoopBackOff, 6 restart(s)"; r.Message != wantMsg {
+		t.Errorf("message = %q, want %q", r.Message, wantMsg)
+	}
+}
+
+// TestVerifyMigrationHandler_NoWait: with no wait input the tool looks one
+// time, as before, and the report has no wait block.
+func TestVerifyMigrationHandler_NoWait(t *testing.T) {
+	t.Parallel()
+	ns, name := "agentmoat-test", "web"
+	labels := map[string]string{"app": "web"}
+	srv := newTestServer(fake.NewSimpleClientset(
+		deploymentWithSelector(ns, name, labels),
+		runningPodWithRCN(ns, "web-0", labels, strPtr("gvisor")),
+	))
+	for _, wait := range []any{nil, "", "0", "0s"} {
+		args := map[string]any{"plan_path": writeVerifyPlan(t, ns, name)}
+		if wait != nil {
+			args["wait"] = wait
+		}
+		result, err := callTool(t, srv, "verify_migration", args)
+		if err != nil {
+			t.Fatalf("wait=%v: call: %v", wait, err)
+		}
+		var report schema.VerifyReport
+		readTool(t, result, &report)
+		if report.Metadata.Wait != nil || report.Spec.Summary.OK != 1 {
+			t.Errorf("wait=%v: wait block = %+v, summary = %+v; want no wait block and 1 ok", wait, report.Metadata.Wait, report.Spec.Summary)
+		}
+	}
+}
+
+// TestVerifyMigrationHandler_BadWait: a wait that is not a duration, and a
+// negative one, are tool errors. Neither reads the cluster.
+func TestVerifyMigrationHandler_BadWait(t *testing.T) {
+	t.Parallel()
+	client := fake.NewSimpleClientset()
+	srv := newTestServer(client)
+	for wait, want := range map[string]string{
+		"soon": `"soon" is not a duration`,
+		"3":    `"3" is not a duration`,
+		"-5s":  "the wait time is -5s",
+	} {
+		result, err := callTool(t, srv, "verify_migration", map[string]any{
+			"plan_path": writeVerifyPlan(t, "ns", "web"),
+			"wait":      wait,
+		})
+		if err != nil {
+			t.Fatalf("wait=%q: call: %v", wait, err)
+		}
+		expectToolError(t, result, want)
+	}
+	if n := len(client.Actions()); n != 0 {
+		t.Errorf("the cluster was read %d time(s) for a bad wait", n)
 	}
 }

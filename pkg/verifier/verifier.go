@@ -17,6 +17,12 @@
 //     latter, so the verifier reads `pod.Spec.RuntimeClassName` and not
 //     the controller's pod template.
 //
+//   - There are two exceptions, and both are in target.go. A controller
+//     that wants no pods now (replicas: 0, a Job that is done) has no pods
+//     to read, so its pod template gives the verdict. And a CronJob is
+//     always read from its template: a Job from before the change keeps
+//     its old template until it ends.
+//
 //   - For controllers (Deployment / StatefulSet / DaemonSet / Job /
 //     CronJob) we list the controller's selected pods via the full
 //     `spec.selector` (matchLabels AND matchExpressions) and check each.
@@ -26,6 +32,13 @@
 //     has no spec.selector of its own (the Jobs it spawns do). We fall
 //     back to the labels on the JobTemplate's pod template, which is what
 //     those Jobs end up selecting on.
+//
+// The wait (wait.go, readiness.go)
+//
+//   - With opts.Wait, Verify looks again until every step is ok or the
+//     time ends. A step is then ok only when its pods are also Ready and
+//     stay Ready. This is the form for a pipeline, which runs verify
+//     directly after apply, in the middle of the rollout.
 //
 //   - For a "Pod" PlanStep we Get the pod directly. A NotFound is the
 //     verdict-bearing error; we report it and move on.
@@ -66,6 +79,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -151,15 +165,28 @@ func Verify(ctx context.Context, opts Options) (*schema.VerifyReport, error) {
 	}
 
 	deps := stepDeps{
-		client:    opts.Client,
-		doProbe:   opts.InPodProbe,
-		exec:      probe,
-		placement: newPlacementChecker(opts.Client),
-		stderr:    stderr,
+		client:       opts.Client,
+		doProbe:      opts.InPodProbe,
+		exec:         probe,
+		placement:    newPlacementChecker(opts.Client),
+		stderr:       stderr,
+		requireReady: opts.Wait > 0,
 	}
-	results := make([]schema.VerifyResult, 0, len(opts.Plan.Spec.Steps))
-	for _, step := range opts.Plan.Spec.Steps {
-		results = append(results, verifyStep(ctx, deps, step))
+	steps := opts.Plan.Spec.Steps
+	var results []schema.VerifyResult
+	if opts.Wait > 0 {
+		// Look again until every step is ok or the time ends (wait.go).
+		waited, wait, err := waitForSteps(ctx, deps, steps, newWaitConfig(opts))
+		if err != nil {
+			return nil, err
+		}
+		results = waited
+		report.Metadata.Wait = wait
+	} else {
+		results = make([]schema.VerifyResult, 0, len(steps))
+		for _, step := range steps {
+			results = append(results, verifyStep(ctx, deps, step))
+		}
 	}
 
 	report.Spec = schema.VerifySpec{
@@ -180,14 +207,60 @@ func validate(opts Options) error {
 	if opts.Plan == nil {
 		return fmt.Errorf("verifier: opts.Plan is nil")
 	}
+	if opts.Wait < 0 {
+		return fmt.Errorf("verifier: the wait time is %s; it must be zero or more", opts.Wait)
+	}
 	return nil
 }
 
-// verifyStep does the work for one PlanStep. It is a pure function modulo
-// the API client: same inputs (modulo cluster state) -> same outputs.
-// Errors here become per-step Status="error" rows; Verify never returns
-// a non-nil Go error from this path.
+// verifyStep does the work for one PlanStep and returns its result. Errors
+// here become per-step Status="error" rows; Verify never returns a non-nil
+// Go error from this path.
 func verifyStep(ctx context.Context, deps stepDeps, step schema.PlanStep) schema.VerifyResult {
+	check := checkStep(ctx, deps, step)
+	check.reportReadError(deps.stderr)
+	return check.result
+}
+
+// stepCheck is the result of one look at one step, with the pods that the
+// result is about. The wait loop needs the pods: "Ready" counts only when
+// the same pods stay Ready (see wait.go).
+type stepCheck struct {
+	result schema.VerifyResult
+	pods   []corev1.Pod
+
+	// readErr is the error from the read of the workload, when that read
+	// failed (not found, forbidden, a network error). The caller prints
+	// it: one time for one look, and with a wait only when it changes, so
+	// that a workload that is not there does not print a line in each
+	// round.
+	readErr error
+}
+
+// reportReadError prints the read error of this look on stderr, if there is
+// one. An operator sees the reason of the API server (NotFound, Forbidden)
+// as it occurs, and not only in the report at the end.
+func (c stepCheck) reportReadError(stderr io.Writer) {
+	if c.readErr == nil {
+		return
+	}
+	t := c.result.Target
+	_, _ = fmt.Fprintf(stderr, "verify error: %s/%s %s: %v\n", t.Kind, t.Namespace, t.Name, c.readErr)
+}
+
+// checkStep looks at one step one time. It is a pure function modulo the
+// API client: same cluster state in, same result out. The checks run in
+// this order, and each one runs only when the ones before it passed:
+//
+//  1. The class: every live pod has the expected runtimeClassName (or, for
+//     a workload with no pods now, its pod template does).
+//  2. Node placement: the pods run on nodes that the RuntimeClass selects.
+//  3. Readiness: the pods are Ready. Only with a wait time.
+//  4. The in-pod probe: gVisor markers in one Running pod. Only on request.
+//     With a wait time the wait loop runs it, one time, when the pods have
+//     settled (wait.go); a probe in each round would be an exec call into
+//     the workload every few seconds.
+func checkStep(ctx context.Context, deps stepDeps, step schema.PlanStep) stepCheck {
 	// Expected = what the plan asked for; fall back to the project's
 	// default RuntimeClass name when the step left it empty. The applier
 	// uses the same fallback so the comparison is consistent on both ends.
@@ -195,175 +268,181 @@ func verifyStep(ctx context.Context, deps stepDeps, step schema.PlanStep) schema
 	if expected == "" {
 		expected = schema.DefaultRuntimeClassName
 	}
-
 	result := schema.VerifyResult{
 		Order:    step.Order,
 		Target:   step.Target,
 		Expected: expected,
 	}
 
-	// Resolve the live pods that this step's target governs.
-	pods, err := resolvePods(ctx, deps.client, step.Target)
+	t, err := resolveTarget(ctx, deps.client, step.Target)
 	if err != nil {
 		result.Status = schema.VerifyStatusError
-		// We surface the underlying error so an operator running with
-		// --verbose sees the API server's reason (NotFound, Forbidden,
-		// etc.) rather than a generic "could not resolve" string.
+		// We surface the underlying error so an operator sees the API
+		// server's reason (NotFound, Forbidden, etc.) rather than a
+		// generic "could not resolve" string. The caller prints it.
 		result.Message = err.Error()
-		_, _ = fmt.Fprintf(deps.stderr, "verify error: %s/%s %s: %v\n",
-			step.Target.Kind, step.Target.Namespace, step.Target.Name, err)
-		return result
-	}
-	if len(pods) == 0 {
-		// resolvePods returned cleanly but found no pods. For a
-		// controller step that means the selector matched zero live
-		// pods (replicas: 0, paused rollout, all pods crash-looping
-		// during a rollout). The verdict is error because the verifier
-		// cannot tell from the apply-time signal alone whether the
-		// rollout is in flight or genuinely empty.
-		result.Status = schema.VerifyStatusError
-		result.Message = fmt.Sprintf("no pods matched controller selector for %s/%s %s",
-			step.Target.Kind, step.Target.Namespace, step.Target.Name)
-		return result
+		return stepCheck{result: result, readErr: err}
 	}
 
-	// Spec-level check: compare every live pod's runtimeClassName against
-	// Expected. The first mismatching pod wins the report; we do not list
-	// every offender because the operator generally needs to fix one
-	// rollout, not enumerate every replica.
-	mismatch := false
-	for _, pod := range pods {
-		got := podRuntimeClassName(pod)
-		if got != expected {
-			mismatch = true
-			result.Actual = got
-			result.Message = fmt.Sprintf("pod %s has runtimeClassName=%q, expected %q",
-				pod.Name, got, expected)
-			break
-		}
+	pods := classVerdict(t, &result)
+	if result.Status == schema.VerifyStatusMismatch && deps.requireReady {
+		explainStuckRollout(t, &result)
 	}
-	if !mismatch {
-		// All pods reported the expected RuntimeClass name. Default the
-		// Actual field to that same value so the JSON output is symmetric
-		// with the mismatch case.
-		result.Status = schema.VerifyStatusOK
-		result.Actual = expected
-	} else {
-		result.Status = schema.VerifyStatusMismatch
+	if result.Status != schema.VerifyStatusOK || len(pods) == 0 {
+		// A verdict with no pods behind it: a mismatch, an error, or an
+		// ok from the pod template. There is nothing more to look at.
+		return stepCheck{result: result}
 	}
 
-	// Node placement: only on the ok path (a wrong spec already has its
-	// verdict). A hosting node outside the RuntimeClass nodeSelector means
-	// the pod is not where gVisor lives, so the step becomes a mismatch.
-	if result.Status == schema.VerifyStatusOK && deps.placement != nil {
+	// Node placement: a hosting node outside the RuntimeClass nodeSelector
+	// means the pod is not where gVisor lives, so the step becomes a
+	// mismatch.
+	if deps.placement != nil {
 		np := deps.placement.check(ctx, expected, pods)
 		result.NodePlacement = np
 		if np.Checked && len(np.Mismatched) > 0 {
 			result.Status = schema.VerifyStatusMismatch
 			result.Message = np.Message
+			return stepCheck{result: result, pods: pods}
 		}
 	}
 
-	// In-pod probe: only run when we are still on the ok path. A workload
-	// whose spec is already wrong does not need the probe to declare
-	// failure, and we save the operator one exec call per misconfigured
-	// step.
-	if deps.doProbe && result.Status == schema.VerifyStatusOK {
+	// Readiness: only with a wait time. See readiness.go.
+	if deps.requireReady {
+		result.Readiness = podReadiness(pods)
+		if result.Readiness.Ready < result.Readiness.Pods {
+			result.Status = schema.VerifyStatusMismatch
+			result.Message = result.Readiness.Message
+			return stepCheck{result: result, pods: pods}
+		}
+	}
+
+	// In-pod probe: a workload whose spec is already wrong does not need
+	// the probe to declare failure, and we save the operator one exec call
+	// per misconfigured step. With a wait time, the wait loop runs the
+	// probe (see settleStep).
+	if deps.doProbe && !deps.requireReady {
 		applyProbeResult(ctx, deps.exec, pods, &result)
 	}
-
-	return result
+	return stepCheck{result: result, pods: pods}
 }
 
-// resolvePods returns the live pods that the given target governs.
-// For Kind="Pod" it returns a slice with the single pod. For controllers
-// it lists pods in the controller's namespace matching the controller's
-// selector. NotFound on the controller surfaces as an error from this
-// function (the caller turns that into Status="error" with a friendly
-// message); other API errors propagate untouched.
-func resolvePods(ctx context.Context, client kubernetes.Interface, target schema.WorkloadRef) ([]corev1.Pod, error) {
-	switch target.Kind {
-	case kindPod:
-		return resolveSinglePod(ctx, client, target)
-
-	case kindDeployment:
-		dep, err := client.AppsV1().Deployments(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, controllerErr("Deployment", target, err)
+// explainStuckRollout adds to a class mismatch the reason that a wait most
+// often ends on one. A rolling update keeps the old pods until the new pods
+// are Ready. When the new pods do not start in gVisor, the old pods stay,
+// and the class check reports one of them: "pod web-old has
+// runtimeClassName="", expected "gvisor"". That is true, and it does not
+// tell the operator what is wrong. The pods that have the class do: this
+// function adds their readiness to the result, and the reason of the first
+// one that is not Ready to the message.
+//
+// It adds nothing when no pod has the class yet, and nothing when the pods
+// that have it are all Ready (the rollout is in progress and is healthy).
+func explainStuckRollout(t target, result *schema.VerifyResult) {
+	var current []corev1.Pod
+	for _, pod := range t.pods {
+		if podRuntimeClassName(pod) == result.Expected {
+			current = append(current, pod)
 		}
-		return listByLabelSelector(ctx, client, target.Namespace, dep.Spec.Selector)
-
-	case kindStatefulSet:
-		ss, err := client.AppsV1().StatefulSets(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, controllerErr("StatefulSet", target, err)
-		}
-		return listByLabelSelector(ctx, client, target.Namespace, ss.Spec.Selector)
-
-	case kindDaemonSet:
-		ds, err := client.AppsV1().DaemonSets(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, controllerErr("DaemonSet", target, err)
-		}
-		return listByLabelSelector(ctx, client, target.Namespace, ds.Spec.Selector)
-
-	case kindJob:
-		return resolveJobPods(ctx, client, target)
-
-	case kindCronJob:
-		return resolveCronJobPods(ctx, client, target)
-
-	default:
-		return nil, fmt.Errorf("unsupported kind %q", target.Kind)
 	}
+	if len(current) == 0 || len(current) == len(t.pods) {
+		return
+	}
+	readiness := podReadiness(current)
+	if readiness.Ready == readiness.Pods {
+		return
+	}
+	result.Readiness = readiness
+	result.Message += "; and " + readiness.Message
 }
 
-// resolveSinglePod handles the Kind="Pod" case: fetch the one named pod.
-// A NotFound gets a friendly message; other API errors propagate wrapped.
-func resolveSinglePod(ctx context.Context, client kubernetes.Interface, target schema.WorkloadRef) ([]corev1.Pod, error) {
-	pod, err := client.CoreV1().Pods(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("pod %s/%s not found", target.Namespace, target.Name)
+// classVerdict sets the verdict on the runtimeClassName: Status, Actual,
+// Message, and Basis of result. It returns the pods that the checks after
+// it look at; none when the verdict is not ok, and none when the verdict is
+// from the pod template.
+func classVerdict(t target, result *schema.VerifyResult) []corev1.Pod {
+	if t.templateDecides {
+		return cronJobVerdict(t, result)
+	}
+	if len(t.pods) == 0 {
+		if t.hasTemplate && t.idle != "" {
+			templateVerdict(t, result, t.idle)
+			return nil
 		}
-		return nil, fmt.Errorf("getting pod %s/%s: %w", target.Namespace, target.Name, err)
+		// The controller wants pods and has none (a rollout that is in
+		// progress, all pods in a crash loop and in deletion). The
+		// verifier cannot give a verdict on pods that are not there.
+		result.Status = schema.VerifyStatusError
+		result.Message = fmt.Sprintf("no pods matched controller selector for %s/%s %s",
+			result.Target.Kind, result.Target.Namespace, result.Target.Name)
+		return nil
 	}
-	return []corev1.Pod{*pod}, nil
+
+	// Compare every live pod's runtimeClassName against Expected. The
+	// first mismatching pod wins the report; we do not list every
+	// offender because the operator generally needs to fix one rollout,
+	// not enumerate every replica.
+	for _, pod := range t.pods {
+		if got := podRuntimeClassName(pod); got != result.Expected {
+			result.Status = schema.VerifyStatusMismatch
+			result.Actual = got
+			result.Message = fmt.Sprintf("pod %s has runtimeClassName=%q, expected %q",
+				pod.Name, got, result.Expected)
+			return nil
+		}
+	}
+	// Default the Actual field to the expected value so the JSON output
+	// is symmetric with the mismatch case.
+	result.Status = schema.VerifyStatusOK
+	result.Actual = result.Expected
+	return t.pods
 }
 
-// resolveJobPods lists the pods a Job governs. Jobs always populate
-// Spec.Selector when created by the Job controller (the controller-uid
-// label is auto-added). If a user-built Job omits the selector we fall
-// back to the template's labels, mirroring the CronJob fallback.
-func resolveJobPods(ctx context.Context, client kubernetes.Interface, target schema.WorkloadRef) ([]corev1.Pod, error) {
-	job, err := client.BatchV1().Jobs(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-	if err != nil {
-		return nil, controllerErr("Job", target, err)
+// templateVerdict is the verdict for a workload with no pods to look at:
+// the runtimeClassName of its pod template against Expected.
+func templateVerdict(t target, result *schema.VerifyResult, why string) {
+	result.Basis = schema.VerifyBasisTemplate
+	result.Actual = t.templateClass
+	if t.templateClass != result.Expected {
+		result.Status = schema.VerifyStatusMismatch
+		result.Message = fmt.Sprintf("the pod template has runtimeClassName=%q, expected %q", t.templateClass, result.Expected)
+		return
 	}
-	if hasSelectorTerms(job.Spec.Selector) {
-		return listByLabelSelector(ctx, client, target.Namespace, job.Spec.Selector)
-	}
-	return listBySelectorMatchLabels(ctx, client, target.Namespace, job.Spec.Template.Labels)
+	result.Status = schema.VerifyStatusOK
+	result.Message = fmt.Sprintf("no pods to check (%s); the pod template has runtimeClassName=%q", why, t.templateClass)
 }
 
-// resolveCronJobPods lists the pods a CronJob's Jobs govern. CronJob is
-// the awkward one: it has no .spec.selector of its own (the Jobs it spawns
-// do). We could enumerate the CronJob's recent Jobs and union their
-// selectors, but that doubles the API calls and races a fresh Job that the
-// controller has not yet created. The simpler, deterministic approach is
-// to inspect the JobTemplate's pod-template labels (which is what those
-// Jobs select on by default). If the operator supplied an explicit
-// JobTemplate selector we honor it first.
-func resolveCronJobPods(ctx context.Context, client kubernetes.Interface, target schema.WorkloadRef) ([]corev1.Pod, error) {
-	cj, err := client.BatchV1().CronJobs(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-	if err != nil {
-		return nil, controllerErr("CronJob", target, err)
+// cronJobVerdict is classVerdict for a CronJob. The template decides (see
+// target.go). The live pods that have the class go on to the checks after
+// this one. The live pods that do not have it are of a Job from before the
+// change; the message counts them, and the verdict does not.
+func cronJobVerdict(t target, result *schema.VerifyResult) []corev1.Pod {
+	if t.templateClass != result.Expected {
+		templateVerdict(t, result, t.idle)
+		return nil
 	}
-	jt := cj.Spec.JobTemplate
-	if hasSelectorTerms(jt.Spec.Selector) {
-		return listByLabelSelector(ctx, client, target.Namespace, jt.Spec.Selector)
+	current := make([]corev1.Pod, 0, len(t.pods))
+	for _, pod := range t.pods {
+		if podRuntimeClassName(pod) == result.Expected {
+			current = append(current, pod)
+		}
 	}
-	return listBySelectorMatchLabels(ctx, client, target.Namespace, jt.Spec.Template.Labels)
+	earlier := ""
+	if n := len(t.pods) - len(current); n > 0 {
+		earlier = fmt.Sprintf("%d pod(s) of a Job from before the change do not have runtimeClassName=%q; they end with that Job",
+			n, result.Expected)
+	}
+	if len(current) == 0 {
+		templateVerdict(t, result, t.idle)
+		if earlier != "" {
+			result.Message = fmt.Sprintf("the pod template has runtimeClassName=%q; %s", t.templateClass, earlier)
+		}
+		return nil
+	}
+	result.Status = schema.VerifyStatusOK
+	result.Actual = result.Expected
+	result.Message = earlier
+	return current
 }
 
 // hasSelectorTerms reports whether the selector carries at least one
