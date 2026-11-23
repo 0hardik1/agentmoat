@@ -45,6 +45,8 @@ func TestKindConstants(t *testing.T) {
 		{KindRollbackResult, "RollbackResult"},
 		{KindVerifyReport, "VerifyReport"},
 		{KindExplainDocument, "ExplainDocument"},
+		{KindPreflightReport, "PreflightReport"},
+		{KindPatchResult, "PatchResult"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -654,5 +656,135 @@ func TestWorkloadResultManagedBy(t *testing.T) {
 	}
 	if back.ManagedBy == nil || *back.ManagedBy != *row.ManagedBy {
 		t.Errorf("managedBy did not survive the YAML round trip: %s", yamlData)
+	}
+}
+
+// TestPatchResultEmptyShape pins the wire shape of an empty result of
+// `agentmoat patch`: the envelope, the status strings, the keys that are
+// always there (a count of zero and "dryRun": false are answers), and the
+// keys that are left out when empty.
+func TestPatchResultEmptyShape(t *testing.T) {
+	t.Parallel()
+	for got, want := range map[PatchStatus]string{
+		PatchStatusPatched:   "patched",
+		PatchStatusNotEdited: "not-edited",
+		PatchStatusFailed:    "failed",
+	} {
+		if string(got) != want {
+			t.Errorf("patch status %q, want %q", got, want)
+		}
+	}
+
+	empty := NewPatchResult()
+	if empty.APIVersion != APIVersion || empty.Kind != KindPatchResult {
+		t.Errorf("envelope = %s %s", empty.APIVersion, empty.Kind)
+	}
+	empty.Metadata.RuntimeClassName = "gvisor"
+	empty.Spec.Changes = []PatchChange{}
+	empty.Spec.Excluded = []ExcludedWorkload{}
+	empty.Spec.Files = []PatchFile{}
+	data, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, want := range []string{
+		`"dryRun":false`,
+		`"summary":{"total":0,"selected":0,"patched":0,"notEdited":0,"failed":0,"excluded":0,"files":0}`,
+		`"changes":[]`, `"excluded":[]`, `"files":[]`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("the empty result lacks %s:\n%s", want, data)
+		}
+	}
+	for _, key := range []string{`"includeReview"`, `"source"`} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("the empty result has the key %s:\n%s", key, data)
+		}
+	}
+}
+
+// TestPatchResultRoundTrip pins the wire shape of a full result of
+// `agentmoat patch`, and the JSON and YAML round trips.
+func TestPatchResultRoundTrip(t *testing.T) {
+	t.Parallel()
+	r := NewPatchResult()
+	r.Metadata = PatchMetadata{
+		GeneratedAt:      "2026-11-22T12:00:00Z",
+		AgentmoatVersion: "test",
+		DryRun:           true,
+		RuntimeClassName: "gvisor",
+		IncludeReview:    true,
+		Source:           &ReportSource{Type: SourceManifests, Inputs: 2},
+	}
+	r.Spec = PatchSpec{
+		Summary: PatchSummary{Total: 4, Selected: 3, Patched: 1, NotEdited: 1, Failed: 1, Excluded: 1, Files: 2},
+		Changes: []PatchChange{
+			{
+				Target:        WorkloadRef{Kind: "Deployment", Namespace: "shop", Name: "web"},
+				Compatibility: CompatibilityCompatible,
+				Origin:        &Origin{File: "k8s/web.yaml", Line: 1},
+				Status:        PatchStatusPatched,
+				Line:          9,
+			},
+			{
+				Target:        WorkloadRef{Kind: "Pod", Namespace: "shop", Name: "once"},
+				Compatibility: CompatibilityReview,
+				Origin:        &Origin{File: "k8s/once.json", Line: 1},
+				Status:        PatchStatusNotEdited,
+				Reason:        "JSON is not edited",
+			},
+			{
+				Target:        WorkloadRef{Kind: "Deployment", Namespace: "shop", Name: "api"},
+				Compatibility: CompatibilityCompatible,
+				Origin:        &Origin{File: "k8s/api.yaml", Line: 1},
+				Status:        PatchStatusFailed,
+				Reason:        "the file was not written: permission denied",
+			},
+		},
+		Excluded: []ExcludedWorkload{{
+			Target:        WorkloadRef{Kind: "DaemonSet", Namespace: "kube-system", Name: "cni"},
+			Compatibility: CompatibilityIncompatible,
+			Reason:        "workload is incompatible: host-network",
+		}},
+		Files: []PatchFile{
+			{Path: "k8s/api.yaml", Added: 1, Diff: "--- a/k8s/api.yaml\n+++ b/k8s/api.yaml\n", Error: "permission denied"},
+			{Path: "k8s/web.yaml", Added: 1, Written: true, Diff: "--- a/k8s/web.yaml\n+++ b/k8s/web.yaml\n"},
+		},
+	}
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, want := range []string{
+		`"kind":"PatchResult"`,
+		`"dryRun":true`, `"runtimeClassName":"gvisor"`, `"includeReview":true`,
+		`"status":"patched","line":9`,
+		`"status":"not-edited","reason":"JSON is not edited"`,
+		`"path":"k8s/web.yaml","added":1,"written":true,"diff":`,
+		`"written":false`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("JSON lacks %s:\n%s", want, data)
+		}
+	}
+	var fromJSON PatchResult
+	if err := json.Unmarshal(data, &fromJSON); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromJSON) {
+		t.Errorf("JSON round trip changed the result:\n got %+v\nwant %+v", fromJSON, *r)
+	}
+
+	yamlData, err := yaml.Marshal(r)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	var fromYAML PatchResult
+	if err := yaml.Unmarshal(yamlData, &fromYAML); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromYAML) {
+		t.Errorf("YAML round trip changed the result:\n got %+v\nwant %+v", fromYAML, *r)
 	}
 }

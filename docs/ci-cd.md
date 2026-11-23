@@ -1,18 +1,27 @@
 # CI/CD
 
-agentmoat is made to run in a pipeline. This page has the two uses:
+agentmoat is made to run in a pipeline. This page has the three uses:
 
 1. **[The pull request check](#1-the-pull-request-check).** Scan the
    manifests in a repository on each pull request. No cluster, no
    credentials.
 2. **[The migration pipeline](#2-the-migration-pipeline).** Move workloads
-   to gVisor with a plan, an approval, an apply, a verify, and a rollback
-   when something fails.
+   to gVisor in the cluster with a plan, an approval, an apply, a verify,
+   and a rollback when something fails.
+3. **[The move through the repository](#3-the-move-through-the-repository).**
+   Write the change into the manifest files with `patch`, so that a pull
+   request reviews it, your deploy pipeline or deploy tool deploys it, and
+   `git revert` undoes it.
+
+Use 2 when a pipeline job deploys to the cluster and the manifests are not
+the source of truth. Use 3 when a repository is the source of truth (plain
+manifests, Kustomize, Argo CD, Flux): a change that is only in the cluster
+is then not in the source.
 
 The files to copy are in [`examples/ci/`](../examples/ci/). The exit codes
 are the interface between agentmoat and a pipeline:
 [`exit-codes.md`](exit-codes.md) has all of them.
-[`What is tested`](#3-what-is-tested-and-what-is-not) says which parts of
+[`What is tested`](#4-what-is-tested-and-what-is-not) says which parts of
 this page a test proves and which parts it does not.
 
 The action, the container image, and the scan of manifests (`scan -f`) are
@@ -328,10 +337,160 @@ object only. The source that the tool deploys from (a git repository, a
 chart) does not get the change, and what the tool does with a live change
 that is not in its source depends on the tool and its settings.
 
-For such a workload, add `runtimeClassName` to the source. The pull request
-check above is the gate for that change.
-[`preflight.md`](preflight.md#source-managed) has the markers that agentmoat
-reads.
+For such a workload, add `runtimeClassName` to the source.
+[The move through the repository](#3-the-move-through-the-repository) does
+that with `agentmoat patch`, and the pull request check above is the gate
+for the change. [`preflight.md`](preflight.md#source-managed) has the
+markers that agentmoat reads.
+
+## 3. The move through the repository
+
+```
+a branch         agentmoat patch -f <dir> --dry-run=false     one added line for each workload
+pull request     the check of section 1 is the gate; a person reads the diff
+merge            your deploy pipeline or deploy tool deploys the change
+after the deploy agentmoat verify --plan <the plan from before> --wait 5m
+                 (Deployment, StatefulSet, DaemonSet, CronJob; see below)
+rollback         git revert
+```
+
+`patch` reads no cluster and needs no credentials. It reads the manifests as
+`scan -f` does, and it changes files only.
+
+### What `patch` changes
+
+It selects the workloads that `plan` selects: compatible, and with no
+RuntimeClass. `--include-review` adds the workloads that need review. For
+each selected workload it adds one line to the pod spec:
+
+```diff
+     spec:
++      runtimeClassName: gvisor
+       containers:
+         - name: web
+```
+
+Nothing else in a file changes. Comments, the order of keys, quotes, the
+indent, the line endings (LF or CRLF), and a missing line ending at the end
+of the file stay as they are. `patch` does not write YAML again from the
+objects: it finds the line of the pod spec and adds text after it.
+
+It checks each edit before it uses it. It decodes the new text and requires
+two things: each selected workload now has the class, and nothing else in the
+file is different from the old text. When the edit of a file does not pass,
+that file is not changed, and its workloads are reported as not edited with
+the reason.
+
+Differences from `plan` and `apply`:
+
+- A Pod and a Job are selected too. The API refuses a live change to them,
+  and a file has no such limit.
+- A workload kind with a pod template that is not one of the six (an Argo
+  `Rollout`, for example) is selected and edited, as `scan -f` reads it.
+- There is no plan file and no record on a namespace. The diff is the plan,
+  and the commit is the record.
+
+By default `patch` is a dry-run: it prints the diff and writes no file.
+`--dry-run=false` writes the files. A second run changes nothing, because
+the workloads then have the class.
+
+```sh
+agentmoat patch -f k8s                        # the diff, no file written
+agentmoat patch -f k8s --dry-run=false        # write the files
+agentmoat scan -f k8s --fail-on sandboxed     # the same check as the pull request check
+```
+
+`-l <selector>` limits the patch to the workloads whose labels match, for a
+move in steps. `-n <namespace>` is the default namespace for objects that
+name none, as for `scan -f`; it is not a filter and it is not written.
+`--runtime-class` sets the name to write.
+
+### What `patch` does not edit
+
+A selected workload in one of these forms is listed with the reason, and the
+exit code is `3` (or `1` when no selected workload could be patched):
+
+| Form | What to do |
+| --- | --- |
+| JSON | Add `"runtimeClassName"` to the pod spec by hand. |
+| Flow-style YAML (`spec: {containers: [...]}`) | The same. |
+| A pod spec behind a YAML anchor or alias | The same. An edit there would change each object that uses the anchor. |
+| A pod spec that has a `runtimeClassName` key with no value | Set the value by hand. |
+
+`patch` refuses these inputs as a whole (exit `1`, no file written):
+
+- **A file that does not parse.** As for `scan -f`, one bad document is an
+  error for the run.
+- **A Helm template.** A template is not YAML before it is rendered, and the
+  rendered output is not a file of your repository. Set the chart value for
+  `runtimeClassName`, and check the result with
+  `helm template <chart> | agentmoat scan -f - --fail-on sandboxed` (in a
+  shell with `set -o pipefail`).
+- **Standard input.** It has no file to edit.
+
+`patch` does not replace another RuntimeClass. A workload that has one is
+excluded, with the reason.
+
+### Kustomize
+
+`patch -f <dir>` edits the files that it is given. In a Kustomize tree those
+are the bases: an overlay patch is a partial object (a workload kind with no
+containers), and it is never selected.
+
+Two things follow, and `patch` says so in its output (`not rendered`):
+
+- **A change to a base changes each overlay that uses the base.** When only
+  one environment must move, do not patch the base. Add `runtimeClassName`
+  to the pod spec in a patch of that overlay.
+- **The verdicts describe the files, not what gets deployed.** An overlay can
+  add `hostNetwork: true` to a workload that is compatible in the base. After
+  the edit, scan the rendered objects with the gate, for each overlay:
+
+```sh
+kustomize build overlays/prod > rendered.yaml
+agentmoat scan -f rendered.yaml --fail-on sandboxed
+```
+
+The pull request check of section 1 does this with the `kustomize` input of
+the action.
+
+### The exit codes in a pipeline
+
+| Exit | Meaning | A pipeline |
+| --- | --- | --- |
+| `0` | Each selected workload is patched, or no workload was selected. | Goes on. With no change to a file, there is nothing to commit. |
+| `3` | Some selected workloads are patched. The others are in a form that is not edited, or their file could not be written. | The files of the patched workloads are written. Commit them, and put the report in the pull request: it lists what a person must do by hand. |
+| `1` | An error, or no selected workload could be patched. | Stops. |
+
+A dry-run has the exit code that the run with `--dry-run=false` has for the
+same files, unless a write fails.
+
+`-o markdown` is the report for a job summary or for the text of a pull
+request. Its first line says what happened, and it has the diff:
+
+```sh
+rc=0
+agentmoat patch -f k8s --dry-run=false -o markdown > patch.md || rc=$?
+cat patch.md >> "$GITHUB_STEP_SUMMARY"      # the report, for each result
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then exit "$rc"; fi
+```
+
+On GitHub Actions, write the report to the job summary or to a file, as
+above, and not to the step log. The report has names and lines of your
+manifest files, and the runner reads a line of the log as a command when it
+starts with `::` (spaces before it do not matter) or has `##[` in it. A
+context line of a diff is a space and then a line of a file, so the default
+`table` output in a step log has this problem too. When the manifests can
+come from a person that you do not trust (a pull request from a fork), keep
+the output of the command out of the log, or print it between
+`::stop-commands::<token>` and `::<token>::` as the action does.
+
+### Rollback
+
+The rollback of this move is `git revert` of the commit, and a deploy of
+the result. agentmoat has no part in it. `agentmoat rollback` does not apply
+here: it acts only in a namespace that has the record of a plan that
+`agentmoat apply` wrote.
 
 ### Check the result of a change that came through the source
 
@@ -350,6 +509,13 @@ agentmoat plan --scan scan.json --output json > plan.json     # keep this file
 agentmoat verify --plan plan.json --wait 5m
 ```
 
+This check covers the kinds that a plan has a step for: Deployment,
+StatefulSet, DaemonSet, and CronJob. `patch` also edits a Pod, a Job, and
+other kinds with a pod template (an Argo `Rollout`, for example). A plan
+from a cluster has no step for those, so `verify` does not look at them, and
+its exit code says nothing about them. agentmoat has no check after the
+deploy for those kinds. Look at the `runtimeClassName` of their pods.
+
 Limit the scan to the workloads that the change moves, with `--namespace`
 and `--selector` (a label selector). The plan has a step for each compatible
 workload of the scan that has no RuntimeClass, and verify reports a mismatch
@@ -360,7 +526,7 @@ the class, that plan has no step for them, and verify checks nothing. It
 says so (`nothing was verified`, on stderr and in the Markdown report) and
 exits `0`.
 
-## 3. What is tested, and what is not
+## 4. What is tested, and what is not
 
 | Part | Test |
 | --- | --- |
@@ -368,6 +534,9 @@ exits `0`.
 | The script of the action: each exit code, each input, the limit on annotations, a render, the download with its checksum, hostile names | `make offline-smoke` in CI, with a model of the runner (`scripts/action-smoke.sh`). The download is tested against a local directory, not against github.com. |
 | The action on a runner: `action.yml`, the inputs, the outputs, the step result | `.github/workflows/action-test.yml`, on Linux and macOS runners, when the action changes. It uses the binary of the commit. The download from a release is a job that a person starts. |
 | `apply`, `verify --wait`, `rollback`, an apply that fails on one step and its rollback, the plan of a second run | `make e2e`, on a kind cluster with a real `runsc`. A person runs it; it is not in CI. |
+| `patch`: the one added line, the forms that are not edited, the check of each edit, the diff | Unit tests in CI (`pkg/patcher`, `pkg/agentmoat`). `git apply` reads each diff in the tests and must make the new file from the old one. `make offline-smoke` runs the command on a copy of the fixtures: one added line for each selected workload, no removed line, the scan then finds the class, and a second run changes nothing. |
+| `patch` on a Kustomize tree | `make offline-smoke`: the base is edited, an overlay patch is not, the output says that the input is not rendered, and the render of the overlay (`kubectl kustomize`) then has the class. One tree (a base, and an overlay with a name prefix, a namespace, and a patch). |
+| A deploy of patched files by a deploy tool, and `verify` after it | Not tested. `verify` with a plan from before a change is tested for a live `apply` only (`make e2e`). |
 | `examples/ci/github-migration.yml` as a workflow | Not run. Its commands are the ones in the row above. |
 | `examples/ci/gitlab-ci.yml` | Not run. The keywords were checked against the GitLab documentation. |
 | A deploy tool (Argo CD, Flux, Helm) with a live change | Not tested. The `source-managed` warning says only what agentmoat knows. |

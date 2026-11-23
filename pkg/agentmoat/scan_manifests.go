@@ -35,15 +35,52 @@ import (
 	"strings"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
+	"github.com/0hardik1/agentmoat/pkg/classifier"
 	"github.com/0hardik1/agentmoat/pkg/scanner"
 )
 
 // scanManifests is Scan for opts.ManifestPaths.
 func scanManifests(opts ScanOptions, stderr io.Writer) (*schema.ScanReport, error) {
+	set, err := readManifestSet(opts, stderr)
+	if err != nil {
+		return nil, err
+	}
+
+	report := buildReport(scanInput{
+		Workloads:        set.found.Workloads,
+		Origins:          set.found.Origins,
+		Facts:            set.facts,
+		RuntimeClassName: opts.RuntimeClassName,
+		Source:           set.source,
+		// Cluster and Namespaces stay empty: no cluster was read, and the
+		// one namespace value is a default, not a filter.
+	}, set.registry)
+
+	describeManifestScan(stderr, set.files, set.found, report)
+	return report, nil
+}
+
+// manifestSet is manifest input that was read and decoded, with what a
+// verdict needs. It is the first half of a file scan. `scan -f` and `patch`
+// share it, so the two read the same paths in the same way: the same files
+// in a directory, the same documents, the same default namespace, and the
+// same errors for input that cannot be read.
+type manifestSet struct {
+	files    *scanner.ManifestFiles
+	found    *scanner.ManifestResult
+	registry *classifier.Registry
+	facts    *schema.ClusterFacts // nil with no --facts
+	source   *schema.ReportSource
+}
+
+// readManifestSet reads opts.ManifestPaths. Of the options it uses the
+// paths, standard input, the one namespace, the label selector, the rules
+// file, and the facts file.
+func readManifestSet(opts ScanOptions, stderr io.Writer) (*manifestSet, error) {
 	// In this mode a namespace is a default, not a filter (see
 	// ScanOptions.ManifestPaths), and there is only one default.
 	if len(opts.Namespaces) > 1 {
-		return nil, fmt.Errorf("a manifest scan takes one namespace (the default for objects that name none), not %d: %s",
+		return nil, fmt.Errorf("manifest input takes one namespace (the default for objects that name none), not %d: %s",
 			len(opts.Namespaces), strings.Join(opts.Namespaces, ", "))
 	}
 	defaultNamespace := ""
@@ -100,19 +137,7 @@ func scanManifests(opts ScanOptions, stderr io.Writer) (*schema.ScanReport, erro
 	if len(source.Skipped) == 0 {
 		source.Skipped = nil // keep the key out of the report when empty
 	}
-
-	report := buildReport(scanInput{
-		Workloads:        found.Workloads,
-		Origins:          found.Origins,
-		Facts:            facts,
-		RuntimeClassName: opts.RuntimeClassName,
-		Source:           source,
-		// Cluster and Namespaces stay empty: no cluster was read, and the
-		// one namespace value is a default, not a filter.
-	}, registry)
-
-	describeManifestScan(stderr, files, found, report)
-	return report, nil
+	return &manifestSet{files: files, found: found, registry: registry, facts: facts, source: source}, nil
 }
 
 // noManifestsError explains a scan that found no manifest text at all.

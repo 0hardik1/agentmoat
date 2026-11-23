@@ -24,6 +24,7 @@ func everyKind() map[string]any {
 		schema.KindRollbackResult:  schema.NewRollbackResult(),
 		schema.KindVerifyReport:    schema.NewVerifyReport(),
 		schema.KindPreflightReport: schema.NewPreflightReport(),
+		schema.KindPatchResult:     schema.NewPatchResult(),
 		schema.KindExplainDocument: schema.NewExplainDocument(),
 	}
 }

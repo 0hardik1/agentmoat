@@ -1,0 +1,4 @@
+apiVersion: v1
+kind: Pod
+metadata: {name: flow}
+spec: {containers: [{name: app, image: "example.test/app:1"}]}

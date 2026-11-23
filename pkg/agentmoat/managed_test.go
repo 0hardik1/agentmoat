@@ -166,6 +166,7 @@ func TestPlan_SourceManagedWarning(t *testing.T) {
 	for _, want := range []string{
 		"changes the live objects only",
 		"Add runtimeClassName to that source too",
+		"'agentmoat patch' adds it to manifest files",
 		"depends on the tool and its settings",
 		"A workload with no marker can also have such a source",
 	} {
@@ -173,9 +174,8 @@ func TestPlan_SourceManagedWarning(t *testing.T) {
 			t.Errorf("the message lacks %q: %s", want, msg)
 		}
 	}
-	// The message makes no claim that it cannot support for every tool,
-	// and names no command that does not exist.
-	for _, bad := range []string{"revert", "agentmoat patch", "next sync"} {
+	// The message makes no claim that it cannot support for every tool.
+	for _, bad := range []string{"revert", "next sync"} {
 		if strings.Contains(strings.ToLower(msg), bad) {
 			t.Errorf("the message must not say %q: %s", bad, msg)
 		}

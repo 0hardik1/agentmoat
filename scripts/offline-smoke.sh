@@ -22,6 +22,12 @@
 #     7. The output formats for a pipeline: Markdown (the gate result is in
 #        the report, because a job summary shows no stderr) and SARIF (a
 #        result is "error" only when it makes the gate fail).
+#     8. `patch`, on a copy of the files: a dry-run writes nothing; a real
+#        run adds one line for each selected workload and removes none; the
+#        scan of the result finds the class; a second run changes nothing;
+#        git reads the diff. Also the forms that are not edited (exit 3),
+#        a Helm template (exit 1), and a Kustomize tree (the base is edited,
+#        and the render of the overlay has the class).
 #
 # The canary
 #
@@ -32,8 +38,9 @@
 #   kubeconfig would not do: its context name is empty, so a leak into a
 #   report would not show.)
 #
-# Requirements: the binary (run `make build`), and jq. kubectl is optional;
-# the one check that renders with `kubectl kustomize` is skipped without it.
+# Requirements: the binary (run `make build`), and jq. kubectl and git are
+# optional; the checks that render with `kubectl kustomize` and the check
+# that applies a diff with `git apply` are skipped without them.
 #
 # Exit codes
 #
@@ -361,6 +368,136 @@ expect_empty "$OUT" "nothing is printed on stdout"
 run plan --scan "$WORK_DIR/scan.json" -o markdown
 expect_rc 0 "plan -o markdown works"
 expect_text "$OUT" '`manifest-source`' "markdown: the preview warning is in the plan summary"
+
+# -----------------------------------------------------------------------------
+section "8. patch: the move as a change to files"
+# -----------------------------------------------------------------------------
+
+# expect_same <file a> <file b> <label>: the two files have the same bytes.
+expect_same() {
+  if cmp -s "$1" "$2"; then
+    pass "$3"
+  else
+    fail "$3" "$(basename "$1") and $(basename "$2") are different"
+  fi
+}
+
+# expect_eq <got> <want> <label>
+expect_eq() {
+  if [[ "$1" == "$2" ]]; then
+    pass "$3"
+  else
+    fail "$3" "got '$1', want '$2'"
+  fi
+}
+
+# patch edits files, so it works on a copy. The paths are relative to the
+# copy, as in a repository: the diff then has a/ and b/ names that git reads.
+PATCH_DIR="$WORK_DIR/patch"
+mkdir -p "$PATCH_DIR/k8s"
+cp "$E2E_WORKLOADS" "$PATCH_DIR/k8s/workloads.yaml"
+cp -R "$REPO_ROOT/test/testdata/patch/kustomize" "$PATCH_DIR/kustomize"
+cp -R "$REPO_ROOT/test/testdata/patch/forms" "$PATCH_DIR/forms"
+cp -R "$FIXTURES/helm-unrendered" "$PATCH_DIR/chart"
+pushd "$PATCH_DIR" > /dev/null
+
+# The dry-run is the default: the result has the diff, and no file changes.
+run patch -f k8s -o json
+expect_rc 0 "patch (dry-run, the default) exits 0"
+expect_jq '.kind + " " + (.metadata.dryRun | tostring)' "PatchResult true" "the result is a PatchResult, and says that it is a dry-run"
+expect_jq '.spec.summary | "\(.total) \(.selected) \(.patched) \(.excluded)"' "14 8 8 6" \
+  "8 of 14 workloads are selected: the compatible ones with no class"
+expect_jq '.spec.files | map(.written) | any' "false" "no file is marked as written"
+expect_jq '.metadata.source.type' "manifests" "the result says its source is manifests"
+expect_same k8s/workloads.yaml "$E2E_WORKLOADS" "the dry-run changed no file"
+expect_text "$ERR" "--dry-run=false" "stderr says how to write the files"
+jq -r '.spec.files[].diff' "$OUT" > workloads.diff
+
+# The real run. The oracle: the new file is the old file plus one line for
+# each selected workload, and nothing else.
+run patch -f k8s --dry-run=false -o json
+expect_rc 0 "patch --dry-run=false exits 0"
+expect_jq '.spec.summary | "\(.patched) \(.notEdited) \(.failed) \(.files)"' "8 0 0 1" "8 workloads are patched, in one file"
+expect_jq '.spec.files[0] | "\(.added) \(.written)"' "8 true" "the file has 8 added lines and is written"
+ADDED="$(diff "$E2E_WORKLOADS" k8s/workloads.yaml | grep -c '^>' || true)"
+REMOVED="$(diff "$E2E_WORKLOADS" k8s/workloads.yaml | grep -c '^<' || true)"
+OTHER="$(diff "$E2E_WORKLOADS" k8s/workloads.yaml | grep '^>' | grep -vc '^> *runtimeClassName: gvisor$' || true)"
+expect_eq "$ADDED $REMOVED $OTHER" "8 0 0" "the file has 8 new lines, each is 'runtimeClassName: gvisor', and no line is gone"
+
+if command -v git >/dev/null 2>&1; then
+  # git makes the new file from the old one and the diff of the dry-run.
+  mkdir -p apply/k8s
+  cp "$E2E_WORKLOADS" apply/k8s/workloads.yaml
+  if (cd apply && git apply ../workloads.diff) >> "$ALL_OUTPUT" 2>&1; then
+    expect_same apply/k8s/workloads.yaml k8s/workloads.yaml "git apply of the dry-run diff gives the file that the real run wrote"
+  else
+    fail "git apply reads the diff of the dry-run" "git apply failed"
+  fi
+else
+  printf '  %s %s\n' "$(_am_muted "-")" "skipped: git is not installed (the git apply check)"
+fi
+
+run scan -f k8s --fail-on sandboxed -o json
+expect_rc 0 "the scan of the patched file passes the sandboxed gate"
+expect_jq '.spec.summary | "\(.total) \(.sandboxed)"' "14 8" "the scan finds the class on the 8 workloads"
+
+cp k8s/workloads.yaml once.yaml
+run patch -f k8s --dry-run=false -o json
+expect_rc 0 "a second patch exits 0"
+expect_jq '.spec.summary.selected' "0" "a second patch selects nothing"
+expect_jq '.spec.files | length' "0" "a second patch has no diff"
+expect_same k8s/workloads.yaml once.yaml "a second patch changed no file"
+
+run patch -f k8s -o markdown
+expect_rc 0 "patch -o markdown works"
+expect_text "$OUT" "**Nothing to change.**" "markdown: the first lines say that there is nothing to change"
+
+# Forms that are not edited: reported, with exit 3, and left as they are.
+run patch -f forms --dry-run=false -o json
+expect_rc 3 "one workload patched and two in a form that is not edited: exit 3"
+expect_jq '.spec.summary | "\(.patched) \(.notEdited)"' "1 2" "the block-style Pod is patched; the flow-style and the JSON Pod are not"
+expect_jq '[.spec.changes[] | select(.status == "not-edited") | .reason | length > 0] | all' "true" "each one has a reason"
+expect_same forms/flow.yaml "$REPO_ROOT/test/testdata/patch/forms/flow.yaml" "the flow-style file is as it was"
+expect_same forms/pod.json "$REPO_ROOT/test/testdata/patch/forms/pod.json" "the JSON file is as it was"
+expect_text forms/block.yaml "  runtimeClassName: gvisor" "the block-style file has the class"
+
+run patch -f forms/pod.json -f forms/flow.yaml -o json
+expect_rc 1 "no selected workload can be patched: exit 1 (a dry-run too)"
+
+# A Helm template is not YAML. patch stops before it writes a file.
+run patch -f chart -f kustomize --dry-run=false
+expect_rc 1 "a Helm template in the input: exit 1"
+expect_empty "$OUT" "no report on stdout"
+expect_text "$ERR" "A Helm template cannot be edited" "the error says that a template cannot be edited"
+expect_same kustomize/base/web.yaml "$REPO_ROOT/test/testdata/patch/kustomize/base/web.yaml" "no file was written"
+
+run patch -f - < /dev/null
+expect_rc 1 "standard input is refused: it has no file to edit"
+
+# Kustomize: the base is a file that a person edits, so patch edits it. The
+# overlay patch is a partial object and is never a target.
+run patch -f kustomize --dry-run=false -o json
+expect_rc 0 "patch of a Kustomize tree exits 0"
+expect_jq '.spec.changes | map("\(.target.name) \(.status) \(.origin.file)") | join(",")' "web patched kustomize/base/web.yaml" \
+  "the Deployment of the base is patched"
+expect_jq '.metadata.source.unrendered | length > 0' "true" "the result lists the signs that the input is not rendered"
+expect_text "$ERR" "this input is not rendered" "a warning says the input is not rendered"
+expect_same kustomize/overlay/replicas.yaml "$REPO_ROOT/test/testdata/patch/kustomize/overlay/replicas.yaml" "the overlay patch is as it was"
+BASE_DIFF="$(diff "$REPO_ROOT/test/testdata/patch/kustomize/base/web.yaml" kustomize/base/web.yaml | grep '^[<>]' || true)"
+expect_eq "$BASE_DIFF" ">       runtimeClassName: gvisor" "the base has one new line; comments and quotes are as they were"
+
+if command -v kubectl >/dev/null 2>&1; then
+  # `kubectl kustomize` is a local render. It contacts no cluster.
+  kubectl kustomize kustomize/overlay > rendered.yaml 2>> "$ALL_OUTPUT"
+  run scan -f rendered.yaml --fail-on sandboxed -o json
+  expect_rc 0 "rendered: the overlay of the patched base passes the gate"
+  expect_jq '.spec.workloads | map("\(.name) \(.namespace) \(.runtimeClassName)") | join(",")' "prod-web shop gvisor" \
+    "rendered: the Deployment of the overlay has the class"
+else
+  printf '  %s %s\n' "$(_am_muted "-")" "skipped: kubectl is not installed (the render of the patched Kustomize tree)"
+fi
+
+popd > /dev/null
 
 # -----------------------------------------------------------------------------
 section "the canary"

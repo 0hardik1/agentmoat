@@ -1,0 +1,22 @@
+# The web tier. It has no host access, so it can run in the sandbox.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  labels:
+    app: web      # the selector below uses this label
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      # One container, and "quotes" that must stay as they are.
+      containers:
+        - name: web
+          image: "example.test/web:1"
+          args: ['--listen', ":8080"]

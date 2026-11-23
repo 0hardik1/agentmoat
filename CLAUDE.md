@@ -14,11 +14,13 @@ not duplicate them.
 `agentmoat` is a Go CLI plus an MCP server that moves Kubernetes
 workloads from `runc` to gVisor (`runsc`). The pipeline is
 `scan -> preflight -> plan -> apply -> rollback -> verify -> explain`
-(Phases 0-3, shipped), plus `probe nvproxy` for GPU clusters. The CLI binary
+(Phases 0-3, shipped), plus `probe nvproxy` for GPU clusters, and `patch`,
+which makes the same move as a change to manifest files (for a repository
+that a pipeline deploys from; no cluster). The CLI binary
 and the MCP binary are intentionally thin shells over a single library at
 `pkg/agentmoat`; both surfaces call the same orchestrator functions (`Scan`,
-`Preflight`, `Probe`, `Plan`, `Apply`, `Rollback`, `Verify`, `Explain`) so
-they cannot drift. See
+`Preflight`, `Probe`, `Plan`, `Patch`, `Apply`, `Rollback`, `Verify`,
+`Explain`) so they cannot drift. See
 [`docs/architecture.md`](docs/architecture.md) for the diagram and the
 package map.
 
@@ -39,7 +41,7 @@ invocation more than twice, prefer extending a target.
 | `make check-device-cgroup` | Checks that every runsc sandbox on a node is confined to a device cgroup (gVisor 20261116.0 and newer): `/dev/null` opens, `/dev/kmsg` is refused. `NODE=<kind node>` runs it through `docker exec`; `make e2e` runs it on the kind worker. |
 | `make kind-up`    | Builds the gVisor-enabled kind worker image and creates the local cluster. Idempotent; an existing cluster is reused as is, so run `make kind-down` first after a gVisor pin bump. |
 | `make e2e`        | Builds, brings up kind, runs scan/plan/apply/rollback end-to-end against a real `runsc` runtime, tears down. Honors `KEEP_CLUSTER=1`. |
-| `make offline-smoke` | Builds, then runs `scan -f`, the `--fail-on` gate, and the Markdown and SARIF outputs on the manifest fixtures in `test/testdata/manifests` with no cluster. Then it runs the script of the GitHub Action (`scripts/action-smoke.sh`) with a model of the runner. Needs `jq`, `curl`, and `tar`. CI runs it on every PR. Run it after changes to the manifest scanner, the gate, `pkg/output`, `action.yml`, or `scripts/github-action.sh`. |
+| `make offline-smoke` | Builds, then runs `scan -f`, the `--fail-on` gate, the Markdown and SARIF outputs, and `patch` on the manifest fixtures in `test/testdata/manifests` with no cluster. Then it runs the script of the GitHub Action (`scripts/action-smoke.sh`) with a model of the runner. Needs `jq`, `curl`, and `tar`. CI runs it on every PR. Run it after changes to the manifest scanner, the gate, `pkg/patcher`, `pkg/output`, `action.yml`, or `scripts/github-action.sh`. |
 | `make kind-down`  | Tear down the kind cluster from `make kind-up`. |
 
 CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
@@ -48,7 +50,7 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
 ## Repository layout (where to look)
 
 - `cmd/agentmoat/` and `cmd/agentmoat-mcp/`: thin shells. CLI uses Cobra;
-  the MCP binary serves 9 tools over stdio (Phase 4, shipped). Add new
+  the MCP binary serves 10 tools over stdio (Phase 4, shipped). Add new
   subcommands here as `<verb>.go` next to the existing files; global flags
   live in `root.go`.
 - `pkg/agentmoat/`: orchestrator. One public function per verb
@@ -58,11 +60,20 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   (`EvaluateGate`), so the exit code logic is not in `cmd/`. `managed.go`
   reads the markers of deploy tools (Argo CD, Flux, Helm) into
   `managedBy`, and makes the `source-managed` plan warning from them.
+  `patch.go` is `Patch`: it reads manifests as the file scan does
+  (`readManifestSet`), selects workloads with the rule of the planner, calls
+  `pkg/patcher` for each file, and writes the files (`writeManifest`: the
+  file must be as it was read, then a temporary file and a rename).
+  `PatchExitCode` is the exit code.
 - `pkg/scanner/`: returns canonical `[]scanner.Workload` from one of two
   sources. `Enumerate` lists a cluster through `client-go`. `FromManifests`
   decodes YAML or JSON text with no cluster (`ReadManifestPaths` reads the
   files, directories, or stdin), and also accepts other kinds that carry a
-  pod template, such as an Argo `Rollout`.
+  pod template, such as an Argo `Rollout`. Each workload from a manifest has
+  its position (`ManifestOrigin`: file, document, and the number of the
+  object in the document); `pkg/patcher` finds the object again by that
+  position, so keep the reading order of `readValue` and the order in
+  `patcher.collectObjects` the same.
 - `pkg/classifier/`: pure-function rule engine. `Classify(w, registry)`
   returns a `Verdict`; `ClassifyWithFacts` adds `schema.ClusterFacts` so a
   rule's `Refine` hook can move its severity (`gpu-passthrough` in
@@ -84,7 +95,16 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   Same scan in, same plan and same SHA-256 `planHash` out. Don't break
   determinism. A step is a change: a workload that already has a
   RuntimeClass gets no step (`runtimeClassBlocker`), because `rollback`
-  undoes a plan by removing the class.
+  undoes a plan by removing the class. `ExclusionCause` is the selection
+  rule; `patch` uses it too, so the two verbs select the same workloads
+  (only the kind blocker for a live Pod or Job is for `plan` alone).
+- `pkg/patcher/`: the text edit of `patch`. Pure: YAML text and targets in,
+  new text out. `AddRuntimeClass` adds one line after the `spec:` key of the
+  pod spec; the YAML node tree gives only the line and the column, and the
+  text is never encoded again from objects. `check.go` proves each edit
+  before it is used (the new text decodes to the old objects plus the
+  class, and the scanner finds the class on each target). `diff.go` makes
+  the unified diff from the added line numbers.
 - `pkg/applier/`: the only package that mutates the cluster. Strategic
   merge patch with `runtimeClassName`, the two namespace annotations
   (`idempotency.go`: `plan-hash` when an apply is complete, `apply-started`
@@ -97,7 +117,8 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   the `--wait` loop, and `readiness.go` says why a pod is not Ready.
 - `pkg/output/`: the renderers. Table, JSON, and YAML for every document;
   Markdown (`markdown.go`, `markdown_pipeline.go`) for a CI job summary or a
-  pull-request comment; SARIF (`sarif.go`) for `scan` only. The renderer
+  pull-request comment; SARIF (`sarif.go`) for `scan` only. `patch.go` has
+  the two renderers of a `PatchResult`, with the diff. The renderer
   dispatches on concrete type with a switch; extend it when adding a new
   schema type. `formatKinds` in `renderer.go` is the list of which document
   takes which format, and each command checks it first with `ParseFor`. See
@@ -134,7 +155,8 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
    production from a read-only kubeconfig.
 2. **`apply` and `rollback` default to `--dry-run=true`.** A user must
    explicitly pass `--dry-run=false` to mutate. If you add a mutating
-   command, follow the same convention.
+   command, follow the same convention. `patch` follows it for the files
+   that it writes, and the MCP tool `patch_manifests` does too.
 3. **`MigrationPlan` is deterministic.** Same `ScanReport` in, same
    `planHash` out. The planner is a pure function. Don't introduce wall
    clock or map iteration order into the plan.
@@ -164,8 +186,9 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
 8. **Schema stability.** `agentmoat.io/v1alpha1` is the active wire
    version. Add fields, do not rename or remove without bumping. Update
    `internal/schema/types_test.go` whenever shapes change.
-9. **`scan -f` reads no cluster.** With manifest paths, `Scan` builds no
-   Kubernetes client and reads no kubeconfig. Do not use a fake client
+9. **`scan -f` and `patch` read no cluster.** With manifest paths, `Scan`
+   builds no Kubernetes client and reads no kubeconfig. `Patch` has no
+   option for a client or a kubeconfig at all; keep it so. Do not use a fake client
    either: the report must not name a cluster that it did not read. A test
    in `pkg/agentmoat/scan_manifests_test.go` sets a kubeconfig that points
    at a dead server and a client that fails on any call.
@@ -174,7 +197,8 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
     is an error, not a skip. A workload kind with no containers (an overlay
     patch) is a partial object, never a compatible workload. `--fail-on
     sandboxed` refuses input that is not rendered. Do not weaken these to
-    make a scan pass.
+    make a scan pass. `patch` reads with the same code, so one document that
+    does not parse stops the run before a file is written.
 11. **Pipeline output states the gate, and trusts no text from the input.**
     A job summary shows no stderr and no exit code, so `scan -o markdown`
     starts with the gate result, for every outcome (a gate that checked
@@ -204,6 +228,21 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
     signal handler: an interrupt must end the process by the signal, so
     that Ctrl-C on `verify --wait 3m || rollback --dry-run=false` does not
     start a rollback (a test in `cmd/agentmoat/verify_test.go` checks it).
+13. **`patch` adds one line for each workload and changes nothing else.**
+    The edit is a text edit: comments, key order, quotes, indent, and line
+    endings stay. Do not encode YAML from objects to write a file. A form
+    that the edit cannot do safely (JSON, flow style, an anchor or alias on
+    the way to the pod spec) is reported as `not-edited` with the reason,
+    never guessed. The check in `pkg/patcher/check.go` runs on every edit at
+    run time and is not only a test: an edit that does not pass is not
+    written. A second run changes nothing. The diff is what a reviewer
+    approves, so it must be exact (`git apply` reads it in the tests). A
+    line of a diff is text from a manifest. The Markdown renderer puts it in
+    a fenced block with limits (invariant 11). The table renderer replaces
+    control characters, so that a line cannot write over the report on a
+    terminal, and does no more: in a GitHub step log a line of the table or
+    of the diff can still be a runner command, so a pipeline sends the
+    Markdown to the job summary, or prints inside a `stop-commands` block.
 
 ## Conventions (mirror the existing code)
 
@@ -233,10 +272,10 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   pipeline that runs it directly after `apply`) and `explain`
   (embedded docs plus `explain namespace` / `explain workload` deep scans)
   are wired in `cmd/agentmoat/` and exercised by `make e2e`.
-- **Phase 4** (MCP server): shipped. `cmd/agentmoat-mcp/` serves 9 tools
+- **Phase 4** (MCP server): shipped. `cmd/agentmoat-mcp/` serves 10 tools
   over stdio (`scan_cluster`, `preflight_cluster`, `probe_nvproxy`,
-  `assess_workload`, `propose_plan`, `apply_plan`, `rollback_plan`,
-  `verify_migration`, `explain`). See
+  `assess_workload`, `propose_plan`, `patch_manifests`, `apply_plan`,
+  `rollback_plan`, `verify_migration`, `explain`). See
   [`docs/mcp-integration.md`](docs/mcp-integration.md).
 - **Phase 5+**: EKS recipe, additional Packer variants.
 
@@ -264,7 +303,7 @@ Read the relevant doc:
 
 - Architecture and package map: [`docs/architecture.md`](docs/architecture.md)
 - Rule catalog and `--rules` override schema: [`docs/compatibility-checklist.md`](docs/compatibility-checklist.md)
-- Pipelines (the GitHub Action, the migration pipeline, what `rollback` does in each case): [`docs/ci-cd.md`](docs/ci-cd.md)
+- Pipelines (the GitHub Action, the migration pipeline, the move through the repository with `patch`, what `rollback` does in each case): [`docs/ci-cd.md`](docs/ci-cd.md)
 - Exit codes: [`docs/exit-codes.md`](docs/exit-codes.md)
 - Output formats (Markdown, SARIF, the gate line): [`docs/output-formats.md`](docs/output-formats.md)
 - Preflight findings and the apply gate: [`docs/preflight.md`](docs/preflight.md)

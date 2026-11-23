@@ -101,6 +101,16 @@ type ManifestOrigin struct {
 	// inside the input. Every item of a List shares its document's index.
 	Document int
 
+	// Object is the 1-based position of the object inside its document, in
+	// the order the reader visits them: 1 for a document that is one
+	// object, and 1, 2, 3... for the items of a List or of a top-level
+	// array (lists inside lists are counted in reading order). With File
+	// and Document it names one object of the input. It does not change
+	// when lines are added to the text, which is why `agentmoat patch`
+	// finds the object it edits by this position and not by a line or by a
+	// name (two objects in one List can have the same name).
+	Object int
+
 	// Line is the 1-based line of the document's first content line (the
 	// first line that is not blank and not a comment).
 	Line int
@@ -220,7 +230,16 @@ type ManifestProblem struct {
 // about a document that was not read.
 type ManifestError struct {
 	Problems []ManifestProblem
+
+	// TemplateHint replaces the hint for text with {{ }} in it. The
+	// default hint is the one for a scan (render the chart, then scan the
+	// output). A caller that cannot use rendered output (`patch`, which
+	// edits files) sets its own.
+	TemplateHint string
 }
+
+// defaultTemplateHint is the hint of a scan for text that has {{ }} in it.
+const defaultTemplateHint = "the text contains {{ }} template syntax. Render the chart first: helm template <chart> | agentmoat scan -f -"
 
 func (e *ManifestError) Error() string {
 	var b strings.Builder
@@ -235,7 +254,11 @@ func (e *ManifestError) Error() string {
 		templated = templated || p.Templated
 	}
 	if templated {
-		b.WriteString("\n  hint: the text contains {{ }} template syntax. Render the chart first: helm template <chart> | agentmoat scan -f -")
+		hint := e.TemplateHint
+		if hint == "" {
+			hint = defaultTemplateHint
+		}
+		b.WriteString("\n  hint: " + hint)
 	}
 	return b.String()
 }
@@ -288,6 +311,11 @@ type manifestCollector struct {
 	// kustomizations is the set of input names that hold a Kustomization.
 	kustomizations map[string]struct{}
 
+	// ordinal counts the objects of the document that is read now. It is
+	// the source of ManifestOrigin.Object. readInput and readJSONStream set
+	// it to zero before each document.
+	ordinal int
+
 	// present holds the identity of every named object in the input,
 	// workload or not. The assemble pass uses it to answer "is this
 	// workload's controller also here?".
@@ -331,6 +359,7 @@ func (c *manifestCollector) readInput(in ManifestInput) {
 	}
 	for _, doc := range docs {
 		origin := ManifestOrigin{File: in.Name, Document: doc.index, Line: doc.line, TemplateSource: doc.templateSource}
+		c.ordinal = 0
 		raw, err := yaml.YAMLToJSON(doc.data)
 		if err != nil {
 			// Point at the line the parser names, not at the top of the
@@ -361,6 +390,7 @@ func (c *manifestCollector) readJSONStream(name string, data []byte) (isJSON boo
 			return true
 		}
 		origin := ManifestOrigin{File: name, Document: index, Line: lineAt(data, start)}
+		c.ordinal = 0
 		if err != nil {
 			if index == 1 {
 				return false
@@ -403,6 +433,7 @@ func (c *manifestCollector) readValue(raw json.RawMessage, origin ManifestOrigin
 	default:
 		// A scalar document ("just a string"). Not a Kubernetes object.
 		c.objects++
+		c.ordinal++
 		c.skipped[NoKindKey]++
 		return
 	}
@@ -434,6 +465,8 @@ func (c *manifestCollector) readValue(raw json.RawMessage, origin ManifestOrigin
 // readObject handles one non-list object whose header is already decoded.
 func (c *manifestCollector) readObject(raw json.RawMessage, header objectHeader, gk schema.GroupKind, origin ManifestOrigin) {
 	c.objects++
+	c.ordinal++
+	origin.Object = c.ordinal
 	if gk.Kind == "" {
 		c.skipped[NoKindKey]++
 		return
@@ -861,6 +894,56 @@ func splitYAMLDocuments(data []byte) (docs []yamlDocument, badSeparators []int) 
 	}
 	flush()
 	return docs, badSeparators
+}
+
+// Document is one YAML document of a manifest text, as SplitDocuments
+// returns it.
+type Document struct {
+	// Index is the 1-based position of the document in the text. It is the
+	// same number as ManifestOrigin.Document for an object of this document.
+	Index int
+
+	// FirstLine is the 1-based line, in the full text, of the first line of
+	// Data. A line N of Data is line FirstLine+N-1 of the text.
+	FirstLine int
+
+	// Data is the text of the document: the lines between two separators.
+	Data []byte
+}
+
+// SplitDocuments splits manifest text into its YAML documents with the same
+// rules, and so the same document numbers, as FromManifests.
+//
+// It is for a caller that must find an object of a ManifestOrigin again in
+// the text (`agentmoat patch` adds a line to it). A second splitter in that
+// caller could number the documents in a different way for some input, and
+// then the wrong object would be edited.
+//
+// isJSON is true, and docs is nil, when FromManifests reads the text as a
+// stream of JSON values and not as YAML documents. A document with no
+// content line (only blanks and comments) is not in docs, as in
+// FromManifests, but it still takes its number.
+func SplitDocuments(data []byte) (docs []Document, isJSON bool) {
+	data = bytes.TrimPrefix(data, utf8BOM)
+	if isJSONStream(data) {
+		return nil, true
+	}
+	split, _ := splitYAMLDocuments(data)
+	docs = make([]Document, 0, len(split))
+	for _, d := range split {
+		docs = append(docs, Document{Index: d.index, FirstLine: d.firstLine, Data: d.data})
+	}
+	return docs, false
+}
+
+// isJSONStream is the rule of readInput for "this text is JSON": it starts
+// with { or [, and its first value is JSON. See readJSONStream.
+func isJSONStream(data []byte) bool {
+	if first := firstNonSpace(data); first != '{' && first != '[' {
+		return false
+	}
+	var raw json.RawMessage
+	return json.NewDecoder(bytes.NewReader(data)).Decode(&raw) == nil
 }
 
 // isYAMLSeparator reports whether a line that starts with "---" (and has no

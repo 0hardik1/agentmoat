@@ -104,7 +104,8 @@ Flags:
 
 Surface:
   Tools     scan_cluster, preflight_cluster, probe_nvproxy, assess_workload,
-            propose_plan, apply_plan, rollback_plan, verify_migration, explain
+            propose_plan, patch_manifests, apply_plan, rollback_plan,
+            verify_migration, explain
   Resources agentmoat://compatibility-rules, agentmoat://known-gotchas
   Prompts   audit-cluster-for-agentic-workloads`
 }

@@ -6,9 +6,9 @@ and AI agents can branch on it.
 | Code | Meaning | Emitted by |
 | --- | --- | --- |
 | `0` | Success. The command completed and (for mutating commands) the cluster matches the requested state. | All commands |
-| `1` | Generic error. Could not load kubeconfig, network failure, unparseable flag, etc. For `apply`/`rollback`, also emitted when **every** step failed. They also refuse a plan with no `metadata.planHash` with this code. For `scan -f`, a manifest that does not parse, or `--fail-on sandboxed` on input that is not rendered. The stderr message names the cause. | All commands |
+| `1` | Generic error. Could not load kubeconfig, network failure, unparseable flag, etc. For `apply`/`rollback`, also emitted when **every** step failed. They also refuse a plan with no `metadata.planHash` with this code. For `scan -f`, a manifest that does not parse, or `--fail-on sandboxed` on input that is not rendered. For `patch`, also when no selected workload could be patched. The stderr message names the cause. | All commands |
 | `2` | Compatibility issues found. At least one workload was classified as `incompatible`. For `scan`, `--fail-on` changes which workloads count (see below). | `agentmoat scan`, `agentmoat explain namespace`, `agentmoat explain workload` |
-| `3` | Partial outcome. Some steps succeeded and others failed; idempotent re-run is safe. After a partial `apply`, `rollback` with the same plan undoes the steps that succeeded (see below). | `agentmoat apply`, `agentmoat rollback` |
+| `3` | Partial outcome. Some steps succeeded and others failed; idempotent re-run is safe. After a partial `apply`, `rollback` with the same plan undoes the steps that succeeded (see below). For `patch`: some selected workloads are patched and others are not (see below). | `agentmoat apply`, `agentmoat rollback`, `agentmoat patch` |
 | `4` | Verify failed. Live pods do not match the plan's expected `runtimeClassName`, the hosting nodes fall outside the RuntimeClass `nodeSelector`, (with `--in-pod-probe`) the in-container probe did not find gVisor markers, and/or (with `--wait`) the pods did not stay Ready before the wait time ended. | `agentmoat verify` |
 | `5` | Cluster not ready. The preflight found an error: no RuntimeClass, a RuntimeClass with no `scheduling.nodeSelector`, no Ready node matching it, untolerated taints on every matching node, or only EKS Auto Mode / Bottlerocket nodes. For `apply`, every step is reported `skipped` and nothing was mutated. For `probe nvproxy`, the probe pod was not created. | `agentmoat preflight`, `agentmoat probe nvproxy`, `agentmoat apply` |
 
@@ -52,6 +52,26 @@ and nothing in it failed the gate":
   does not read as a pass. See [output formats](output-formats.md).
 
 Input with objects but no workloads (config only) is exit `0` with a note.
+
+## Patch exit codes
+
+`agentmoat patch` adds `runtimeClassName` to manifest files. It reads no
+cluster, so its codes are about the files only.
+
+| Exit | When |
+| --- | --- |
+| `0` | Each selected workload is patched. Also when no workload was selected: nothing is compatible and without a RuntimeClass, which is the result of a second run. |
+| `3` | Some selected workloads are patched, and one or more are not: the workload is in a form that `patch` does not edit (JSON, flow-style YAML, a pod spec behind a YAML anchor), or its file could not be written. The files of the patched workloads are written. The report has the reason for each one that is not. |
+| `1` | No selected workload could be patched. Also each error before the edit: no `-f`, standard input, a manifest that does not parse, a Helm template, a class name that is not a valid name. No file is written. |
+
+A dry-run (the default) writes no file and has the exit code that the run
+with `--dry-run=false` has for the same files, unless a write fails. So a
+pipeline can use the dry-run as the check, and a reader of the code knows
+before the write that some workloads need an edit by hand.
+
+A workload that is excluded (incompatible, needs review, has a RuntimeClass)
+never changes the exit code. To make a pipeline fail on an incompatible
+workload, use `agentmoat scan -f` with `--fail-on`.
 
 ## Verify exit code 4 in detail
 
@@ -280,6 +300,15 @@ esac
 # workload that asks for the gVisor RuntimeClass. Exit 1 is "could not read
 # the input", and must fail the job too.
 helm template ./chart | agentmoat scan -f - --fail-on sandboxed
+
+# Write the move into the manifest files. Exit 3 is "some workloads need an
+# edit by hand": the other files are written, and the report says which.
+# The report goes to the job summary and not to the step log: it has lines
+# of the manifest files.
+rc=0
+agentmoat patch -f k8s --dry-run=false -o markdown > patch.md || rc=$?
+cat patch.md >> "$GITHUB_STEP_SUMMARY"
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then exit "$rc"; fi
 
 # After apply, confirm spec and (optionally) runtime inside the pod.
 agentmoat verify --plan plan.json --in-pod-probe || test $? -eq 4

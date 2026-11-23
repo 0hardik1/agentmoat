@@ -149,24 +149,83 @@ func Plan(report *schema.ScanReport, opts Options) (*schema.MigrationPlan, error
 //     finding to show, not "nothing to change".
 //  2. It has a RuntimeClass (see runtimeClassBlocker). This is before the
 //     review check: a workload that is in the sandbox needs no
-//     "--include-review to plan anyway".
+//     "--include-review".
 //  3. It needs review, and the operator did not opt in.
 //  4. Its kind cannot be patched in place. Some kinds cannot be migrated by
 //     a patch, because the Kubernetes API rejects the mutation outright.
 //     An exclusion here gives the operator an actionable reason in the plan
 //     itself. Without it, apply would fail on the step with a raw HTTP 422.
 func exclusionReason(w schema.WorkloadResult, opts Options) string {
-	if w.Compatibility == schema.CompatibilityIncompatible {
-		return fmt.Sprintf("workload is incompatible: %s", commaJoinErrorReasons(w.Reasons))
-	}
-	if blocker := runtimeClassBlocker(w.RuntimeClassName, opts.RuntimeClassName); blocker != "" {
-		return blocker
-	}
-	if w.Compatibility == schema.CompatibilityReview && !opts.IncludeReview {
-		return fmt.Sprintf("workload needs review (use --include-review to plan anyway): %s", commaJoinWarnReasons(w.Reasons))
+	if cause := ExclusionCause(w, opts); cause != CauseNone {
+		return ExclusionReason(cause, w, opts)
 	}
 	if blocker := kindMigrationBlocker(w.Kind); blocker != "" {
 		return "cannot patch in place: " + blocker
+	}
+	return ""
+}
+
+// Cause is why a workload gets no change, for the causes that do not depend
+// on how the change is made.
+//
+// `plan` changes the live object and `patch` changes a manifest file. The
+// two must select the same workloads: a workload that one of them moves and
+// the other refuses would be a contradiction between the terminal and the
+// pipeline. So the decision is one function here (ExclusionCause), and the
+// two commands call it. What is not shared is the rule about kinds: a live
+// Pod cannot be patched, and a Pod in a file can be edited.
+type Cause string
+
+// The causes, in the order in which ExclusionCause checks them.
+const (
+	// CauseNone: the workload gets the change.
+	CauseNone Cause = ""
+
+	// CauseIncompatible: the classifier says that the workload cannot run
+	// in gVisor.
+	CauseIncompatible Cause = "incompatible"
+
+	// CauseHasTargetClass: the workload already has the RuntimeClass that
+	// would be set. There is nothing to change.
+	CauseHasTargetClass Cause = "has-target-class"
+
+	// CauseHasOtherClass: the workload has another RuntimeClass. It is not
+	// replaced.
+	CauseHasOtherClass Cause = "has-other-class"
+
+	// CauseNeedsReview: the workload needs review and the operator did not
+	// opt in with IncludeReview.
+	CauseNeedsReview Cause = "needs-review"
+)
+
+// ExclusionCause returns the first cause for which a workload gets no
+// change, or CauseNone. The order is the one in the comment of
+// exclusionReason (checks 1 to 3).
+func ExclusionCause(w schema.WorkloadResult, opts Options) Cause {
+	switch {
+	case w.Compatibility == schema.CompatibilityIncompatible:
+		return CauseIncompatible
+	case w.RuntimeClassName != "" && w.RuntimeClassName == opts.RuntimeClassName:
+		return CauseHasTargetClass
+	case w.RuntimeClassName != "":
+		return CauseHasOtherClass
+	case w.Compatibility == schema.CompatibilityReview && !opts.IncludeReview:
+		return CauseNeedsReview
+	}
+	return CauseNone
+}
+
+// ExclusionReason is the sentence for a cause, as a MigrationPlan shows it.
+// `patch` uses it too, except for CauseHasOtherClass, where the plan's
+// sentence is about rollback and a file has `git revert`.
+func ExclusionReason(cause Cause, w schema.WorkloadResult, opts Options) string {
+	switch cause {
+	case CauseIncompatible:
+		return fmt.Sprintf("workload is incompatible: %s", commaJoinErrorReasons(w.Reasons))
+	case CauseHasTargetClass, CauseHasOtherClass:
+		return runtimeClassBlocker(w.RuntimeClassName, opts.RuntimeClassName)
+	case CauseNeedsReview:
+		return fmt.Sprintf("workload needs review (use --include-review to include it): %s", commaJoinWarnReasons(w.Reasons))
 	}
 	return ""
 }

@@ -641,3 +641,55 @@ func sortedCopy(in []string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestExclusionCause pins the selection rule that `plan` and `patch` share:
+// the cause for which a workload gets no change, and the order of the
+// checks. The order matters for a workload with two causes: "incompatible"
+// is the one to show for a sandboxed workload that cannot run in the
+// sandbox, and a workload that has a class is never "needs review".
+func TestExclusionCause(t *testing.T) {
+	t.Parallel()
+	row := func(verdict schema.Compatibility, class string) schema.WorkloadResult {
+		return schema.WorkloadResult{
+			Kind: "Deployment", Namespace: "ns", Name: "w", Compatibility: verdict, RuntimeClassName: class,
+			Reasons: []schema.Reason{
+				{RuleID: "host-network", Severity: schema.SeverityError},
+				{RuleID: "hostpath-volume", Severity: schema.SeverityWarn},
+			},
+		}
+	}
+	cases := []struct {
+		name       string
+		w          schema.WorkloadResult
+		opts       Options
+		want       Cause
+		wantReason string
+	}{
+		{"compatible, no class", row(schema.CompatibilityCompatible, ""), Options{RuntimeClassName: "gvisor"}, CauseNone, ""},
+		{"incompatible", row(schema.CompatibilityIncompatible, ""), Options{RuntimeClassName: "gvisor"}, CauseIncompatible,
+			"workload is incompatible: host-network"},
+		{"incompatible wins over a class", row(schema.CompatibilityIncompatible, "gvisor"), Options{RuntimeClassName: "gvisor"}, CauseIncompatible,
+			"workload is incompatible: host-network"},
+		{"has the class", row(schema.CompatibilityCompatible, "gvisor"), Options{RuntimeClassName: "gvisor"}, CauseHasTargetClass,
+			`already has RuntimeClass "gvisor": nothing to change`},
+		{"has another class", row(schema.CompatibilityCompatible, "kata"), Options{RuntimeClassName: "gvisor"}, CauseHasOtherClass,
+			`has RuntimeClass "kata": the plan does not replace another RuntimeClass`},
+		{"the class wins over review", row(schema.CompatibilityReview, "gvisor"), Options{RuntimeClassName: "gvisor"}, CauseHasTargetClass,
+			`already has RuntimeClass "gvisor"`},
+		{"needs review", row(schema.CompatibilityReview, ""), Options{RuntimeClassName: "gvisor"}, CauseNeedsReview,
+			"workload needs review (use --include-review to include it): hostpath-volume"},
+		{"needs review, included", row(schema.CompatibilityReview, ""), Options{RuntimeClassName: "gvisor", IncludeReview: true}, CauseNone, ""},
+		{"review with another class, included", row(schema.CompatibilityReview, "kata"), Options{RuntimeClassName: "gvisor", IncludeReview: true}, CauseHasOtherClass,
+			`has RuntimeClass "kata"`},
+	}
+	for _, tc := range cases {
+		got := ExclusionCause(tc.w, tc.opts)
+		if got != tc.want {
+			t.Errorf("%s: cause = %q, want %q", tc.name, got, tc.want)
+		}
+		reason := ExclusionReason(got, tc.w, tc.opts)
+		if (tc.wantReason == "") != (reason == "") || !strings.Contains(reason, tc.wantReason) {
+			t.Errorf("%s: reason = %q, want it to have %q", tc.name, reason, tc.wantReason)
+		}
+	}
+}

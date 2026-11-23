@@ -113,6 +113,8 @@ func renderMarkdownAny(doc any, w io.Writer, opts RenderOptions) error {
 		writeVerifyReportMarkdown(&d, v)
 	case *schema.PreflightReport:
 		writePreflightReportMarkdown(&d, v)
+	case *schema.PatchResult:
+		writePatchResultMarkdown(&d, v)
 	default:
 		return fmt.Errorf("output: no Markdown renderer for %T", doc)
 	}
@@ -188,9 +190,16 @@ func (d *mdDoc) leftOut(n int) {
 // longer than the longest run of backticks in the lines, so no line can
 // close it. Only the first mdMaxRows lines are written.
 func (d *mdDoc) fence(lines []string) {
+	d.fenceAs("text", lines, mdMaxRows)
+}
+
+// fenceAs is fence with a language for the block (a fixed word of the
+// caller, such as "diff", never text from the input) and a limit on the
+// number of lines.
+func (d *mdDoc) fenceAs(language string, lines []string, limit int) {
 	shown := lines
-	if len(shown) > mdMaxRows {
-		shown = shown[:mdMaxRows]
+	if len(shown) > limit {
+		shown = shown[:limit]
 	}
 	clean := make([]string, len(shown))
 	longest := 2
@@ -201,7 +210,7 @@ func (d *mdDoc) fence(lines []string) {
 		}
 	}
 	ticks := strings.Repeat("`", longest+1)
-	d.linef("%stext", ticks)
+	d.linef("%s%s", ticks, language)
 	for _, line := range clean {
 		d.linef("%s", line)
 	}

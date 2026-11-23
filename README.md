@@ -112,6 +112,22 @@ needs no secret:
 renders, and the same check for other CI systems.
 [`examples/ci/`](examples/ci/) has the files to copy.
 
+To move workloads through your repository, `patch` writes the change into
+the manifest files. It reads no cluster:
+
+```bash
+./bin/agentmoat patch -f ./k8s                     # dry-run: show the diff
+./bin/agentmoat patch -f ./k8s --dry-run=false     # add runtimeClassName to the files
+./bin/agentmoat scan -f ./k8s --fail-on sandboxed  # check the result
+```
+
+`patch` selects the workloads that are compatible and have no RuntimeClass,
+and adds one line (`runtimeClassName: gvisor`) to the pod spec of each.
+Nothing else in a file changes: comments, the order of keys, and quotes stay.
+Review the diff in a pull request, let your pipeline deploy it, and use
+`git revert` as the rollback. See
+[`docs/ci-cd.md`](docs/ci-cd.md#3-the-move-through-the-repository).
+
 A pipeline that moves the workloads runs `verify` as the next command after
 `apply`, with a wait time, and rolls back when it fails:
 
@@ -180,7 +196,19 @@ way that a run can end.
   When a workload in the plan has the marker of a deploy tool (Argo CD,
   Flux, Helm), the plan has the warning `source-managed`: `apply` changes
   the live object only, so the source that the tool deploys from needs the
-  change too. `scan` records the marker as `managedBy` on the workload.
+  change too (`patch` writes it into manifest files). `scan` records the
+  marker as `managedBy` on the workload.
+- **`patch`** makes the same move as a change to manifest files, for a
+  repository that a pipeline or a deploy tool deploys from. It reads the
+  files as `scan -f` does, selects the workloads that `plan` selects
+  (compatible, no RuntimeClass; `--include-review` adds the ones that need
+  review), and adds `runtimeClassName` to the pod spec of each: one added
+  line, and no other change to the file. A Pod and a Job can change here
+  too, because a file has no immutable field. It checks each edit before it
+  uses it (the new text must decode to the old objects plus the class), and
+  it lists what it does not edit (JSON, flow-style YAML, a pod spec behind
+  a YAML anchor) with the reason. It reads no cluster and defaults to
+  `--dry-run=true`, which prints the diff. A second run changes nothing.
 - **`apply`** is the only stage that mutates the cluster. It runs the
   preflight first and refuses to touch anything when the cluster cannot host
   the plan (exit `5`, every step `skipped`, `--skip-preflight` to override).
@@ -435,6 +463,7 @@ make kind-down
 | `agentmoat preflight`| Check that the RuntimeClass steers pods onto a Ready `runsc` node. RO. Exit 5 when not. |
 | `agentmoat probe nvproxy` | Read the nvproxy supported-driver list from `runsc` on a gVisor node via a one-shot pod. Default dry-run. |
 | `agentmoat plan`     | Produce a deterministic `MigrationPlan` from a scan. RO.      |
+| `agentmoat patch`    | Add `runtimeClassName` to manifest files (`-f`), for a move through a pull request. No cluster. Default dry-run (prints the diff). |
 | `agentmoat apply`    | Patch workloads per the plan. Default dry-run. Idempotent.    |
 | `agentmoat rollback` | Reverse a previously applied plan. Default dry-run.           |
 | `agentmoat verify`   | Confirm live pods match the plan's `runtimeClassName`. With `--wait`, wait for the rollout and for Ready pods. RO. |
@@ -448,7 +477,7 @@ make kind-down
 | `--output / -o`            | `table`          | `table`, `json`, `yaml`, `markdown`, or `sarif`. `json`/`yaml` follow `agentmoat.io/v1alpha1`. See [Output formats](#output-formats). |
 | `--kubeconfig`             | `$KUBECONFIG`    | Path to kubeconfig.                                                      |
 | `--context`                | current-context  | kubeconfig context to use.                                               |
-| `--namespace / -n`         | (all)            | Repeatable. Default: scan every namespace. With `scan -f`: one value, the namespace for objects that name none (not a filter). |
+| `--namespace / -n`         | (all)            | Repeatable. Default: scan every namespace. With `scan -f` and `patch`: one value, the namespace for objects that name none (not a filter). |
 | `--all-namespaces / -A`    | true if `-n` unset | Explicit all-namespaces flag.                                          |
 | `--selector / -l`          | (none)           | Kubernetes label selector applied to every list call.                    |
 | `--include-system`         | `false`          | Include `kube-system` and other `kube-*` namespaces.                     |
@@ -459,14 +488,16 @@ make kind-down
 | Flag                       | Command      | Default     | Purpose                                                                 |
 | -------------------------- | ------------ | ----------- | ----------------------------------------------------------------------- |
 | `--scan`                   | `plan`       | (inline)    | Read a stored `ScanReport` from disk instead of scanning.               |
-| `--include-review`         | `plan`       | `false`     | Also include `review`-class workloads in the plan.                      |
-| `--runtime-class`          | `plan`       | `gvisor`    | RuntimeClass name to patch onto migrated workloads.                     |
+| `--include-review`         | plan/patch   | `false`     | Also include `review`-class workloads in the plan or the patch.         |
+| `--runtime-class`          | plan/patch   | `gvisor`    | RuntimeClass name to patch onto migrated workloads, or to write into the files. |
 | `--add-toleration`         | `plan`       | `false`     | Also patch the `runtime=gvisor:NoSchedule` toleration into each pod template. Changes the plan hash. |
 | `--filename / -f`          | `scan`       | (cluster)   | Scan manifests and no cluster: a file, a directory, or `-` for stdin. Repeatable. |
+| `--filename / -f`          | `patch`      | required    | The manifests to edit: a file or a directory. Repeatable. Not stdin.    |
+| `--dry-run`                | `patch`      | `true`      | Show the diff and write no file.                                        |
 | `--fail-on`                | `scan`       | `incompatible` | When to exit 2: `incompatible`, `sandboxed` (only workloads that ask for the gVisor RuntimeClass), or `none`. |
 | `--runtime-class`          | scan/preflight | `gvisor`  | RuntimeClass to inspect for cluster facts / the preflight. For `scan`, also the class that `--fail-on sandboxed` looks for. |
 | `--no-cluster-facts`       | `scan`       | `false`     | Skip the node and RuntimeClass reads; omit `metadata.clusterFacts`.     |
-| `--facts`                  | scan/plan/explain | (live)   | Load cluster facts from a saved `PreflightReport` (`probe nvproxy` output) or `ScanReport` instead of reading the cluster. |
+| `--facts`                  | scan/plan/patch/explain | (live) | Load cluster facts from a saved `PreflightReport` (`probe nvproxy` output) or `ScanReport` instead of reading the cluster. |
 | `--dry-run`                | `probe nvproxy` | `true`   | Describe the probe pod without creating it.                             |
 | `--probe-namespace`        | `probe nvproxy` | `default` | Namespace for the probe pod (must allow `hostPath` under PSA; see `deploy/nvproxy-probe.yaml`). |
 | `--image` / `--runsc-path` / `--timeout` | `probe nvproxy` | `busybox:1.36.1` / `/usr/local/bin/runsc` / `2m` | Probe pod image, host path of `runsc`, wait budget. |
@@ -485,7 +516,7 @@ make kind-down
 | `table`| Default human-readable view; per-workload row with runtime class, verdict, and top reasons. |
 | `json` | Versioned, stable schema (`agentmoat.io/v1alpha1`). Pipe into `jq` or store as evidence. |
 | `yaml` | Byte-identical to JSON after canonicalisation; convenient for review/diff.         |
-| `markdown` (or `md`) | A CI job summary, a pull-request comment, a merge-request note. For `scan`, the first line is the result of the `--fail-on` gate. Not for `explain`. |
+| `markdown` (or `md`) | A CI job summary, a pull-request comment, a merge-request note. For `scan`, the first line is the result of the `--fail-on` gate. For `patch`, it has the diff. Not for `explain`. |
 | `sarif` | SARIF 2.1.0 for a code scanning service. `scan` only. A result is an `error` only when it makes the gate fail. |
 
 A command refuses a format that it cannot write before it does any work. The
@@ -563,11 +594,11 @@ image.
 Phase 0 (foundation), Phase 1 (read-only scan + classifier), Phase 2
 (planner + applier + rollback, with idempotency and audit), Phase 3
 (`agentmoat verify` with optional `--in-pod-probe`, plus `agentmoat
-explain`), and Phase 4 (the `agentmoat-mcp` MCP server: 9 tools over
+explain`), and Phase 4 (the `agentmoat-mcp` MCP server: 10 tools over
 stdio, see [`docs/mcp-integration.md`](docs/mcp-integration.md)) are all
 shipped and exercised end-to-end against a real gVisor kind cluster.
-`agentmoat preflight`, the apply gate, and `agentmoat probe nvproxy` landed
-after v0.1.0.
+`agentmoat preflight`, the apply gate, `agentmoat probe nvproxy`, the scan
+of manifests (`scan -f`), and `agentmoat patch` landed after v0.1.0.
 
 Roadmap:
 
@@ -576,7 +607,7 @@ Roadmap:
 
 ## Where to go next
 
-- [CI/CD](docs/ci-cd.md): the pull request check (the GitHub Action, other CI systems) and the migration pipeline.
+- [CI/CD](docs/ci-cd.md): the pull request check (the GitHub Action, other CI systems), the migration pipeline, and the move through the repository with `patch`.
 - [Architecture](docs/architecture.md): the Go library at the core; CLI as a thin shell.
 - [gVisor 101](docs/gvisor-101.md): Sentry, Gofer, platforms, and where the overhead lives.
 - [RuntimeClass 101](docs/runtimeclass-101.md): one-page intro to the `RuntimeClass` API.

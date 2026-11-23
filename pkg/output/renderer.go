@@ -66,6 +66,7 @@ var formatKinds = map[Format][]string{
 		schema.KindRollbackResult,
 		schema.KindVerifyReport,
 		schema.KindPreflightReport,
+		schema.KindPatchResult,
 	},
 	FormatSARIF: {
 		schema.KindScanReport,
@@ -236,6 +237,8 @@ func renderTableAny(doc any, w io.Writer, useColor bool) error {
 		return renderVerifyReportTable(d, w, useColor)
 	case *schema.PreflightReport:
 		return renderPreflightReportTable(d, w, useColor)
+	case *schema.PatchResult:
+		return renderPatchResultTable(d, w, useColor)
 	case *schema.ExplainDocument:
 		return renderExplainDocumentTable(d, w, useColor)
 	default:

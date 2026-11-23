@@ -34,6 +34,7 @@ const (
 	KindVerifyReport    = "VerifyReport"
 	KindExplainDocument = "ExplainDocument"
 	KindPreflightReport = "PreflightReport"
+	KindPatchResult     = "PatchResult"
 )
 
 // DefaultRuntimeClassName is the RuntimeClass name that the applier writes
@@ -1036,4 +1037,160 @@ type CommandHit struct {
 	Container  string `json:"container"  yaml:"container"`
 	Field      string `json:"field"      yaml:"field"`
 	Executable string `json:"executable" yaml:"executable"`
+}
+
+// ---------------------------------------------------------------------------
+// PatchResult: output of `agentmoat patch`.
+// ---------------------------------------------------------------------------
+
+// PatchResult is the wire-shape of `agentmoat patch`: the move to the
+// sandbox as a change to manifest files. It says which workloads the change
+// is for, what happened to each, which workloads it left out and why, and it
+// carries the diff of each file.
+//
+// It is the file counterpart of MigrationPlan plus ApplyResult. There is no
+// plan file between the two halves, because the files are the record: a
+// reviewer reads the diff, and `git revert` is the rollback.
+type PatchResult struct {
+	APIVersion string        `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string        `json:"kind"       yaml:"kind"`
+	Metadata   PatchMetadata `json:"metadata"   yaml:"metadata"`
+	Spec       PatchSpec     `json:"spec"       yaml:"spec"`
+}
+
+// NewPatchResult returns an empty PatchResult with the envelope filled.
+func NewPatchResult() *PatchResult {
+	return &PatchResult{
+		APIVersion: APIVersion,
+		Kind:       KindPatchResult,
+	}
+}
+
+// PatchMetadata records how the patch ran.
+type PatchMetadata struct {
+	GeneratedAt      string `json:"generatedAt"      yaml:"generatedAt"`
+	AgentmoatVersion string `json:"agentmoatVersion" yaml:"agentmoatVersion"`
+
+	// DryRun is true when no file was written. Dry-run is the default, as
+	// for apply; the result then says what a real run would do.
+	DryRun bool `json:"dryRun" yaml:"dryRun"`
+
+	// RuntimeClassName is the value that the patch writes.
+	RuntimeClassName string `json:"runtimeClassName" yaml:"runtimeClassName"`
+
+	// IncludeReview is true when workloads that need review were selected
+	// too (--include-review).
+	IncludeReview bool `json:"includeReview,omitempty" yaml:"includeReview,omitempty"`
+
+	// Source says what was read, as in a ScanReport of manifests: the
+	// number of inputs, the objects that are not workloads, and the signs
+	// that the input is not rendered (a kustomization file, a partial
+	// object). A patch edits such input, because the files of a base are
+	// what a person changes; the verdicts then describe the files and not
+	// what an overlay makes of them.
+	Source *ReportSource `json:"source,omitempty" yaml:"source,omitempty"`
+}
+
+// PatchSpec is the payload of a PatchResult.
+type PatchSpec struct {
+	Summary PatchSummary `json:"summary" yaml:"summary"`
+
+	// Changes has one entry for each selected workload: a compatible
+	// workload (or one that needs review, with IncludeReview) that has no
+	// RuntimeClass. Sorted by (namespace, kind, name).
+	Changes []PatchChange `json:"changes" yaml:"changes"`
+
+	// Excluded lists the workloads that the patch did not select, with the
+	// reason, as a MigrationPlan does.
+	Excluded []ExcludedWorkload `json:"excluded" yaml:"excluded"`
+
+	// Files has one entry for each file with a change, sorted by path.
+	Files []PatchFile `json:"files" yaml:"files"`
+}
+
+// PatchSummary is the count of the outcomes.
+type PatchSummary struct {
+	// Total is the number of workloads read: Selected plus Excluded.
+	Total int `json:"total" yaml:"total"`
+
+	// Selected is the number of workloads that the patch is for.
+	Selected int `json:"selected" yaml:"selected"`
+
+	// Patched is the number of selected workloads whose file has the new
+	// line (in a dry-run: would have).
+	Patched int `json:"patched" yaml:"patched"`
+
+	// NotEdited is the number of selected workloads in a form that the
+	// patch does not edit (JSON, flow-style YAML, a YAML anchor).
+	NotEdited int `json:"notEdited" yaml:"notEdited"`
+
+	// Failed is the number of selected workloads whose file could not be
+	// written.
+	Failed int `json:"failed" yaml:"failed"`
+
+	// Excluded is the number of workloads that were not selected.
+	Excluded int `json:"excluded" yaml:"excluded"`
+
+	// Files is the number of files with a change.
+	Files int `json:"files" yaml:"files"`
+}
+
+// PatchStatus is the outcome for one selected workload.
+type PatchStatus string
+
+const (
+	// PatchStatusPatched: the file has the runtimeClassName line for this
+	// workload (or, in a dry-run, would have).
+	PatchStatusPatched PatchStatus = "patched"
+
+	// PatchStatusNotEdited: the workload is in a form that the patch does
+	// not edit. PatchChange.Reason says which, and what to do by hand.
+	PatchStatusNotEdited PatchStatus = "not-edited"
+
+	// PatchStatusFailed: the edit was made in memory and the file could
+	// not be written. PatchChange.Reason has the error.
+	PatchStatusFailed PatchStatus = "failed"
+)
+
+// PatchChange is the outcome for one selected workload.
+type PatchChange struct {
+	Target WorkloadRef `json:"target" yaml:"target"`
+
+	// Compatibility is the verdict of the workload: "compatible", or
+	// "review" when IncludeReview selected it.
+	Compatibility Compatibility `json:"compatibility" yaml:"compatibility"`
+
+	// Origin is where the object starts in the input, before the change.
+	Origin *Origin `json:"origin,omitempty" yaml:"origin,omitempty"`
+
+	Status PatchStatus `json:"status" yaml:"status"`
+
+	// Line is the 1-based line of the added line in the file after the
+	// change. Zero when Status is not "patched".
+	Line int `json:"line,omitempty" yaml:"line,omitempty"`
+
+	// Reason says why the workload was not edited, or why the write
+	// failed. Empty when Status is "patched".
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
+}
+
+// PatchFile is one file with a change.
+type PatchFile struct {
+	// Path is the path as it was given or found.
+	Path string `json:"path" yaml:"path"`
+
+	// Added is the number of lines that the change adds. A patch removes
+	// no line and changes no line.
+	Added int `json:"added" yaml:"added"`
+
+	// Written is true when the file on disk has the change. Always false
+	// in a dry-run.
+	Written bool `json:"written" yaml:"written"`
+
+	// Diff is the change as a unified diff.
+	Diff string `json:"diff" yaml:"diff"`
+
+	// Error says why the file was not written, when it was not and the
+	// run was not a dry-run.
+	Error string `json:"error,omitempty" yaml:"error,omitempty"`
 }

@@ -9,6 +9,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -385,9 +386,11 @@ items:
 	want := map[string]ManifestOrigin{
 		// The first document (the header comment) has no content and gets
 		// no index of its own content, but it still occupies position 1.
-		"Deployment/shop/web": {File: "<stdin>", Document: 2, Line: 5, TemplateSource: "shop/templates/web.yaml"},
-		"Pod/shop/a":          {File: "<stdin>", Document: 3, Line: 13, TemplateSource: "shop/templates/list.yaml"},
-		"Pod/shop/b":          {File: "<stdin>", Document: 3, Line: 13, TemplateSource: "shop/templates/list.yaml"},
+		// Object is the position in the document: the two Pods of the List
+		// have one document and one line, and are objects 1 and 2 of it.
+		"Deployment/shop/web": {File: "<stdin>", Document: 2, Object: 1, Line: 5, TemplateSource: "shop/templates/web.yaml"},
+		"Pod/shop/a":          {File: "<stdin>", Document: 3, Object: 1, Line: 13, TemplateSource: "shop/templates/list.yaml"},
+		"Pod/shop/b":          {File: "<stdin>", Document: 3, Object: 2, Line: 13, TemplateSource: "shop/templates/list.yaml"},
 	}
 	got := map[string]ManifestOrigin{}
 	for i, id := range ids(res) {
@@ -823,7 +826,7 @@ func TestFromManifests_OverlayPatchIsNotAWorkload(t *testing.T) {
 
 	wantPartial := []ManifestPartial{{
 		Kind: "Deployment", Namespace: "shop", Name: "web", RuntimeClassName: "gvisor",
-		Origin: ManifestOrigin{File: "overlay/patch.yaml", Document: 1, Line: 1},
+		Origin: ManifestOrigin{File: "overlay/patch.yaml", Document: 1, Object: 1, Line: 1},
 	}}
 	if !reflect.DeepEqual(res.Partial, wantPartial) {
 		t.Errorf("Partial = %+v, want %+v", res.Partial, wantPartial)
@@ -977,5 +980,82 @@ func TestSplitYAMLDocuments(t *testing.T) {
 				t.Errorf("lines = %v index = %v, want lines %v index %v", lines, index, tc.wantLines, tc.wantIndex)
 			}
 		})
+	}
+}
+
+// TestFromManifests_ObjectPosition: ManifestOrigin.Object counts the objects
+// of one document in reading order. `agentmoat patch` finds the object it
+// edits by this number, so the shapes that are easy to count wrong are here:
+// an object that is not a workload takes a number, a List inside a List is
+// counted in reading order, an empty List takes none, and each document
+// starts at 1 again.
+func TestFromManifests_ObjectPosition(t *testing.T) {
+	t.Parallel()
+	const pod = "{apiVersion: v1, kind: Pod, metadata: {name: %s, namespace: shop}, spec: {containers: [{name: c, image: busybox}]}}"
+	item := func(name string) string { return fmt.Sprintf(pod, name) }
+	data := "apiVersion: v1\nkind: List\nitems:\n" +
+		"  - {apiVersion: v1, kind: ConfigMap, metadata: {name: settings, namespace: shop}}\n" + // object 1, not a workload
+		"  - " + item("a") + "\n" + // object 2
+		"  - {apiVersion: v1, kind: List, items: []}\n" + // an empty List: no object
+		"  - apiVersion: v1\n    kind: List\n    items:\n      - " + item("b") + "\n" + // object 3
+		"  - " + item("c") + "\n" + // object 4
+		"---\n" +
+		"- " + item("d") + "\n" + // a top-level array: object 1
+		"- " + item("e") + "\n" // object 2
+	res := mustManifests(t, []ManifestInput{{Name: "all.yaml", Data: []byte(data)}}, ManifestOptions{})
+
+	type position struct{ document, object int }
+	want := map[string]position{
+		"Pod/shop/a": {1, 2}, "Pod/shop/b": {1, 3}, "Pod/shop/c": {1, 4},
+		"Pod/shop/d": {2, 1}, "Pod/shop/e": {2, 2},
+	}
+	got := map[string]position{}
+	for i, id := range ids(res) {
+		got[id] = position{res.Origins[i].Document, res.Origins[i].Object}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("positions = %v, want %v", got, want)
+	}
+}
+
+// TestSplitDocuments: the exported splitter gives the document numbers of
+// FromManifests, the line where each document starts, and says when the text
+// is read as JSON.
+func TestSplitDocuments(t *testing.T) {
+	t.Parallel()
+	text := "# a header\n---\nkind: A\n---\n\n# only a comment\n---\nkind: B\nname: b\n"
+	docs, isJSON := SplitDocuments(append([]byte("\xEF\xBB\xBF"), text...))
+	if isJSON {
+		t.Fatalf("YAML text was taken for JSON")
+	}
+	type doc struct {
+		index, firstLine int
+		data             string
+	}
+	got := make([]doc, 0, len(docs))
+	for _, d := range docs {
+		got = append(got, doc{d.Index, d.FirstLine, string(d.Data)})
+	}
+	// Documents 1 and 3 have no content line: they are not in the result,
+	// and they keep their numbers.
+	want := []doc{{2, 3, "kind: A\n"}, {4, 8, "kind: B\nname: b\n"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("documents = %+v, want %+v", got, want)
+	}
+
+	for name, tc := range map[string]struct {
+		text string
+		want bool
+	}{
+		"a JSON object":               {`{"kind": "Pod"}`, true},
+		"a stream of JSON values":     {"{\"kind\": \"A\"}\n{\"kind\": \"B\"}\n", true},
+		"a JSON array":                {`[{"kind": "Pod"}]`, true},
+		"flow style YAML":             {"{kind: Pod}\n", false},
+		"an unrendered Helm template": {"{{- if .Values.on }}\nkind: Pod\n{{- end }}\n", false},
+		"block style YAML":            {"kind: Pod\n", false},
+	} {
+		if _, got := SplitDocuments([]byte(tc.text)); got != tc.want {
+			t.Errorf("%s: isJSON = %v, want %v", name, got, tc.want)
+		}
 	}
 }

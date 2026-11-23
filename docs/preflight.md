@@ -185,7 +185,7 @@ all the warning IDs are in one document.
 | ID | When | What to do |
 | --- | --- | --- |
 | `manifest-source` | The plan was made from `scan -f` (manifests, no cluster). | The plan is a preview. `apply`, `rollback`, and `verify` refuse it. Run `agentmoat plan` against the cluster. |
-| `source-managed` | One or more workloads in the plan have the marker of a deploy tool. | Add `runtimeClassName` to the source that the tool deploys from (the git repository, the chart values) too. |
+| `source-managed` | One or more workloads in the plan have the marker of a deploy tool. | Add `runtimeClassName` to the source that the tool deploys from (the git repository, the chart values) too. `agentmoat patch -f <path>` adds it to manifest files. |
 
 ### `source-managed`
 
@@ -194,6 +194,11 @@ source, the source does not get the change. What the tool does with a live
 change that is not in its source depends on the tool and on its settings, so
 the warning makes no statement about that. It tells you, before the apply,
 that there is a second place to change.
+
+For manifest files, `agentmoat patch -f <path>` makes that change: it adds
+`runtimeClassName` to the pod spec of each workload that can run in the
+sandbox, and prints the diff. For a Helm chart, set the chart value. See
+[The move through the repository](ci-cd.md#3-the-move-through-the-repository).
 
 `scan` reads these markers from the labels and annotations of the workload
 (not of its pods), and records the first match as `managedBy` (`tool` and

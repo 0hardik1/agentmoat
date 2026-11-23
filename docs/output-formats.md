@@ -7,7 +7,7 @@ Every command takes `--output` (`-o`). There are five formats.
 | `table` (default) | A person at a terminal. | All |
 | `json` | Scripts, `jq`, files that a later command reads (`plan --scan`, `apply --plan`). Versioned schema `agentmoat.io/v1alpha1`. | All |
 | `yaml` | The same fields as JSON, for review and diff. | All |
-| `markdown` (or `md`) | A CI job summary, a pull-request comment, a merge-request note. | `scan`, `plan`, `apply`, `rollback`, `verify`, `preflight`, `probe nvproxy` |
+| `markdown` (or `md`) | A CI job summary, a pull-request comment, a merge-request note. | `scan`, `plan`, `patch`, `apply`, `rollback`, `verify`, `preflight`, `probe nvproxy` |
 | `sarif` | A code scanning service (SARIF 2.1.0). | `scan` |
 
 A command refuses a format that it cannot write, before it reads a file or a
@@ -63,10 +63,44 @@ has a Ready column (the Ready pods of all pods of the step).
 result in the facts: the `runsc` release, the number of drivers that nvproxy
 supports, and the support status of each group of GPU nodes.
 
+### The report of `patch`
+
+`patch` changes files, so its headline says what happened to the files:
+
+| First line | Meaning | Exit code |
+| --- | --- | --- |
+| ➖ **Dry run.** | No file was changed. The line has the number of lines that a run with `--dry-run=false` adds. | 0 |
+| ✅ **N line(s) added to M file(s).** | Each selected workload is patched. | 0 |
+| ➖ **Nothing to change.** | No workload is compatible and without a RuntimeClass. | 0 |
+| ⚠️ **K of N selected workload(s) were not patched.** (or, in a dry run, "cannot be patched") | Some workloads are in a form that `patch` does not edit, or a file could not be written. | 3 |
+| ❌ **None of the N selected workload(s) could be patched.** | No file was changed. | 1 |
+
+After that line: the counts, the workloads that were not patched with the
+reason for each, the patched workloads with the file and the line of the new
+line, the diff of all files in one `diff` block, and the excluded workloads
+(collapsed).
+
+The diff in the report is for a reader. It shows 400 lines at most, a line
+is cut at 240 characters, and control characters are replaced. To apply a
+diff with a tool, take it from the JSON output (`.spec.files[].diff`), which
+has each diff in full. `git apply` reads it when `patch` got relative paths
+and ran in the root of the repository: the names in the diff are then
+`a/<path>` and `b/<path>`. For an absolute path the names are the path
+itself, with no `a/` and `b/`.
+
+The `table` output has the diff too, with the colors of `git diff`. It
+replaces control characters in the lines of the diff, so that a line of a
+manifest cannot write over the report on a terminal. That is all that it
+does to a line. In the step log of GitHub Actions a line can also be a
+command for the runner (it starts with `::`, or has `##[` in it), and the
+table does not prevent that: see
+[the exit codes in a pipeline](ci-cd.md#the-exit-codes-in-a-pipeline).
+
 ### Limits
 
 Each table and each list shows 50 entries at most, and then says how many it
-left out. A long value is cut at 120 characters, and a long sentence at 600.
+left out. A long value is cut at 120 characters, and a long sentence at 600
+(in the report of `patch`: a reason at 300, and the diff as said above).
 One row of a workload table names 6 rules at most; the list of rules below the
 tables has all of them. This keeps the output small: GitHub accepts 1 MiB of
 job summary for each step, and a test keeps a report with the longest strings
@@ -74,8 +108,8 @@ in every row below half of that. The JSON output always has every row.
 
 ### Text from manifests
 
-`scan -f` reads files that a pull request controls, and it does not check
-that a name in them is a valid Kubernetes name. A name could hold Markdown, an
+`scan -f` and `patch` read files that a pull request controls, and they do
+not check that a name in them is a valid Kubernetes name. A name could hold Markdown, an
 HTML tag, or a line break. The Markdown output makes all of that inert:
 
 - A name, a kind, a namespace, a file path, and a rule ID are in a code span.
@@ -84,6 +118,9 @@ HTML tag, or a line break. The Markdown output makes all of that inert:
   address, and an `@name` in a sentence are put in a code span, because a
   renderer makes a link or a mention of them with no Markdown syntax.
 - Line breaks and other control characters are replaced.
+- The diff of `patch` is in a fenced block, where nothing is read as
+  Markdown. The fence is longer than the longest run of backticks in the
+  diff, so a line of a file cannot close it.
 
 A manifest cannot add a link, an image, a heading, a table row, a mention, or
 a "Gate passed" line to the report of the change that it is part of. The

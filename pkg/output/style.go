@@ -130,6 +130,8 @@ const (
 //	apply:   already-applied -> → Info
 //	apply:   skipped       -> • Muted
 //	apply:   failed        -> ✗ Danger
+//	patch:   patched       -> ✓ Success
+//	patch:   not-edited    -> ⚠ Warn   (failed shares the apply mapping)
 //	verify:  ok            -> ✓ Success
 //	verify:  mismatch      -> ⚠ Warn
 //	verify:  error         -> ✗ Danger
@@ -142,39 +144,21 @@ const (
 // and no color: that way new schema values surface in the table during
 // development rather than silently disappearing.
 func StatusBadge(s *Styles, status string) string {
+	// One case for each look. The statuses of the commands are grouped by
+	// the look that they share (the table above has them by command), so
+	// that the badge mapping stays the single source of truth for
+	// rendering, regardless of which package produces the status.
 	switch status {
-	// scan verdicts
-	case "compatible":
+	case "compatible", "applied", "patched", "ok", "ready":
 		return symbolOK + " " + s.Success.Render(status)
-	case "needs-review", "review":
+	case "needs-review", "review", "not-edited", "mismatch", "warn":
 		return symbolWarn + " " + s.Warn.Render(status)
-	case "incompatible":
+	case "incompatible", "failed", "error", "blocked":
 		return symbolFail + " " + s.Danger.Render(status)
-	// apply / rollback step statuses
-	case "applied":
-		return symbolOK + " " + s.Success.Render(status)
 	case "already-applied":
 		return symbolArrow + " " + s.Info.Render(status)
 	case "skipped":
 		return symbolDot + " " + s.Muted.Render(status)
-	case "failed":
-		return symbolFail + " " + s.Danger.Render(status)
-	// verify step statuses (defined here so the badge mapping stays the
-	// single source of truth for rendering, regardless of which
-	// package produces the status)
-	case "ok":
-		return symbolOK + " " + s.Success.Render(status)
-	case "mismatch":
-		return symbolWarn + " " + s.Warn.Render(status)
-	case "error":
-		return symbolFail + " " + s.Danger.Render(status)
-	// preflight readiness and finding severities
-	case "ready":
-		return symbolOK + " " + s.Success.Render(status)
-	case "blocked":
-		return symbolFail + " " + s.Danger.Render(status)
-	case "warn":
-		return symbolWarn + " " + s.Warn.Render(status)
 	case "info":
 		return symbolDot + " " + s.Info.Render(status)
 	default:

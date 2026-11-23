@@ -127,7 +127,7 @@ func sourceManagedWarning(plan *schema.MigrationPlan, report *schema.ScanReport)
 		ID: WarningSourceManaged,
 		Message: fmt.Sprintf("%d of %d workload(s) in this plan have the marker of a deploy tool (%s). "+
 			"'agentmoat apply' changes the live objects only: the source that the tool deploys from (a git repository, a chart) does not get the change. "+
-			"Add runtimeClassName to that source too. What the tool does with a live change that is not in its source depends on the tool and its settings. "+
+			"Add runtimeClassName to that source too ('agentmoat patch' adds it to manifest files). What the tool does with a live change that is not in its source depends on the tool and its settings. "+
 			"A workload with no marker can also have such a source",
 			total, len(plan.Spec.Steps), strings.Join(parts, ", ")),
 	}

@@ -19,6 +19,7 @@
                     |    preflight/      |
                     |    probe/          |
                     |    planner/        |
+                    |    patcher/        |
                     |    applier/        |
                     |    verifier/       |
                     |    explainer/      |
@@ -29,11 +30,15 @@
                     +--------------------+
 ```
 
+Two paths read no cluster and build no Kubernetes client: `scan -f` (the
+scan of manifest files) and `patch` (the edit of manifest files). They use
+the scanner, the classifier, and, for `patch`, the patcher.
+
 ## Why a Go library at the core
 
 Both the CLI and the MCP server are thin shells over `pkg/agentmoat`. The
-library exposes `Scan`, `Preflight`, `Plan`, `Apply`, `Verify`, `Rollback`,
-and `Explain`. Anyone who wants to embed agentmoat in their own operator,
+library exposes `Scan`, `Preflight`, `Probe`, `Plan`, `Patch`, `Apply`,
+`Verify`, `Rollback`, and `Explain`. Anyone who wants to embed agentmoat in their own operator,
 controller, or SDK can `import` the package and call those functions
 directly. No shell-out, no subprocess plumbing.
 
@@ -68,12 +73,13 @@ Jobs, Pods). This pattern matches the K8s-tooling ecosystem (`kube-bench`,
 | --- | --- |
 | `cmd/agentmoat` | CLI entrypoint (cobra). Thin shell over `pkg/agentmoat`. |
 | `cmd/agentmoat-mcp` | MCP-over-stdio server. Thin shell over `pkg/agentmoat`. |
-| `pkg/agentmoat` | Orchestration: `Scan`, `Preflight`, `Probe`, `Plan`, `Apply`, `Verify`, `Rollback`, `Explain`, `AssessWorkload`. `Scan` reads a cluster or, with manifest paths, files and no cluster. `EvaluateGate` is the `scan --fail-on` decision. |
+| `pkg/agentmoat` | Orchestration: `Scan`, `Preflight`, `Probe`, `Plan`, `Patch`, `Apply`, `Verify`, `Rollback`, `Explain`, `AssessWorkload`. `Scan` reads a cluster or, with manifest paths, files and no cluster. `EvaluateGate` is the `scan --fail-on` decision. `Patch` reads manifest files, selects the workloads that `Plan` selects, and writes the edit of `pkg/patcher`. |
 | `pkg/scanner` | Produces `Workload` values from a cluster (client-go) or from manifest text with no cluster (`FromManifests`, `ReadManifestPaths`). |
 | `pkg/classifier` | Pure-function rule engine; produces `Verdict` values. `ClassifyWithFacts` lets a rule refine its severity from `ClusterFacts` (today: `gpu-passthrough`). |
 | `pkg/preflight` | Reads the RuntimeClass, nodes, and GPU labels into `ClusterFacts`; pure `Evaluate` turns facts into findings. Gates `apply`. |
 | `pkg/probe` | The nvproxy probe: a one-shot pod that reads `runsc --version` and `runsc nvproxy list-supported-drivers` from a gVisor node. Dry-run by default. |
-| `pkg/planner` | Migration plan generation from a `ScanReport`. |
+| `pkg/planner` | Migration plan generation from a `ScanReport`. `ExclusionCause` is the selection rule that `plan` and `patch` share. |
+| `pkg/patcher` | The text edit of `patch`: adds one `runtimeClassName` line to the pod spec of an object in YAML text, and changes nothing else. It finds the place with the YAML node positions, never writes YAML again from the objects, checks its own result (the new text must decode to the old objects plus the class), and makes the unified diff. Pure: text in, text out, no files and no cluster. |
 | `pkg/applier` | Pod-template patching with `runtimeClassName`. |
 | `pkg/verifier` | Compares live pods' `runtimeClassName` and hosting nodes to the plan; optional in-pod probe. With a wait time, looks again until every step is ok and its pods stay Ready (`wait.go`, `readiness.go`). |
 | `pkg/explainer` | Educational text for `agentmoat explain`. |
