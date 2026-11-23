@@ -25,7 +25,7 @@ require (
 	github.com/mark3labs/mcp-go v1.6.0
 	github.com/mattn/go-isatty v0.0.24
 	github.com/spf13/cobra v1.10.2
-	go.yaml.in/yaml/v3 v3.0.4
+	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/term v0.48.0
 	k8s.io/api v0.37.2
 	k8s.io/apimachinery v0.37.2
