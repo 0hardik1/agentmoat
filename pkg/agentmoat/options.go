@@ -216,9 +216,37 @@ type VerifyOptions struct {
 	KubeconfigPath string
 	Context        string
 
-	// PlanPath is the path to a MigrationPlan YAML/JSON file on disk.
-	// Required: verify needs to know which workloads to inspect.
+	// PlanPath is the path to a MigrationPlan YAML/JSON file on disk: the
+	// steps of the plan are the workloads to check. Exactly one of
+	// PlanPath and ManifestPaths is set.
 	PlanPath string
+
+	// ManifestPaths makes Verify take the workloads to check from manifest
+	// files and not from a plan (`verify -f`): each workload of the input
+	// whose pod spec asks for RuntimeClassName. This is the check after a
+	// change that came through a repository, where there is no plan. The
+	// paths are read as `scan -f` reads them: a file, a directory, or
+	// scanner.StdinPath for Stdin. The input must be rendered: the names
+	// in it must be the names in the cluster.
+	ManifestPaths []string
+
+	// Stdin is the reader for a scanner.StdinPath entry in ManifestPaths.
+	// Nil makes such an entry an error (the MCP server has no standard
+	// input to give).
+	Stdin io.Reader
+
+	// Namespace is, with ManifestPaths, the namespace of the objects that
+	// name none: the namespace that they were deployed to. It is not a
+	// filter. Verify refuses a workload that has no namespace at all.
+	Namespace string
+
+	// LabelSelector limits, with ManifestPaths, the workloads to the ones
+	// whose labels match.
+	LabelSelector string
+
+	// RuntimeClassName is, with ManifestPaths, the class that the verify
+	// looks for. Empty means schema.DefaultRuntimeClassName.
+	RuntimeClassName string
 
 	// InPodProbe, when true, opts into the gVisor in-pod probe: for each
 	// step the verifier picks a Running pod and execs a small script that

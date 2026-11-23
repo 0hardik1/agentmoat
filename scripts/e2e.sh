@@ -56,6 +56,18 @@
 #                           `rollback` with the same plan undoes the
 #                           patches that worked. This is the pipeline
 #                           case "apply failed, roll back".
+#   5c. the move through the repository  `agentmoat patch` writes the
+#                           class into a copy of the manifest file, the
+#                           copy is deployed to a second namespace, and
+#                           `agentmoat verify -f <the copy> --wait` (no
+#                           plan) waits for the pods and exits 0. Before
+#                           the deploy the same files give exit 4 against
+#                           the first namespace, where the pods have no
+#                           class. A ReplicaSet (a kind that verify has no
+#                           reader for) is checked through the selector of
+#                           its manifest. A Job and a bare Pod that run to
+#                           their end are ok with the class, and a Job that
+#                           is not in the cluster has no verdict (exit 1).
 #   6. `agentmoat explain`  smoke: list mode, known topic, unknown topic
 #                           (exit non-zero, stderr lists topics).
 #   7. `agentmoat probe nvproxy`  dry-run creates nothing; the real run
@@ -144,6 +156,7 @@ E2E_REPLAY_VERIFY_WAIT="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.j
 E2E_REPLAY_DEVICE_CGROUP="scripts/check-device-cgroup.sh --node <gvisor-worker>"
 E2E_REPLAY_ROLLBACK="$E2E_REPLAY_AGENT rollback --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
 E2E_REPLAY_PARTIAL=$'kubectl -n '"$NAMESPACE"$' delete deployment worker\n'"$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"$'   # exit 3\n'"$E2E_REPLAY_AGENT rollback --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
+E2E_REPLAY_VERIFY_FILES=$'bin/agentmoat patch -f <copy of workloads.yaml> --dry-run=false\nkubectl -n '"$NAMESPACE"$'-repo apply -f <the copy>\n'"$E2E_REPLAY_AGENT verify -f <the copy> -n ${NAMESPACE}-repo --wait 3m"
 E2E_REPLAY_EXPLAIN="bin/agentmoat explain"
 E2E_REPLAY_EXPLAIN_NS="$E2E_REPLAY_AGENT explain namespace $NAMESPACE"
 E2E_REPLAY_EXPLAIN_WL="$E2E_REPLAY_AGENT explain workload ${NAMESPACE}/host-net"
@@ -915,6 +928,267 @@ for sts in "${E2E_COMPAT_STATEFULSETS[@]}"; do
   "${KCTL[@]}" -n "$NAMESPACE" rollout status "statefulset/$sts" --timeout=180s
 done
 e2e_step_pass "partial apply, then rollback" "$E2E_REPLAY_PARTIAL"
+
+# -----------------------------------------------------------------------------
+# 6d. the move through the repository: patch the files, deploy, verify -f.
+# -----------------------------------------------------------------------------
+#
+# The pipeline case with no plan. The repository is the source of truth:
+# `patch` writes runtimeClassName into the manifest files, a deploy tool
+# deploys them, and `verify -f <the files> --wait` is the check after the
+# deploy. verify takes the list of workloads from the files (each workload
+# whose pod spec asks for the class) and the live state from the cluster.
+#
+# The first namespace is in the state that the setup made: the workloads run
+# with no class. The patched file is deployed to a second namespace, so the
+# first one stays as the later steps need it. No step of this script reads
+# more than one namespace (each scan has --namespace), so the second copy of
+# the workloads changes no count.
+#
+# The file names no namespace. -n gives it: the namespace that the objects
+# were deployed to.
+#
+# The checks, in order:
+#   1. Before the patch, no workload of the file asks for the class. verify
+#      refuses the run (exit 1) and prints no report: a verify that looked at
+#      nothing is not a pass.
+#   2. With no -n, verify refuses the run (exit 1): it does not guess the
+#      namespace.
+#   3. After the patch and before the deploy: the first namespace has the
+#      workloads, and their pods have no class. This is evidence in the
+#      cluster, so the result is a mismatch for each workload, and exit 4.
+#   4. Directly after the deploy to the second namespace, with --wait: exit
+#      0, each workload ok with pods that are Ready and stable, and more
+#      than 3 looks (the proof that the command waited for the pods; see
+#      step 4a).
+#   5. A ReplicaSet is a kind that verify has no reader for. Its result is
+#      from the pods that the selector of its manifest selects
+#      (basis: selector).
+#   6. A Job and a bare Pod run to their end in a few seconds. A pod that
+#      ended is never Ready again, so the wait must not hold out for it:
+#      the Job is ok on its pod template, and the Pod on its class.
+#   7. With --in-pod-probe, each pod that runs is on gVisor. The pods that
+#      ended have no container to exec into, and that is not an error.
+#   8. Two workloads with no verdict: a ReplicaSet whose selector selects no
+#      pods (verify does not know if it is scaled to zero or is not there),
+#      and a Job that is not in the cluster (a Job can be removed after it
+#      ends, so "not found" is not evidence that the deploy failed). Each is
+#      listed as not checked, with exit 1 (not 0, and not the rollback
+#      signal 4).
+
+e2e_step "patch, deploy, verify -f --wait 3m: the move through the repository, with no plan"
+REPO_NS="${NAMESPACE}-repo"
+REPO_FILE="$WORK_DIR/repo-workloads.yaml"
+REPO_RS_FILE="$WORK_DIR/repo-replicaset.yaml"
+REPO_ENDS_FILE="$WORK_DIR/repo-ends.yaml"
+REPO_ZERO_FILE="$WORK_DIR/repo-zero.yaml"
+cp "$MANIFEST_DIR/workloads.yaml" "$REPO_FILE"
+# The six workloads of the file that `patch` does not select (3 review, 3
+# incompatible) do not ask for the class, so verify does not look at them.
+REPO_EXCLUDED=$((E2E_REVIEW + E2E_INCOMPAT))
+
+# 1. Before the patch: nothing asks for the class.
+VF_EMPTY_EXIT=0
+"${AGENT[@]}" verify -f "$REPO_FILE" -n "$NAMESPACE" --output json \
+  >"$WORK_DIR/verify-files-empty.json" 2>"$WORK_DIR/verify-files-empty.stderr" || VF_EMPTY_EXIT=$?
+assert_eq "verify -f (no workload asks for the class) exit code" 1 "$VF_EMPTY_EXIT"
+assert_eq "verify -f (no workload asks for the class) stdout bytes" 0 \
+  "$(wc -c <"$WORK_DIR/verify-files-empty.json" | tr -d ' ')"
+if ! grep -q "there is nothing to verify" "$WORK_DIR/verify-files-empty.stderr"; then
+  fail "verify -f: stderr does not say that there is nothing to verify: $(cat "$WORK_DIR/verify-files-empty.stderr")"
+fi
+
+# The patch: one added line for each compatible workload.
+PATCH_FILES_EXIT=0
+"$AGENTMOAT_BIN" patch -f "$REPO_FILE" --dry-run=false --output json \
+  >"$WORK_DIR/patch-repo.json" 2>"$WORK_DIR/patch-repo.stderr" || PATCH_FILES_EXIT=$?
+assert_eq "patch exit code" 0 "$PATCH_FILES_EXIT"
+assert_eq "patch summary.patched" "$E2E_COMPAT" "$(jq -r '.spec.summary.patched' "$WORK_DIR/patch-repo.json")"
+
+# 2. No -n: a refusal, and no guess.
+VF_NONS_EXIT=0
+"${AGENT[@]}" verify -f "$REPO_FILE" --output json \
+  >/dev/null 2>"$WORK_DIR/verify-files-nons.stderr" || VF_NONS_EXIT=$?
+assert_eq "verify -f (no namespace) exit code" 1 "$VF_NONS_EXIT"
+if ! grep -q "Pass -n <namespace>" "$WORK_DIR/verify-files-nons.stderr"; then
+  fail "verify -f: stderr does not ask for -n: $(cat "$WORK_DIR/verify-files-nons.stderr")"
+fi
+
+# 3. Before the deploy: the pods of the first namespace have no class.
+agentmoat_table_and_json "$WORK_DIR/verify-files-before.json" \
+  "${AGENT[@]}" verify -f "$REPO_FILE" -n "$NAMESPACE"
+assert_eq "verify -f (before the deploy) exit code" 4 "$AGENT_EXIT"
+assert_eq "verify -f (before the deploy) summary" "$E2E_COMPAT,0,$E2E_COMPAT,0,0,$REPO_EXCLUDED" \
+  "$(jq -r '.spec.summary | [.total, .ok, .mismatch, .error, (.notChecked // 0), (.excluded // 0)] | join(",")' "$WORK_DIR/verify-files-before.json")"
+assert_eq "verify -f (before the deploy) source" "manifests" \
+  "$(jq -r '.metadata.source.type' "$WORK_DIR/verify-files-before.json")"
+assert_eq "verify -f (before the deploy) plan hash" "none" \
+  "$(jq -r '.metadata.planHash // "none" | if . == "" then "none" else . end' "$WORK_DIR/verify-files-before.json")"
+assert_eq "verify -f (before the deploy) results with the file and the line" "$E2E_COMPAT" \
+  "$(jq -r --arg f "$REPO_FILE" '[.spec.results[] | select(.origin.file == $f and .origin.line > 0)] | length' "$WORK_DIR/verify-files-before.json")"
+
+# The deploy. A ReplicaSet goes with it: a kind with a pod template that
+# verify does not read from the cluster as an object.
+cat >"$REPO_RS_FILE" <<'YAML'
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: edge
+  labels:
+    app: edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: edge
+  template:
+    metadata:
+      labels:
+        app: edge
+    spec:
+      runtimeClassName: gvisor
+      containers:
+        - name: edge
+          image: busybox:1.36
+          command: ["sleep", "3600"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+YAML
+# A Job and a bare Pod that run to their end at once.
+cat >"$REPO_ENDS_FILE" <<'YAML'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      runtimeClassName: gvisor
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: busybox:1.36
+          command: ["true"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: smoke
+spec:
+  runtimeClassName: gvisor
+  restartPolicy: Never
+  containers:
+    - name: smoke
+      image: busybox:1.36
+      command: ["true"]
+YAML
+# The 8 workloads of the file, the ReplicaSet, the Job, and the Pod.
+REPO_TOTAL=$((E2E_COMPAT + 3))
+# The workloads whose pods keep running: all but the Job and the Pod.
+REPO_RUNNING=$((E2E_COMPAT + 1))
+REPO_FILES=(-f "$REPO_FILE" -f "$REPO_RS_FILE" -f "$REPO_ENDS_FILE")
+"${KCTL[@]}" create namespace "$REPO_NS" --dry-run=client -o yaml | "${KCTL[@]}" apply -f - >/dev/null
+"${KCTL[@]}" -n "$REPO_NS" apply "${REPO_FILES[@]}" >/dev/null
+
+# 4, 5, and 6. Directly after the deploy: nothing in this script waits for
+# the pods before this command.
+VF_WAIT_EXIT=0
+"${AGENT[@]}" verify "${REPO_FILES[@]}" -n "$REPO_NS" --wait 3m --output json \
+  >"$WORK_DIR/verify-files-wait.json" 2>"$WORK_DIR/verify-files-wait.stderr" || VF_WAIT_EXIT=$?
+sed 's/^/    /' "$WORK_DIR/verify-files-wait.stderr"
+assert_eq "verify -f --wait exit code" 0 "$VF_WAIT_EXIT"
+assert_eq "verify -f --wait summary" "$REPO_TOTAL,$REPO_TOTAL,0,0,0,$REPO_EXCLUDED" \
+  "$(jq -r '.spec.summary | [.total, .ok, .mismatch, .error, (.notChecked // 0), (.excluded // 0)] | join(",")' "$WORK_DIR/verify-files-wait.json")"
+assert_eq "verify -f --wait metadata.wait.timedOut" "false" \
+  "$(jq -r '.metadata.wait.timedOut' "$WORK_DIR/verify-files-wait.json")"
+assert_eq "verify -f --wait namespaces of the results" "$REPO_NS" \
+  "$(jq -r '[.spec.results[].target.namespace] | unique | join(",")' "$WORK_DIR/verify-files-wait.json")"
+assert_eq "verify -f --wait workloads with Ready and stable pods" "$REPO_RUNNING" \
+  "$(jq -r '[.spec.results[] | select(.readiness.stable == true and .readiness.pods > 0 and .readiness.ready == .readiness.pods)] | length' "$WORK_DIR/verify-files-wait.json")"
+assert_eq "verify -f --wait: the result that is from a selector" "ReplicaSet.apps/edge" \
+  "$(jq -r '[.spec.results[] | select(.basis == "selector") | "\(.target.kind)/\(.target.name)"] | join(",")' "$WORK_DIR/verify-files-wait.json")"
+# The Job is finished, so its result is from its pod template. The Pod ran to
+# its end, so its result is from its class, with no readiness.
+assert_eq "verify -f --wait: the Job that is finished" "ok,template,gvisor" \
+  "$(jq -r '.spec.results[] | select(.target.kind == "Job") | [.status, .basis, .actual] | join(",")' "$WORK_DIR/verify-files-wait.json")"
+if ! jq -e '.spec.results[] | select(.target.kind == "Job") | .message | contains("the Job is finished")' "$WORK_DIR/verify-files-wait.json" >/dev/null; then
+  fail "verify -f --wait: the result of the Job does not say that the Job is finished"
+fi
+assert_eq "verify -f --wait: the Pod that ran to its end" "ok,gvisor,no readiness" \
+  "$(jq -r '.spec.results[] | select(.target.kind == "Pod") | [.status, .actual, (if .readiness == null then "no readiness" else "readiness" end)] | join(",")' "$WORK_DIR/verify-files-wait.json")"
+if ! jq -e '.spec.results[] | select(.target.kind == "Pod") | .message | contains("ran to its end")' "$WORK_DIR/verify-files-wait.json" >/dev/null; then
+  fail "verify -f --wait: the result of the Pod does not say that the pod ran to its end"
+fi
+VF_WAIT_ROUNDS=$(jq -r '.metadata.wait.rounds' "$WORK_DIR/verify-files-wait.json")
+if (( VF_WAIT_ROUNDS <= 3 )); then
+  fail "verify -f --wait: $VF_WAIT_ROUNDS look(s); more than 3 expected, because the pods were not Ready at the first look"
+fi
+e2e_infra "verify -f --wait: $VF_WAIT_ROUNDS look(s) in $(jq -r '.metadata.wait.waitedSeconds' "$WORK_DIR/verify-files-wait.json")s"
+
+# 7. The pods that run are on gVisor, and on a node that the RuntimeClass
+# selects. The Job and the Pod ended: there is no container to exec into,
+# the probe does not run for them, and the run is still exit 0. The node of
+# the Pod that ended is checked (the Job is checked on its template, which
+# has no node).
+agentmoat_table_and_json "$WORK_DIR/verify-files-probe.json" \
+  "${AGENT[@]}" verify "${REPO_FILES[@]}" -n "$REPO_NS" --in-pod-probe
+assert_eq "verify -f --in-pod-probe exit code" 0 "$AGENT_EXIT"
+assert_eq "verify -f --in-pod-probe summary.ok" "$REPO_TOTAL" \
+  "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-files-probe.json")"
+assert_eq "verify -f --in-pod-probe: pods with the gVisor markers" "$REPO_RUNNING" \
+  "$(jq -r '[.spec.results[].probe | select(.!=null) | select(.detected==true)] | length' "$WORK_DIR/verify-files-probe.json")"
+assert_eq "verify -f --in-pod-probe: node placement checked" "$((REPO_RUNNING + 1))" \
+  "$(jq -r '[.spec.results[].nodePlacement | select(.!=null) | select(.checked==true)] | length' "$WORK_DIR/verify-files-probe.json")"
+
+# 8. Two workloads with no verdict. Not one of the two is deployed.
+#   - A ReplicaSet with replicas 0: it would have no pods when it is
+#     deployed, and verify reads pods only for this kind. It cannot tell the
+#     two cases apart.
+#   - A Job: a time to live or a hook delete policy removes a Job after it
+#     ends, so a Job that is not there can be a Job that ran.
+# verify says neither "ok" nor "mismatch" for them.
+{
+  sed -e 's/name: edge/name: idle/' -e 's/app: edge/app: idle/' -e 's/replicas: 1/replicas: 0/' "$REPO_RS_FILE"
+  cat <<'YAML'
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gone
+spec:
+  ttlSecondsAfterFinished: 0
+  template:
+    spec:
+      runtimeClassName: gvisor
+      restartPolicy: Never
+      containers:
+        - name: gone
+          image: busybox:1.36
+          command: ["true"]
+YAML
+} >"$REPO_ZERO_FILE"
+VF_ZERO_EXIT=0
+"${AGENT[@]}" verify -f "$REPO_ZERO_FILE" -n "$REPO_NS" --output json \
+  >"$WORK_DIR/verify-files-zero.json" 2>"$WORK_DIR/verify-files-zero.stderr" || VF_ZERO_EXIT=$?
+assert_eq "verify -f (workloads with no verdict) exit code" 1 "$VF_ZERO_EXIT"
+assert_eq "verify -f (workloads with no verdict) summary" "0,0,0,0,2" \
+  "$(jq -r '.spec.summary | [.total, .ok, .mismatch, .error, (.notChecked // 0)] | join(",")' "$WORK_DIR/verify-files-zero.json")"
+assert_eq "verify -f (workloads with no verdict) not checked" "Job/gone,ReplicaSet.apps/idle" \
+  "$(jq -r '[.spec.notChecked[] | "\(.target.kind)/\(.target.name)"] | sort | join(",")' "$WORK_DIR/verify-files-zero.json")"
+if ! grep -q "This is not a pass" "$WORK_DIR/verify-files-zero.stderr"; then
+  fail "verify -f: stderr does not say that a workload with no verdict is not a pass: $(cat "$WORK_DIR/verify-files-zero.stderr")"
+fi
+
+# The second namespace is not used again. The delete does not wait: the
+# steps below read the first namespace and the nodes.
+"${KCTL[@]}" delete namespace "$REPO_NS" --wait=false >/dev/null
+e2e_step_pass "patch, deploy, verify -f" "$E2E_REPLAY_VERIFY_FILES"
 
 # -----------------------------------------------------------------------------
 # 7. explain smoke: list mode, valid topic, unknown topic.

@@ -21,10 +21,23 @@
 //     template of a Job is immutable), so its pods never get the class. To
 //     hold them against the plan would report a mismatch for a migration
 //     that is correct for every Job from now on.
+//
+// A Job and a bare Pod run to an end. Two things follow, and each has a
+// field here:
+//
+//   - A pod that ran to its end (phase Succeeded) is never Ready again and
+//     has no container to exec into. Its runtimeClassName is still
+//     evidence: it is the runtime that the pod ran in. The verdict is on
+//     that field, with no readiness check and no probe (ended).
+//   - A Job with the condition Failed has a pod template with the class,
+//     and it did not come to a good end with it. With a wait time, where a
+//     step is ok only when the workload came up, that is a mismatch
+//     (failed).
 package verifier
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
@@ -56,6 +69,36 @@ type target struct {
 	// from the template, and the pods are more evidence when they have
 	// the class.
 	templateDecides bool
+
+	// bySelector is true when the pods come from the selector of a
+	// manifest and the verifier did not read the object (a kind with no
+	// reader). There is then no template and no idle reason: with no pods
+	// the verifier does not know why there are none.
+	bySelector bool
+
+	// ended is not empty for a bare Pod in the phase Succeeded: "the pod
+	// ran to its end (phase Succeeded)". The verdict is then on its
+	// runtimeClassName only.
+	ended string
+
+	// failed is not empty for a Job with the condition Failed. It holds
+	// the reason from the condition, for the message.
+	failed string
+}
+
+// errNotFound is in the error of a read when the API server does not have
+// the object. The text of the error is as before ("Job ns/name not found");
+// the wrap lets the caller tell this case from other API errors.
+var errNotFound = errors.New("not found")
+
+// resolve reads the workload of one step. A target with a selector from a
+// manifest is not read as an object: only its pods are listed.
+func (d stepDeps) resolve(ctx context.Context, ref schema.WorkloadRef) (target, error) {
+	if sel, ok := d.selectors[ref]; ok {
+		pods, err := listByLabelSelector(ctx, d.client, ref.Namespace, sel)
+		return target{pods: pods, bySelector: true}, err
+	}
+	return resolveTarget(ctx, d.client, ref)
 }
 
 // resolveTarget reads the workload that ref names. A workload that is not
@@ -65,7 +108,11 @@ func resolveTarget(ctx context.Context, client kubernetes.Interface, ref schema.
 	switch ref.Kind {
 	case kindPod:
 		pods, err := resolveSinglePod(ctx, client, ref)
-		return target{pods: pods}, err
+		t := target{pods: pods}
+		if len(pods) == 1 && pods[0].Status.Phase == corev1.PodSucceeded {
+			t.ended = "the pod ran to its end (phase Succeeded)"
+		}
+		return t, err
 	case kindDeployment:
 		return resolveDeployment(ctx, client, ref)
 	case kindStatefulSet:
@@ -87,7 +134,7 @@ func resolveSinglePod(ctx context.Context, client kubernetes.Interface, ref sche
 	pod, err := client.CoreV1().Pods(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("pod %s/%s not found", ref.Namespace, ref.Name)
+			return nil, fmt.Errorf("pod %s/%s %w", ref.Namespace, ref.Name, errNotFound)
 		}
 		return nil, fmt.Errorf("getting pod %s/%s: %w", ref.Namespace, ref.Name, err)
 	}
@@ -158,6 +205,7 @@ func resolveJob(ctx context.Context, client kubernetes.Interface, ref schema.Wor
 	if jobIsFinished(job) {
 		t.idle = "the Job is finished"
 	}
+	t.failed = jobFailure(job)
 	return t, err
 }
 
@@ -202,6 +250,19 @@ func templateClassName(spec corev1.PodSpec) string {
 func idleReplicas(replicas *int32) string {
 	if replicas != nil && *replicas == 0 {
 		return "replicas: 0"
+	}
+	return ""
+}
+
+// jobFailure returns "the Job failed (<reason>: <message>)" for a Job with
+// the condition Failed, and "" for each other Job. The reason and the
+// message are the ones of the condition (BackoffLimitExceeded,
+// DeadlineExceeded).
+func jobFailure(job *batchv1.Job) string {
+	for _, c := range job.Status.Conditions {
+		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
+			return fmt.Sprintf("the Job failed (%s: %s)", c.Reason, c.Message)
+		}
 	}
 	return ""
 }

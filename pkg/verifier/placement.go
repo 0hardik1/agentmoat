@@ -45,6 +45,16 @@ type stepDeps struct {
 	// requireReady makes a step ok only when its pods are Ready. It is on
 	// when the verify has a wait time (see wait.go and readiness.go).
 	requireReady bool
+
+	// selectors has the selector of each target that the verifier reads
+	// no object for (Target.Selector). A workload that is not in the map
+	// is read from the cluster by its kind (resolveTarget).
+	selectors map[schema.WorkloadRef]*metav1.LabelSelector
+
+	// fromManifests is true when the list of workloads is Options.Targets
+	// and not a plan. A Job or a Pod of such a list that is not in the
+	// cluster has no verdict (see goneWithNoVerdict).
+	fromManifests bool
 }
 
 // placementChecker memoizes RuntimeClass and Node reads across steps. A

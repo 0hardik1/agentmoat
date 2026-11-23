@@ -1178,3 +1178,40 @@ items:
 		}
 	}
 }
+
+// TestFromManifests_WrittenSelector: the selector of an object is read in
+// the two forms that Kubernetes has, and any other form is no selector.
+func TestFromManifests_WrittenSelector(t *testing.T) {
+	t.Parallel()
+	const pod = "\n  template:\n    spec:\n      containers: [{name: c, image: busybox}]\n"
+	tests := []struct {
+		name     string
+		kind     string
+		selector string
+		want     *metav1.LabelSelector
+	}{
+		{"match labels", "apiVersion: argoproj.io/v1alpha1\nkind: Rollout", "  selector: {matchLabels: {app: web}}",
+			&metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}},
+		{"match expressions", "apiVersion: apps/v1\nkind: ReplicaSet", "  selector: {matchExpressions: [{key: app, operator: In, values: [web]}]}",
+			&metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"web"}}}}},
+		{"a plain map", "apiVersion: v1\nkind: ReplicationController", "  selector: {app: web, tier: front}",
+			&metav1.LabelSelector{MatchLabels: map[string]string{"app": "web", "tier": "front"}}},
+		{"a typed kind", "apiVersion: apps/v1\nkind: Deployment", "  selector: {matchLabels: {app: web}}",
+			&metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}},
+		{"no selector", "apiVersion: serving.knative.dev/v1\nkind: Service", "  replicas: 1", nil},
+		{"an empty selector", "apiVersion: argoproj.io/v1alpha1\nkind: Rollout", "  selector: {}", nil},
+		{"a string", "apiVersion: example.test/v1\nkind: Runner", "  selector: app=web", nil},
+		{"a map that is not of strings", "apiVersion: example.test/v1\nkind: Runner", "  selector: {app: {name: web}}", nil},
+	}
+	for _, tc := range tests {
+		text := tc.kind + "\nmetadata: {name: web}\nspec:\n" + tc.selector + pod
+		res, err := FromManifests([]ManifestInput{{Name: "a.yaml", Data: []byte(text)}}, ManifestOptions{})
+		if err != nil || len(res.Written) != 1 {
+			t.Errorf("%s: err %v, %d workloads", tc.name, err, len(res.Written))
+			continue
+		}
+		if got := res.Written[0].Selector; !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: selector = %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}

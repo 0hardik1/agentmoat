@@ -128,6 +128,18 @@ Review the diff in a pull request, let your pipeline deploy it, and use
 `git revert` as the rollback. See
 [`docs/ci-cd.md`](docs/ci-cd.md#3-the-move-through-the-repository).
 
+After the deploy, `verify -f` checks the cluster against the same files. It
+needs no plan: the files say which workloads must run in the sandbox.
+
+```bash
+./bin/agentmoat verify -f ./k8s -n shop --wait 5m
+```
+
+It checks each workload of the files that asks for the RuntimeClass, and
+exits `4` when the cluster shows that one does not run with it. See
+[Check the result of a change that came through the source](docs/ci-cd.md#check-the-result-of-a-change-that-came-through-the-source)
+for the input rules and the kinds.
+
 With Kustomize, an edit of a base changes each overlay that uses the base.
 To move one overlay first, `--kustomize <dir>` edits no source file. It
 writes the change into the directory as a Kustomize component (one patch
@@ -253,16 +265,18 @@ way that a run can end.
   toleration without a matching taint is harmless, and removing a specific
   toleration by JSON Patch index is fragile). Rollback runs no preflight:
   moving pods back to runc needs no gVisor node.
-- **`verify`** is read-only. For each step of the plan it checks that every
-  live pod has the `runtimeClassName` and runs on a node that the
-  RuntimeClass selects; `--in-pod-probe` also looks for gVisor markers in
+- **`verify`** is read-only. For each step of the plan (or, with `-f`, for
+  each workload of the manifest files that asks for the RuntimeClass) it
+  checks that every live pod has the `runtimeClassName` and runs on a node
+  that the RuntimeClass selects; `--in-pod-probe` also looks for gVisor markers in
   one pod. One look directly after `apply` finds a rollout in progress and
   reports a mismatch, so a pipeline passes `--wait <duration>`: verify then
   looks again until every step is ok or the time ends. With a wait, a step
   is ok only when its pods are Ready and stay Ready for 10 seconds with no
   restart, so exit `4` after a wait means that the workloads did not come
   up in gVisor. A workload with no pods now (`replicas: 0`, a CronJob
-  between two runs) is checked on its pod template.
+  between two runs) is checked on its pod template. A Job that failed is a
+  mismatch with `--wait`.
 
 The manual alternative is a sequence of `kubectl get` to enumerate, hand
 classification against the gVisor docs, per-controller `kubectl patch` for
@@ -425,7 +439,7 @@ elided fields are marked `...`.
   | 1    | Generic error (kubeconfig, network, malformed plan, etc). |
   | 2    | `scan` / `explain namespace` / `explain workload`: at least one `incompatible` workload. |
   | 3    | `apply` or `rollback`: partial outcome; idempotent re-run is safe. |
-  | 4    | `verify`: `runtimeClassName` mismatch, hosting node outside the RuntimeClass `nodeSelector`, in-pod probe did not find gVisor, and/or (with `--wait`) pods that did not stay Ready before the time ended. |
+  | 4    | `verify`: `runtimeClassName` mismatch, hosting node outside the RuntimeClass `nodeSelector`, in-pod probe did not find gVisor, and/or (with `--wait`) pods that did not stay Ready before the time ended. With `-f`, a workload that verify could not check is exit `1`, not `4`. |
   | 5    | `preflight` / `probe` / `apply`: the cluster cannot host the RuntimeClass; `apply` mutated nothing. |
 
   Full table in [`docs/exit-codes.md`](docs/exit-codes.md).
@@ -484,7 +498,7 @@ make kind-down
 | `agentmoat patch`    | Add `runtimeClassName` to manifest files (`-f`), for a move through a pull request. With `--kustomize <dir>`: write the change as a Kustomize component, and edit no source file. No cluster. Default dry-run (prints the diff). |
 | `agentmoat apply`    | Patch workloads per the plan. Default dry-run. Idempotent.    |
 | `agentmoat rollback` | Reverse a previously applied plan. Default dry-run.           |
-| `agentmoat verify`   | Confirm live pods match the plan's `runtimeClassName`. With `--wait`, wait for the rollout and for Ready pods. RO. |
+| `agentmoat verify`   | Confirm live pods match the `runtimeClassName` of the plan (`--plan`) or of manifest files (`-f`). With `--wait`, wait for the rollout and for Ready pods. RO. |
 | `agentmoat explain`  | Embedded docs viewer; `explain namespace` / `explain workload` for deep scans. |
 | `agentmoat version`  | Print binary version and git SHA.                             |
 
@@ -495,7 +509,7 @@ make kind-down
 | `--output / -o`            | `table`          | `table`, `json`, `yaml`, `markdown`, or `sarif`. `json`/`yaml` follow `agentmoat.io/v1alpha1`. See [Output formats](#output-formats). |
 | `--kubeconfig`             | `$KUBECONFIG`    | Path to kubeconfig.                                                      |
 | `--context`                | current-context  | kubeconfig context to use.                                               |
-| `--namespace / -n`         | (all)            | Repeatable. Default: scan every namespace. With `scan -f` and `patch`: one value, the namespace for objects that name none (not a filter). |
+| `--namespace / -n`         | (all)            | Repeatable. Default: scan every namespace. With `scan -f`, `patch`, and `verify -f`: one value, the namespace for objects that name none (not a filter). |
 | `--all-namespaces / -A`    | true if `-n` unset | Explicit all-namespaces flag.                                          |
 | `--selector / -l`          | (none)           | Kubernetes label selector applied to every list call.                    |
 | `--include-system`         | `false`          | Include `kube-system` and other `kube-*` namespaces.                     |
@@ -522,6 +536,9 @@ make kind-down
 | `--image` / `--runsc-path` / `--timeout` | `probe nvproxy` | `busybox:1.36.1` / `/usr/local/bin/runsc` / `2m` | Probe pod image, host path of `runsc`, wait budget. |
 | `--skip-preflight`         | `apply`      | `false`     | Bypass the cluster preflight gate (not recommended).                    |
 | `--plan`                   | apply/rollback | required  | Path to a `MigrationPlan` JSON/YAML.                                    |
+| `--plan`                   | verify         | this or `-f` | Path to the `MigrationPlan` whose steps to check.                    |
+| `--filename / -f`          | verify         | this or `--plan` | Check the workloads of these manifests that ask for the RuntimeClass: a file, a directory, or `-` for stdin. Repeatable. The input must be rendered; `-n` is the namespace of the objects that name none. |
+| `--runtime-class`          | verify         | `gvisor`  | With `-f`: the RuntimeClass name to look for.                           |
 | `--dry-run`                | apply/rollback | `true`    | Compute patches but do not mutate the cluster.                          |
 | `--no-events`              | apply/rollback | `false`   | Do not emit Kubernetes Events per mutation.                             |
 | `--no-audit`               | apply/rollback | `false`   | Do not append to `~/.agentmoat/audit.jsonl`.                            |

@@ -715,8 +715,21 @@ type VerifyMetadata struct {
 	AgentmoatVersion string `json:"agentmoatVersion" yaml:"agentmoatVersion"`
 
 	// PlanHash is the hash of the MigrationPlan this verify ran against.
-	// Same value the applier writes to the namespace annotation.
+	// Same value the applier writes to the namespace annotation. It is
+	// empty for a verify from manifest files (`verify -f`): see Source.
 	PlanHash string `json:"planHash,omitempty" yaml:"planHash,omitempty"`
+
+	// Source is set when the workloads to check came from manifest files
+	// (`verify -f`) and not from a plan. Nil means a plan. The live state
+	// always comes from the cluster; Source is about the list of what to
+	// check.
+	Source *ReportSource `json:"source,omitempty" yaml:"source,omitempty"`
+
+	// RuntimeClassName is the RuntimeClass that a verify from manifest
+	// files looked for: it checks the workloads of the input that ask for
+	// this class. Empty for a verify from a plan, where each step has its
+	// own class.
+	RuntimeClassName string `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
 
 	// InPodProbe records whether the verifier ran the gVisor in-pod probe
 	// (kubectl exec into a pod and grep /proc/cmdline et al). When false,
@@ -760,6 +773,27 @@ type VerifyWait struct {
 type VerifySpec struct {
 	Summary VerifySummary  `json:"summary" yaml:"summary"`
 	Results []VerifyResult `json:"results" yaml:"results"`
+
+	// NotChecked lists the workloads that the verify was asked about and
+	// could not give a verdict for. Only a verify from manifest files has
+	// entries here. They are not in Results: a result is ok, mismatch, or
+	// error, and each of those is a statement about the cluster. An entry
+	// here is the statement "verify does not know". A report with entries
+	// here is not a pass, and it is not a rollback signal either (see
+	// docs/exit-codes.md).
+	NotChecked []VerifyNotChecked `json:"notChecked,omitempty" yaml:"notChecked,omitempty"`
+}
+
+// VerifyNotChecked is one workload that a verify from manifest files could
+// not give a verdict for, with the reason.
+type VerifyNotChecked struct {
+	Target WorkloadRef `json:"target" yaml:"target"`
+
+	// Reason says why there is no verdict, and what a person can look at.
+	Reason string `json:"reason" yaml:"reason"`
+
+	// Origin is where the manifest input defines the workload.
+	Origin *Origin `json:"origin,omitempty" yaml:"origin,omitempty"`
 }
 
 // VerifySummary is the bucketed count of per-step VerifyStatus values. The
@@ -770,6 +804,15 @@ type VerifySummary struct {
 	OK       int `json:"ok"       yaml:"ok"`
 	Mismatch int `json:"mismatch" yaml:"mismatch"`
 	Error    int `json:"error"    yaml:"error"`
+
+	// NotChecked is the number of entries in VerifySpec.NotChecked. They
+	// are not in Total, which counts the results.
+	NotChecked int `json:"notChecked,omitempty" yaml:"notChecked,omitempty"`
+
+	// Excluded is, for a verify from manifest files, the number of
+	// workloads in the input that do not ask for the RuntimeClass. The
+	// verify did not look at them.
+	Excluded int `json:"excluded,omitempty" yaml:"excluded,omitempty"`
 }
 
 // VerifyResult is one row of a VerifyReport: what we expected, what we found,
@@ -809,11 +852,19 @@ type VerifyResult struct {
 	// spec-level check already failed, so placement was not evaluated.
 	NodePlacement *NodePlacement `json:"nodePlacement,omitempty" yaml:"nodePlacement,omitempty"`
 
-	// Basis says what the verdict is about. Empty means the live pods,
-	// which is the usual case. VerifyBasisTemplate means the pod template
-	// of the controller, because the workload has no pods to look at now
-	// (replicas: 0, a CronJob between two runs).
+	// Basis says what the verdict is about. Empty means the live pods of
+	// the workload, which the verifier found through the live object: the
+	// usual case. VerifyBasisTemplate means the pod template of the
+	// controller, because the workload has no pods to look at now
+	// (replicas: 0, a CronJob between two runs). VerifyBasisSelector means
+	// the live pods that the selector in the manifest selects: the
+	// verifier has no reader for the kind (an Argo Rollout), so it did not
+	// read the object.
 	Basis string `json:"basis,omitempty" yaml:"basis,omitempty"`
+
+	// Origin is where the manifest input defines the workload. Set only
+	// for a verify from manifest files.
+	Origin *Origin `json:"origin,omitempty" yaml:"origin,omitempty"`
 
 	// Readiness reports whether the step's pods are Ready. It is set
 	// only with a wait time (`verify --wait`); nil in all other cases.
@@ -827,6 +878,12 @@ type VerifyResult struct {
 // VerifyBasisTemplate is the VerifyResult.Basis of a verdict that comes from
 // the controller's pod template and not from live pods.
 const VerifyBasisTemplate = "template"
+
+// VerifyBasisSelector is the VerifyResult.Basis of a verdict on the pods
+// that the selector in a manifest selects. The verifier did not read the
+// object from the cluster (it has no reader for the kind), so the pods of
+// another workload with the same labels count too.
+const VerifyBasisSelector = "selector"
 
 // PodReadiness is the verifier's answer to "do the pods run?". A pod can
 // have runtimeClassName=gvisor and never start in the sandbox (a crash loop,

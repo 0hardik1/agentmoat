@@ -202,21 +202,9 @@ func writeStepTable(d *mdDoc, steps []schema.StepResult, dryRun bool) {
 func writeVerifyReportMarkdown(d *mdDoc, report *schema.VerifyReport) {
 	sum := report.Spec.Summary
 	wait := report.Metadata.Wait
+	fromManifests := report.Metadata.Source != nil
 	d.heading(2, "agentmoat verify")
-	switch {
-	case sum.Mismatch+sum.Error > 0:
-		// The headline says when the result is after a wait. A job
-		// summary shows no stderr: "not verified" after one look means
-		// "look again", and after a wait that timed out it means "roll
-		// back". The reader must not have to guess which one this is.
-		d.linef("❌ **%d of %d workload(s) are not verified%s.**", sum.Mismatch+sum.Error, sum.Total, verifyWaitClause(wait))
-	case sum.Total == 0:
-		d.linef("⚠️ **Nothing was verified.** The plan has no steps.")
-	case wait != nil:
-		d.linef("✅ **All %d workload(s) are verified, and their pods stayed Ready.**", sum.Total)
-	default:
-		d.linef("✅ **All %d workload(s) are verified.**", sum.Total)
-	}
+	d.linef("%s", verifyHeadline(report))
 	d.blank()
 	probe := "no"
 	if report.Metadata.InPodProbe {
@@ -227,15 +215,25 @@ func writeVerifyReportMarkdown(d *mdDoc, report *schema.VerifyReport) {
 		mdChip("Cluster", report.Metadata.Cluster),
 		"In-pod probe: " + probe,
 	}
+	if fromManifests {
+		chips = append(chips, fmt.Sprintf("Source: %d manifest input(s)", report.Metadata.Source.Inputs),
+			mdChip("RuntimeClass", report.Metadata.RuntimeClassName))
+	}
 	if wait != nil {
 		chips = append(chips, "Wait: "+describeWait(wait))
 	}
 	mdChips(d, chips...)
-	d.table(
-		[]string{"Workloads", "OK", "Mismatch", "Error"},
-		map[int]bool{0: true, 1: true, 2: true, 3: true},
-		[][]string{{fmt.Sprint(sum.Total), fmt.Sprint(sum.OK), fmt.Sprint(sum.Mismatch), fmt.Sprint(sum.Error)}},
-	)
+	headers := []string{"Workloads", "OK", "Mismatch", "Error"}
+	counts := []string{fmt.Sprint(sum.Total), fmt.Sprint(sum.OK), fmt.Sprint(sum.Mismatch), fmt.Sprint(sum.Error)}
+	if fromManifests {
+		// "Not looked at" is the workloads of the input that do not ask
+		// for the class. The number is here so that "all are verified"
+		// cannot read as "all workloads of the files".
+		headers = append(headers, "Not checked", "Not looked at")
+		counts = append(counts, fmt.Sprint(sum.NotChecked), fmt.Sprint(sum.Excluded))
+	}
+	d.table(headers, map[int]bool{0: true, 1: true, 2: true, 3: true, 4: true, 5: true}, [][]string{counts})
+	writeVerifyNotChecked(d, report.Spec.NotChecked)
 
 	var attention, ok []schema.VerifyResult
 	for _, r := range report.Spec.Results {
@@ -254,6 +252,69 @@ func writeVerifyReportMarkdown(d *mdDoc, report *schema.VerifyReport) {
 		writeVerifyTable(d, ok, wait != nil)
 		d.endDetails()
 	}
+}
+
+// verifyHeadline is the first line of the verify report. It has one line for
+// each exit code, and "not a pass" is said in words: a job summary shows no
+// exit code.
+func verifyHeadline(report *schema.VerifyReport) string {
+	sum := report.Spec.Summary
+	wait := report.Metadata.Wait
+	switch {
+	case sum.Mismatch+sum.Error > 0:
+		// The headline says when the result is after a wait. A job
+		// summary shows no stderr: "not verified" after one look means
+		// "look again", and after a wait that timed out it means "roll
+		// back". The reader must not have to guess which one this is.
+		line := fmt.Sprintf("❌ **%d of %d workload(s) are not verified%s.**", sum.Mismatch+sum.Error, sum.Total, verifyWaitClause(wait))
+		if sum.NotChecked > 0 {
+			line += fmt.Sprintf(" %d more could not be checked.", sum.NotChecked)
+		}
+		return line
+	case sum.NotChecked > 0:
+		// No result is a failure, and verify has no answer for some
+		// workloads. Not a pass, and not a reason for a rollback.
+		line := fmt.Sprintf("⚠️ **%d workload(s) could not be checked. This is not a pass.** "+
+			"It is also not evidence that the deploy failed: verify has no verdict for these workloads, "+
+			"and the table below has the reason for each one.", sum.NotChecked)
+		if sum.OK > 0 {
+			line += fmt.Sprintf(" The other %d workload(s) are verified.", sum.OK)
+		}
+		return line
+	case sum.Total == 0 && report.Metadata.Source != nil:
+		return "⚠️ **Nothing was verified.** No workload of the input was checked."
+	case sum.Total == 0:
+		return "⚠️ **Nothing was verified.** The plan has no steps."
+	case wait != nil:
+		return fmt.Sprintf("✅ **All %d workload(s) are verified, and their pods stayed Ready.**%s", sum.Total, verifyScopeClause(report))
+	default:
+		return fmt.Sprintf("✅ **All %d workload(s) are verified.**%s", sum.Total, verifyScopeClause(report))
+	}
+}
+
+// verifyScopeClause says, for a verify from manifests, what "all" is: the
+// workloads of the input that ask for the class.
+func verifyScopeClause(report *schema.VerifyReport) string {
+	if report.Metadata.Source == nil {
+		return ""
+	}
+	return fmt.Sprintf(" These are the workloads of the input that ask for RuntimeClass %s.", mdCode(report.Metadata.RuntimeClassName))
+}
+
+// writeVerifyNotChecked lists the workloads that verify has no verdict for.
+// Each value is text from a manifest.
+func writeVerifyNotChecked(d *mdDoc, notChecked []schema.VerifyNotChecked) {
+	if len(notChecked) == 0 {
+		return
+	}
+	d.heading(3, fmt.Sprintf("Not checked (%d)", len(notChecked)))
+	rows := make([][]string, 0, len(notChecked))
+	for _, n := range notChecked {
+		row := targetCells(n.Target)
+		row = append(row, mdWhere(n.Origin), mdText(n.Reason))
+		rows = append(rows, row)
+	}
+	d.table([]string{"Namespace", "Kind", "Name", "Defined in", "Why there is no verdict"}, nil, rows)
 }
 
 // verifyWaitClause is the end of the "not verified" headline for a verify

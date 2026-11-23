@@ -46,6 +46,7 @@ import (
 	"time"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -64,11 +65,17 @@ type Options struct {
 	// the *rest.Config (the typed Clientset does not expose it).
 	Config *rest.Config
 
-	// Plan is the MigrationPlan to verify against. Required and must be
-	// non-nil. Its Spec.Steps drive the walk; Metadata.PlanHash is carried
-	// through to the report so an operator can correlate the verify output
-	// with the apply that produced the state being checked.
+	// Plan is the MigrationPlan to verify against. Its Spec.Steps drive
+	// the walk; Metadata.PlanHash is carried through to the report so an
+	// operator can correlate the verify output with the apply that produced
+	// the state being checked. Exactly one of Plan and Targets is set.
 	Plan *schema.MigrationPlan
+
+	// Targets is the list of workloads to verify when there is no plan:
+	// the workloads of manifest files that ask for the RuntimeClass
+	// (`verify -f`). Not nil, and Plan is nil. The checks are the ones of
+	// a plan step, in the order of the list.
+	Targets []Target
 
 	// InPodProbe, when true, enables the per-step kubectl-exec probe. Off
 	// by default: the probe needs the `pods/exec` permission, which is a
@@ -111,6 +118,34 @@ type Options struct {
 	// AgentmoatVersion is the binary version string, threaded through
 	// for VerifyReport.Metadata.AgentmoatVersion.
 	AgentmoatVersion string
+}
+
+// Target is one workload to verify that comes from manifest files and not
+// from a plan.
+type Target struct {
+	// Ref names the workload as it is in the cluster. For one of the six
+	// kinds, Kind is the plain kind ("Deployment") and the verifier reads
+	// the live object, as it does for a plan step.
+	Ref schema.WorkloadRef
+
+	// Expected is the runtimeClassName that the manifest asks for.
+	Expected string
+
+	// Selector is for a kind that the verifier has no reader for (an Argo
+	// Rollout: Kind is then "Rollout.argoproj.io"). It is spec.selector of
+	// the manifest, and it must have terms. The verifier lists the pods
+	// that it selects and does not read the object, so it needs no
+	// permission on a custom resource. Two things follow, and the result
+	// says so (schema.VerifyBasisSelector): pods of another workload with
+	// the same labels count too, and with no pods the verifier cannot
+	// tell a workload that is scaled to zero from one that is not
+	// deployed. Such a target then has no result: it goes to
+	// VerifySpec.NotChecked.
+	Selector *metav1.LabelSelector
+
+	// Origin is where the manifest input defines the workload. It is
+	// copied to the result.
+	Origin *schema.Origin
 }
 
 // ExecRunner is the seam for the kubectl-exec-based gVisor probe. The

@@ -6,10 +6,10 @@ and AI agents can branch on it.
 | Code | Meaning | Emitted by |
 | --- | --- | --- |
 | `0` | Success. The command completed and (for mutating commands) the cluster matches the requested state. | All commands |
-| `1` | Generic error. Could not load kubeconfig, network failure, unparseable flag, etc. For `apply`/`rollback`, also emitted when **every** step failed. They also refuse a plan with no `metadata.planHash` with this code. For `scan -f`, a manifest that does not parse, or `--fail-on sandboxed` on input that is not rendered. For `patch`, also when no selected workload could be patched. The stderr message names the cause. | All commands |
+| `1` | Generic error. Could not load kubeconfig, network failure, unparseable flag, etc. For `apply`/`rollback`, also emitted when **every** step failed. They also refuse a plan with no `metadata.planHash` with this code. For `scan -f`, a manifest that does not parse, or `--fail-on sandboxed` on input that is not rendered. For `patch`, also when no selected workload could be patched. For `verify -f`, input that verify refuses, and a report with no failure in which a workload could not be checked (see below). The stderr message names the cause. | All commands |
 | `2` | Compatibility issues found. At least one workload was classified as `incompatible`. For `scan`, `--fail-on` changes which workloads count (see below). | `agentmoat scan`, `agentmoat explain namespace`, `agentmoat explain workload` |
 | `3` | Partial outcome. Some steps succeeded and others failed; idempotent re-run is safe. After a partial `apply`, `rollback` with the same plan undoes the steps that succeeded (see below). For `patch`: some selected workloads are patched and others are not (see below). | `agentmoat apply`, `agentmoat rollback`, `agentmoat patch` |
-| `4` | Verify failed. Live pods do not match the plan's expected `runtimeClassName`, the hosting nodes fall outside the RuntimeClass `nodeSelector`, (with `--in-pod-probe`) the in-container probe did not find gVisor markers, and/or (with `--wait`) the pods did not stay Ready before the wait time ended. | `agentmoat verify` |
+| `4` | Verify failed. Live pods do not match the expected `runtimeClassName` (of the plan, or with `-f` of the manifest files), the hosting nodes fall outside the RuntimeClass `nodeSelector`, (with `--in-pod-probe`) the in-container probe did not find gVisor markers, and/or (with `--wait`) the pods did not stay Ready before the wait time ended. | `agentmoat verify` |
 | `5` | Cluster not ready. The preflight found an error: no RuntimeClass, a RuntimeClass with no `scheduling.nodeSelector`, no Ready node matching it, untolerated taints on every matching node, or only EKS Auto Mode / Bottlerocket nodes. For `apply`, every step is reported `skipped` and nothing was mutated. For `probe nvproxy`, the probe pod was not created. | `agentmoat preflight`, `agentmoat probe nvproxy`, `agentmoat apply` |
 
 ## Scan exit code 2 and `--fail-on`
@@ -103,8 +103,71 @@ A plan with no steps gives exit `0` and no result: verify looked at no
 workload. It says so (`nothing was verified`, on stderr and at the top of the
 Markdown report). This is the result for a plan from a scan after the
 workloads got the class, because a plan has a step only for a workload that
-has no RuntimeClass. To check workloads after a change, use the plan from
-before the change ([`ci-cd.md`](ci-cd.md#check-the-result-of-a-change-that-came-through-the-source)).
+has no RuntimeClass. To check workloads after a change that came through
+manifest files, use `verify -f` (the next section).
+
+### `verify -f`: exit codes `4` and `1`
+
+With `-f <manifests>` in place of `--plan`, verify takes the workloads to
+check from the files: each workload whose pod spec asks for the RuntimeClass
+(`--runtime-class`, default `gvisor`). It reads the files as `scan -f` does,
+and then it reads the cluster. This is the check after a change that came
+through a repository
+([`ci-cd.md`](ci-cd.md#check-the-result-of-a-change-that-came-through-the-source)).
+
+The rule: **exit `4` comes only from what the cluster shows.** With `--wait`
+it is a rollback signal, so input that verify cannot read as the cluster has
+it must not give that code.
+
+| Case | Exit code | A report on stdout |
+| --- | --- | --- |
+| Each workload that asks for the class is `ok`. | `0` | Yes |
+| One workload or more is a `mismatch` or an `error`: a pod with no class, a Deployment (or another controller) that is not in the cluster, pods that are not Ready after the wait time, a Job that failed (with `--wait`). | `4` | Yes |
+| No workload failed, and one or more could not be checked. | `1` | Yes. `summary.notChecked` and `spec.notChecked` have them. |
+| A document that does not parse. | `1` | No |
+| Input that is not rendered (a kustomization file, an overlay patch). | `1` | No |
+| A workload that asks for the class has no namespace, and there is no `-n`. | `1` | No |
+| No workload of the input asks for the class. | `1` | No |
+
+A failure wins over "not checked": a report with a `mismatch` and a workload
+that could not be checked is exit `4`.
+
+**Not checked** is for a workload that asks for the class and that verify
+cannot find in the cluster from what the file says:
+
+- An object with `generateName` and no `metadata.name`. The API server makes
+  the name.
+- A kind that verify has no reader for (an Argo `Rollout`, a ReplicaSet, a
+  Knative `Service`), when the manifest has no `spec.selector` that selects
+  pods by label, or when that selector selects no pods. With no pods, verify
+  cannot tell a workload that is scaled to zero from one that is not there.
+- A Job or a bare Pod that is not in the cluster. After a deploy that worked
+  it can be gone (a Job with `ttlSecondsAfterFinished`, a hook that its tool
+  deletes when it succeeds, a test pod that an install does not make), so
+  "not found" is not evidence that the deploy failed. A Deployment, a
+  StatefulSet, a DaemonSet, or a CronJob that is not in the cluster is an
+  `error` (exit `4`): nothing removes those.
+
+A Job and a Pod that are in the cluster have a result. A pod that ran to its
+end (phase `Succeeded`) is `ok` when it has the class; verify does not read
+its readiness, with or without `--wait`. A Job that is finished is checked
+on its pod template. With `--wait`, a Job with the condition `Failed` is a
+`mismatch`: its pod template has the class, and it did not come to a good
+end with it.
+
+Such a workload has no entry in `spec.results`, and `status` keeps its three
+values. With pods for the selector, the result is `ok` or `mismatch` with
+`basis: selector`: verify checked the pods and did not read the object.
+
+Each refusal in the table comes before verify reads the cluster. "No
+workload asks for the class" is different from `verify --plan` with a plan
+that has no steps (exit `0` with a note): after a move through the
+repository the files have the class, so this case is nearly always the wrong
+input.
+
+For a script, exit `1` with a report on stdout is "not checked", and exit
+`1` with no output on stdout is an error or a refusal. stderr says which
+one in each case, and the Markdown report starts with "This is not a pass".
 
 ### `verify --wait`
 
@@ -156,7 +219,11 @@ own. This is on purpose. A shell goes on with the right side of
 exit code, and it stops the full list when the left side dies by the signal.
 An interrupt must never start a rollback.
 
-A workload with no pods now (see above) does not use the wait time. With
+A workload with no pods now (see above) does not use the wait time. There is
+one exception: a Job with the condition `Failed`. Its pod template has the
+class, and the Job did not come to a good end with it, so with `--wait` it is
+a `mismatch`. verify looks at it again until the time ends, as for each step
+that is not ok, because a deploy tool can replace the Job. With
 `--in-pod-probe`, the probe runs one time for each step, when its pods have
 settled. Progress goes to stderr (`verify: waiting: 3 of 8 step(s) ok, 2m10s
 left`); `-q` removes it.

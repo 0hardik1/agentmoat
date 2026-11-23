@@ -619,6 +619,73 @@ func TestVerifyWaitFields(t *testing.T) {
 	}
 }
 
+// TestVerifyManifestFields pins the wire names of the fields that a verify
+// from manifest files adds (`verify -f`), and checks that a verify of a plan
+// has none of them. The status of a result keeps its three values: a
+// workload with no verdict is in spec.notChecked, never in spec.results.
+func TestVerifyManifestFields(t *testing.T) {
+	t.Parallel()
+	if VerifyBasisSelector != "selector" {
+		t.Errorf("VerifyBasisSelector = %q, want %q", VerifyBasisSelector, "selector")
+	}
+
+	plan := NewVerifyReport()
+	plan.Metadata.PlanHash = "sha256:abc"
+	plan.Spec.Summary = VerifySummary{Total: 1, OK: 1}
+	plan.Spec.Results = []VerifyResult{{Order: 1, Status: VerifyStatusOK, Expected: "gvisor", Actual: "gvisor"}}
+	data, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, key := range []string{`"source"`, `"runtimeClassName"`, `"notChecked"`, `"excluded"`, `"origin"`} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("a verify of a plan has the key %s:\n%s", key, data)
+		}
+	}
+
+	files := NewVerifyReport()
+	files.Metadata.Source = &ReportSource{Type: SourceManifests, Inputs: 2}
+	files.Metadata.RuntimeClassName = "gvisor"
+	files.Spec.Summary = VerifySummary{Total: 1, OK: 1, NotChecked: 1, Excluded: 3}
+	files.Spec.Results = []VerifyResult{{
+		Order: 1, Target: WorkloadRef{Kind: "Rollout.argoproj.io", Namespace: "shop", Name: "canary"},
+		Status: VerifyStatusOK, Expected: "gvisor", Actual: "gvisor", Basis: VerifyBasisSelector,
+		Origin: &Origin{File: "k8s/canary.yaml", Line: 3},
+	}}
+	files.Spec.NotChecked = []VerifyNotChecked{{
+		Target: WorkloadRef{Kind: "Service.serving.knative.dev", Namespace: "shop", Name: "fn"},
+		Reason: "no selector", Origin: &Origin{File: "k8s/fn.yaml", Line: 1},
+	}}
+	data, err = json.Marshal(files)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, want := range []string{
+		`"source":{"type":"manifests","inputs":2}`,
+		`"runtimeClassName":"gvisor"`,
+		`"summary":{"total":1,"ok":1,"mismatch":0,"error":0,"notChecked":1,"excluded":3}`,
+		`"basis":"selector"`,
+		`"origin":{"file":"k8s/canary.yaml","line":3}`,
+		`"notChecked":[{"target":{"kind":"Service.serving.knative.dev","namespace":"shop","name":"fn"},"reason":"no selector","origin":{"file":"k8s/fn.yaml","line":1}}]`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("JSON lacks %s:\n%s", want, data)
+		}
+	}
+
+	yamlBytes, err := yaml.Marshal(files)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	var back VerifyReport
+	if err := yaml.Unmarshal(yamlBytes, &back); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(back, *files) {
+		t.Errorf("the YAML round trip changed the report:\n got %+v\nwant %+v", back, *files)
+	}
+}
+
 // TestWorkloadResultManagedBy pins the wire shape of the deploy tool marker
 // on a scan row, the three tool names, and its absence when there is no
 // marker.
