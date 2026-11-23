@@ -152,6 +152,10 @@ start in gVisor fails the check, with the reason in the report.
   and Jobs with an actionable reason: the Kubernetes API rejects in-place
   `runtimeClassName` patches for both (a running Pod's spec and a Job's
   template are immutable), so those workloads must be re-created instead.
+  A workload that already has a RuntimeClass gets no step: the plan lists
+  what `apply` will change, so that `rollback` undoes only that. In a
+  pipeline, the plan of each run then has the new workloads, and not the
+  ones that an earlier run moved.
   When a workload in the plan has the marker of a deploy tool (Argo CD,
   Flux, Helm), the plan has the warning `source-managed`: `apply` changes
   the live object only, so the source that the tool deploys from needs the

@@ -45,6 +45,9 @@
 #                           /dev/kmsg by the host kernel (runsc
 #                           20261116.0 and newer confine the sandbox to a
 #                           device cgroup; see docs/gvisor-version.md).
+#   4c. scan and plan again  after the apply, the plan has no step for a
+#                           workload that has the class (the start of a
+#                           second pipeline run).
 #   5. `agentmoat rollback` to clear the patches and restore the
 #                           pre-apply spec.
 #   5b. a partial apply     one workload of the plan is deleted, so its
@@ -690,6 +693,37 @@ assert_eq "re-apply summary.applied" 0 "$RE_APPLIED"
 assert_eq "re-apply summary.alreadyApplied" "$E2E_COMPAT" "$RE_ALREADY"
 assert_eq "re-apply summary.failed" 0 "$RE_FAILED"
 e2e_step_pass "apply (re-run)" "$E2E_REPLAY_APPLY"
+
+# -----------------------------------------------------------------------------
+# 5a. scan and plan again: a workload that has the class gets no step.
+# -----------------------------------------------------------------------------
+#
+# This is the start of the second run of a pipeline: the scan finds the
+# workloads that the first run moved. The plan must have no step for them.
+# A step would change nothing in apply, and a rollback of that plan (for
+# example because one new workload fails) would take them out of the
+# sandbox again.
+#
+# The check needs the real cluster: it proves that the cluster scan reads
+# runtimeClassName from the live pod templates, which is what the planner
+# decides on.
+
+e2e_step "scan and plan after the apply: no step for a workload that has the class"
+RESCAN_EXIT=0
+"${AGENT[@]}" scan --namespace "$NAMESPACE" --output json \
+  >"$WORK_DIR/scan-after-apply.json" 2>/dev/null || RESCAN_EXIT=$?
+assert_eq "scan (post-apply) exit code" 2 "$RESCAN_EXIT"
+assert_eq "scan (post-apply) summary.sandboxed" "$E2E_COMPAT" \
+  "$(jq -r '.spec.summary.sandboxed' "$WORK_DIR/scan-after-apply.json")"
+"${AGENT[@]}" plan --scan "$WORK_DIR/scan-after-apply.json" --output json \
+  >"$WORK_DIR/plan-after-apply.json" 2>/dev/null
+assert_eq "plan (post-apply) summary.included" 0 \
+  "$(jq -r '.spec.summary.included' "$WORK_DIR/plan-after-apply.json")"
+assert_eq "plan (post-apply) workloads excluded because they have the class" \
+  "$(printf '%s\n' "${E2E_COMPAT_DEPLOYMENTS[@]}" "${E2E_COMPAT_STATEFULSETS[@]}" | sort | paste -sd, -)" \
+  "$(jq -r '[.spec.excluded[] | select(.reason | startswith("already has RuntimeClass \"gvisor\"")) | .target.name] | sort | join(",")' \
+    "$WORK_DIR/plan-after-apply.json")"
+e2e_step_pass "scan and plan (post-apply)" "$E2E_REPLAY_SCAN"$'\n'"$E2E_REPLAY_AGENT plan --scan <that scan>"
 
 # -----------------------------------------------------------------------------
 # 5b. verify (post-idempotent-apply): still all-ok.

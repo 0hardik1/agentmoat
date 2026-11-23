@@ -8,6 +8,7 @@ package planner
 
 import (
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -294,6 +295,144 @@ func TestPlan_PerStepFields(t *testing.T) {
 	}
 }
 
+// classReport is a report of one namespace in which some workloads already
+// have a RuntimeClass. It is the scan that the second run of a pipeline
+// gets: "web" moved in the first run, "api" is new.
+func classReport() *schema.ScanReport {
+	deployment := func(name, class string, verdict schema.Compatibility, reasons ...schema.Reason) schema.WorkloadResult {
+		return schema.WorkloadResult{
+			Kind: "Deployment", Namespace: "shop", Name: name,
+			RuntimeClassName: class, Compatibility: verdict, Reasons: reasons,
+		}
+	}
+	return &schema.ScanReport{
+		APIVersion: schema.APIVersion,
+		Kind:       schema.KindScanReport,
+		Spec: schema.ReportSpec{Workloads: []schema.WorkloadResult{
+			deployment("api", "", schema.CompatibilityCompatible),
+			deployment("web", "gvisor", schema.CompatibilityCompatible),
+			deployment("vm", "kata", schema.CompatibilityCompatible),
+			deployment("gateway", "gvisor", schema.CompatibilityIncompatible,
+				schema.Reason{RuleID: "host-network", Severity: schema.SeverityError}),
+			deployment("gpu", "gvisor", schema.CompatibilityReview,
+				schema.Reason{RuleID: "gpu-passthrough", Severity: schema.SeverityWarn}),
+			{Kind: "Pod", Namespace: "shop", Name: "probe", RuntimeClassName: "gvisor", Compatibility: schema.CompatibilityCompatible},
+		}},
+	}
+}
+
+// TestPlan_NoStepForAWorkloadThatHasARuntimeClass: a step is a change, and
+// rollback undoes the plan by removing the class. So the plan lists only a
+// workload that has no class. A workload that has one is in "excluded", with
+// a reason that says which case it is.
+func TestPlan_NoStepForAWorkloadThatHasARuntimeClass(t *testing.T) {
+	cases := []struct {
+		name          string
+		opts          Options
+		wantSteps     []string
+		wantReasonHas map[string]string
+	}{
+		{
+			name:      "the default class",
+			wantSteps: []string{"api"},
+			wantReasonHas: map[string]string{
+				"web": `already has RuntimeClass "gvisor": nothing to change`,
+				// Another class: the plan does not replace it.
+				"vm": `has RuntimeClass "kata": the plan does not replace another RuntimeClass`,
+				// Incompatible is the reason to show, also with the class.
+				"gateway": "workload is incompatible: host-network",
+				// In the sandbox now: not "needs review, opt in".
+				"gpu": `already has RuntimeClass "gvisor"`,
+				// Nothing to change: not "a Pod cannot be patched".
+				"probe": `already has RuntimeClass "gvisor"`,
+			},
+		},
+		{
+			name:      "with --include-review: a review workload that has the class still gets no step",
+			opts:      Options{IncludeReview: true},
+			wantSteps: []string{"api"},
+			wantReasonHas: map[string]string{
+				"gpu": `already has RuntimeClass "gvisor"`,
+			},
+		},
+		{
+			name:      "the class of the plan is kata: gvisor is then the other class",
+			opts:      Options{RuntimeClassName: "kata"},
+			wantSteps: []string{"api"},
+			wantReasonHas: map[string]string{
+				"vm":  `already has RuntimeClass "kata": nothing to change`,
+				"web": `has RuntimeClass "gvisor": the plan does not replace another RuntimeClass`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := Plan(classReport(), tc.opts)
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			if got := namesOf(plan.Spec.Steps); !reflect.DeepEqual(got, tc.wantSteps) {
+				t.Errorf("steps = %v, want %v", got, tc.wantSteps)
+			}
+			reasons := map[string]string{}
+			for _, e := range plan.Spec.Excluded {
+				reasons[e.Target.Name] = e.Reason
+			}
+			for name, want := range tc.wantReasonHas {
+				if !strings.Contains(reasons[name], want) {
+					t.Errorf("%s: excluded reason = %q, want it to contain %q", name, reasons[name], want)
+				}
+			}
+			if plan.Spec.Summary.Included != len(plan.Spec.Steps) || plan.Spec.Summary.Excluded != len(plan.Spec.Excluded) ||
+				plan.Spec.Summary.Total != len(plan.Spec.Steps)+len(plan.Spec.Excluded) {
+				t.Errorf("summary %+v does not agree with %d step(s) and %d excluded", plan.Spec.Summary, len(plan.Spec.Steps), len(plan.Spec.Excluded))
+			}
+		})
+	}
+}
+
+// TestPlan_AWorkloadWithAClassDoesNotChangeTheHash: the hash is of the
+// steps. The scan of a second pipeline run (the workloads of the first run
+// now have the class) gives the same steps as a scan with only the new
+// workload, so it gives the same hash.
+func TestPlan_AWorkloadWithAClassDoesNotChangeTheHash(t *testing.T) {
+	full, err := Plan(classReport(), Options{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	onlyNew := classReport()
+	onlyNew.Spec.Workloads = onlyNew.Spec.Workloads[:1] // api
+	small, err := Plan(onlyNew, Options{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if full.Metadata.PlanHash == "" || full.Metadata.PlanHash != small.Metadata.PlanHash {
+		t.Errorf("plan hash %q with the sandboxed workloads in the scan, %q without; they must be equal", full.Metadata.PlanHash, small.Metadata.PlanHash)
+	}
+}
+
+// TestPlan_AReportWithNoClassFieldPlansAsBefore: a report from a version
+// that did not record the class has the field empty for every workload.
+// The planner then excludes nothing for a class.
+func TestPlan_AReportWithNoClassFieldPlansAsBefore(t *testing.T) {
+	report := classReport()
+	for i := range report.Spec.Workloads {
+		report.Spec.Workloads[i].RuntimeClassName = ""
+	}
+	plan, err := Plan(report, Options{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if got, want := namesOf(plan.Spec.Steps), []string{"api", "vm", "web"}; !reflect.DeepEqual(sortedCopy(got), want) {
+		t.Errorf("steps = %v, want %v (in any order)", got, want)
+	}
+	for _, e := range plan.Spec.Excluded {
+		if strings.Contains(e.Reason, "RuntimeClass") {
+			t.Errorf("%s is excluded for a class that the report does not have: %q", e.Target.Name, e.Reason)
+		}
+	}
+}
+
 // TestPlan_AddTolerationOptIn: the toleration is off by default (the
 // RuntimeClass's scheduling block owns placement) and on for every step
 // when the option is set. Because PlannerOptions is hashed, the two plans
@@ -492,5 +631,13 @@ func namesOf(steps []schema.PlanStep) []string {
 	for _, s := range steps {
 		out = append(out, s.Target.Name)
 	}
+	return out
+}
+
+// sortedCopy returns the strings in sorted order, and leaves the input as
+// it is.
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
 	return out
 }

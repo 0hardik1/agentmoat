@@ -60,6 +60,20 @@ spec:
         - name: agent
           image: example.test/agent:1
 `
+	// A workload that can run in the sandbox and does not ask for it yet:
+	// the one kind of workload that a plan has a step for.
+	plainDeployment = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: agents
+spec:
+  template:
+    spec:
+      containers:
+        - name: web
+          image: example.test/web:1
+`
 	// A workload that will never move, and does not ask to.
 	privilegedDaemonSet = `apiVersion: apps/v1
 kind: DaemonSet
@@ -669,7 +683,9 @@ func TestGateAndSummaryAgreeOnTheClass(t *testing.T) {
 // marked, warns first, and is refused by everything that acts on a cluster.
 func TestPlanFromManifests_IsAPreview(t *testing.T) {
 	t.Parallel()
-	dir := writeManifests(t, map[string]string{"agent.yaml": sandboxedClean, "gateway.yaml": sandboxedHostNet})
+	dir := writeManifests(t, map[string]string{
+		"agent.yaml": sandboxedClean, "gateway.yaml": sandboxedHostNet, "web.yaml": plainDeployment,
+	})
 
 	var stderr bytes.Buffer
 	plan, err := Plan(context.Background(), PlanOptions{
@@ -688,8 +704,22 @@ func TestPlanFromManifests_IsAPreview(t *testing.T) {
 	if len(plan.Spec.Warnings) == 0 || plan.Spec.Warnings[0].ID != WarningManifestSource {
 		t.Errorf("warnings = %+v, want %s first", plan.Spec.Warnings, WarningManifestSource)
 	}
-	if plan.Spec.Summary.Included != 1 {
-		t.Errorf("included = %d, want 1 (the compatible Deployment)", plan.Spec.Summary.Included)
+	// One step: the compatible Deployment that has no class. The agent is
+	// compatible too, but it has the class, so the plan has nothing to
+	// change on it. The gateway is incompatible, and that is its reason
+	// (not "already has the class").
+	if plan.Spec.Summary.Included != 1 || len(plan.Spec.Steps) != 1 || plan.Spec.Steps[0].Target.Name != "web" {
+		t.Errorf("steps = %+v, want one step, for web", plan.Spec.Steps)
+	}
+	reasons := map[string]string{}
+	for _, e := range plan.Spec.Excluded {
+		reasons[e.Target.Name] = e.Reason
+	}
+	if !strings.Contains(reasons["agent"], `already has RuntimeClass "gvisor"`) {
+		t.Errorf("agent: excluded reason = %q, want it to say that the workload already has the class", reasons["agent"])
+	}
+	if !strings.Contains(reasons["gateway"], "incompatible") {
+		t.Errorf("gateway: excluded reason = %q, want the incompatible reason first", reasons["gateway"])
 	}
 	if !strings.Contains(stderr.String(), "it is a preview") {
 		t.Errorf("stderr does not say the plan is a preview:\n%s", stderr.String())

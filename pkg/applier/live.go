@@ -1,10 +1,13 @@
 // Package applier: reading the class that a workload has now.
 //
 // A rollback after an apply that did not finish does not know which steps
-// the apply got to. The plan does not say it either: a step can be for a
-// workload that had another RuntimeClass before (the planner does not
-// exclude one). To set runtimeClassName to null on such a workload, when the
-// apply never changed it, would remove a class that agentmoat did not set.
+// the apply got to. The plan does not say it either. The planner makes a
+// step only for a workload that had no RuntimeClass in the scan, but the
+// cluster can change between the scan and the apply, and a plan can be old:
+// at the time of the rollback, the workload of a step can have another
+// RuntimeClass that someone else set. To set runtimeClassName to null on
+// such a workload, when the apply never changed it, would remove a class
+// that agentmoat did not set.
 //
 // So, in a namespace that has only the apply-started mark of the plan, the
 // rollback reads each workload first and un-patches it only when its pod

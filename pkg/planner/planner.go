@@ -12,6 +12,9 @@
 //     include-vs-exclude:
 //     - Compatibility == Incompatible -> Excluded with the join of rule
 //     IDs as the reason.
+//     - The workload has a RuntimeClass -> Excluded: a step is a change,
+//     and the plan changes only a workload that has no class (see
+//     runtimeClassBlocker).
 //     - Compatibility == Review       -> Excluded unless opts.IncludeReview
 //     is true.
 //     - Compatibility == Compatible   -> Included, unless the kind cannot
@@ -74,41 +77,11 @@ func Plan(report *schema.ScanReport, opts Options) (*schema.MigrationPlan, error
 	var included []schema.WorkloadResult
 	var excluded []schema.ExcludedWorkload
 	for _, w := range report.Spec.Workloads {
-		switch w.Compatibility {
-		case schema.CompatibilityIncompatible:
+		if reason := exclusionReason(w, effective); reason != "" {
 			excluded = append(excluded, schema.ExcludedWorkload{
 				Target:        toWorkloadRef(w),
 				Compatibility: w.Compatibility,
-				Reason: fmt.Sprintf(
-					"workload is incompatible: %s",
-					commaJoinErrorReasons(w.Reasons),
-				),
-			})
-			continue
-		case schema.CompatibilityReview:
-			if !effective.IncludeReview {
-				excluded = append(excluded, schema.ExcludedWorkload{
-					Target:        toWorkloadRef(w),
-					Compatibility: w.Compatibility,
-					Reason: fmt.Sprintf(
-						"workload needs review (use --include-review to plan anyway): %s",
-						commaJoinWarnReasons(w.Reasons),
-					),
-				})
-				continue
-			}
-		}
-
-		// Compatible (or Review with the opt-in): one last gate. Some
-		// kinds cannot be migrated by patching them in place, because the
-		// Kubernetes API rejects the mutation outright. Excluding them
-		// here (rather than letting apply fail per-step with a raw 422)
-		// gives the operator an actionable reason in the plan itself.
-		if blocker := kindMigrationBlocker(w.Kind); blocker != "" {
-			excluded = append(excluded, schema.ExcludedWorkload{
-				Target:        toWorkloadRef(w),
-				Compatibility: w.Compatibility,
-				Reason:        "cannot patch in place: " + blocker,
+				Reason:        reason,
 			})
 			continue
 		}
@@ -164,6 +137,73 @@ func Plan(report *schema.ScanReport, opts Options) (*schema.MigrationPlan, error
 		Excluded: excluded,
 	}
 	return plan, nil
+}
+
+// exclusionReason says why a workload gets no step, or "" when it gets one.
+//
+// A workload can have more than one reason. The checks are in the order of
+// what the operator must know first:
+//
+//  1. It is incompatible. This is first also for a workload that has the
+//     class of the plan: "asks for the sandbox and cannot run in it" is the
+//     finding to show, not "nothing to change".
+//  2. It has a RuntimeClass (see runtimeClassBlocker). This is before the
+//     review check: a workload that is in the sandbox needs no
+//     "--include-review to plan anyway".
+//  3. It needs review, and the operator did not opt in.
+//  4. Its kind cannot be patched in place. Some kinds cannot be migrated by
+//     a patch, because the Kubernetes API rejects the mutation outright.
+//     An exclusion here gives the operator an actionable reason in the plan
+//     itself. Without it, apply would fail on the step with a raw HTTP 422.
+func exclusionReason(w schema.WorkloadResult, opts Options) string {
+	if w.Compatibility == schema.CompatibilityIncompatible {
+		return fmt.Sprintf("workload is incompatible: %s", commaJoinErrorReasons(w.Reasons))
+	}
+	if blocker := runtimeClassBlocker(w.RuntimeClassName, opts.RuntimeClassName); blocker != "" {
+		return blocker
+	}
+	if w.Compatibility == schema.CompatibilityReview && !opts.IncludeReview {
+		return fmt.Sprintf("workload needs review (use --include-review to plan anyway): %s", commaJoinWarnReasons(w.Reasons))
+	}
+	if blocker := kindMigrationBlocker(w.Kind); blocker != "" {
+		return "cannot patch in place: " + blocker
+	}
+	return ""
+}
+
+// runtimeClassBlocker returns a non-empty reason when the workload already
+// has a RuntimeClass (current is the runtimeClassName of its pod spec, as
+// the scan read it), and "" when it has none. target is the class of the
+// plan.
+//
+// Why a workload with a class gets no step: a step is a change, and the
+// plan must list only what apply will change, because rollback undoes the
+// plan. The undo of a step is "remove runtimeClassName", which is the exact
+// reverse only for a workload that had none:
+//
+//   - The class of the plan is there. A step would change nothing in apply,
+//     and rollback would take the workload out of the sandbox. In a
+//     pipeline that is the second run in a namespace: the scan of run 2
+//     finds the workloads of run 1, and a failure of one new workload must
+//     not move the old ones back to runc and start them again.
+//   - Another class is there. apply would replace it, and rollback could
+//     not put it back.
+//
+// One result: `verify --plan` checks the workloads that the plan changes,
+// and not the ones that were in the sandbox before it.
+//
+// A report from before the scan recorded the class has the field empty, and
+// then this function excludes nothing, as before.
+func runtimeClassBlocker(current, target string) string {
+	switch current {
+	case "":
+		return ""
+	case target:
+		return fmt.Sprintf("already has RuntimeClass %q: nothing to change", current)
+	}
+	return fmt.Sprintf(
+		"has RuntimeClass %q: the plan does not replace another RuntimeClass, because a rollback could not put it back "+
+			"(remove runtimeClassName from the workload first if it must move to %q)", current, target)
 }
 
 // kindMigrationBlocker returns a non-empty reason when the given kind

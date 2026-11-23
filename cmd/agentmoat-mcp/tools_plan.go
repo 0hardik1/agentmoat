@@ -19,7 +19,7 @@ import (
 
 func registerProposePlan(srv *server.MCPServer, deps Deps) {
 	tool := mcp.NewTool("propose_plan",
-		mcp.WithDescription("Produce a deterministic MigrationPlan from a scan. Same scan in produces the same planHash. The plan is read-only: this tool never mutates the cluster (use apply_plan for that)."),
+		mcp.WithDescription("Produce a deterministic MigrationPlan from a scan. Same scan in produces the same planHash. The plan is read-only: this tool never mutates the cluster (use apply_plan for that). A workload that already has a RuntimeClass gets no step and is listed in spec.excluded with the reason, so the plan covers only the workloads it would change."),
 		mcp.WithString("kubeconfig_path",
 			mcp.Description("Path to a kubeconfig file (used when scan_report_path is empty and an inline scan must run).")),
 		mcp.WithString("context",

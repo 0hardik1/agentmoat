@@ -53,6 +53,13 @@ The plan source is either an inline scan (default) or a stored ScanReport
 on disk (--scan). Either way, the planner is a pure function: the same
 input always produces the same plan and the same plan hash.
 
+The plan has a step only for a workload that has no RuntimeClass now. A
+workload that already has one is listed under "excluded" with the reason:
+it has the class of the plan (nothing to change), or it has another class
+(the plan does not replace it, because a rollback could not put it back).
+So apply, 'verify --plan', and rollback with one plan cover the workloads
+that this plan moves, and not the ones that an earlier plan moved.
+
 Each step patches only runtimeClassName. Placement is the RuntimeClass's
 job: its scheduling.nodeSelector and tolerations are merged into every pod
 at admission. Pass --add-toleration only when your RuntimeClass lacks

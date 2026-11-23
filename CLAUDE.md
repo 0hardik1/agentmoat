@@ -82,7 +82,9 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   is a `PreflightReport`; `scan --facts` reads it. See `docs/gpu-nvproxy.md`.
 - `pkg/planner/`: pure function from `ScanReport` to `MigrationPlan`.
   Same scan in, same plan and same SHA-256 `planHash` out. Don't break
-  determinism.
+  determinism. A step is a change: a workload that already has a
+  RuntimeClass gets no step (`runtimeClassBlocker`), because `rollback`
+  undoes a plan by removing the class.
 - `pkg/applier/`: the only package that mutates the cluster. Strategic
   merge patch with `runtimeClassName`, the two namespace annotations
   (`idempotency.go`: `plan-hash` when an apply is complete, `apply-started`

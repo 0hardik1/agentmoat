@@ -176,7 +176,12 @@ The limits of this, in plain words:
 - `rollback` removes the RuntimeClass of the plan from the workloads of the
   plan. It has no record of each workload, so it cannot tell a workload that
   this apply changed from one that had the same RuntimeClass before the
-  apply. The two lose it.
+  apply. The two lose it. `plan` keeps this case out of a plan: it makes a
+  step only for a workload that has no RuntimeClass in the scan, so the
+  workloads of a plan are the ones that its apply changes. The case stays
+  possible when the cluster changes between the scan and the apply, or when
+  two plans from one scan list the same workload. Use a plan from a current
+  scan.
 - After an apply that did not finish, a workload of the plan that has
   another RuntimeClass, or none, is left as it is: the apply did not get to
   it.
@@ -188,7 +193,11 @@ leaves `plan-hash` only.
 ### One plan for a namespace at a time
 
 The two annotations hold the hash of one plan. The newest `apply` has the
-namespace:
+namespace. In a pipeline this is each run: the plan of run 2 has only the
+workloads that are new since run 1 (a workload that has the RuntimeClass
+gets no step), and its apply takes the namespace from the plan of run 1. A
+rollback in run 2 then undoes run 2 only, and the workloads of run 1 stay in
+the sandbox.
 
 - When an `apply` starts in a namespace that has the annotation of another
   plan, it replaces it (the same write sets `apply-started` and removes the

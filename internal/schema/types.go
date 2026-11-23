@@ -495,8 +495,12 @@ type WorkloadRef struct {
 type ExcludedWorkload struct {
 	Target WorkloadRef `json:"target" yaml:"target"`
 
-	// Compatibility is the verdict from the source scan that drove the
-	// exclusion ("incompatible" or "review" when IncludeReview=false).
+	// Compatibility is the verdict of the workload in the source scan. It
+	// is the cause of the exclusion for "incompatible", and for "review"
+	// when IncludeReview=false. A workload can also be excluded for a
+	// cause that is not its verdict (it already has a RuntimeClass, or its
+	// kind cannot be patched in place), and then this can be "compatible".
+	// Reason always has the cause.
 	Compatibility Compatibility `json:"compatibility" yaml:"compatibility"`
 
 	// Reason is a one-sentence rationale ("workload is incompatible:
