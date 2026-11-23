@@ -59,6 +59,20 @@ After a wait it means that the workloads did not come up, and the reader of a
 job summary cannot see the command line to tell the two apart. The table then
 has a Ready column (the Ready pods of all pods of the step).
 
+The report of `verify -f` has three more things, because its list of
+workloads comes from manifest files:
+
+- The headline of a pass says what "all" is: "All 9 workload(s) are verified.
+  These are the workloads of the input that ask for RuntimeClass `gvisor`."
+  The counts have a column for the workloads that verify did not look at.
+- A workload that verify could not check makes the headline "⚠️ 1
+  workload(s) could not be checked. This is not a pass." The exit code for
+  it is `1` ([exit codes](exit-codes.md#verify--f-exit-codes-4-and-1)), and a
+  job summary shows no exit code. The workloads are in a "Not checked" table
+  above the results, each with the file and the reason.
+- Each name, kind, file, and reason is text from a manifest, and goes
+  through the same escapes as the scan report.
+
 `probe nvproxy` writes the preflight report with the probe
 result in the facts: the `runsc` release, the number of drivers that nvproxy
 supports, and the support status of each group of GPU nodes.

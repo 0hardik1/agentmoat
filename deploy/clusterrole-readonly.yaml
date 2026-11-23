@@ -7,6 +7,10 @@
 # README's promise that "a read-only kubeconfig is sufficient to run scan and
 # plan." For `apply`/`rollback`, use deploy/clusterrole-apply.yaml instead.
 #
+# `verify -f` needs no more than this role. For a kind that it has no reader
+# for (an Argo Rollout, for example) it lists pods only, by the selector of
+# the manifest, so the role has no rule for such a kind.
+#
 # Apply:
 #   kubectl apply -f deploy/clusterrole-readonly.yaml
 apiVersion: rbac.authorization.k8s.io/v1

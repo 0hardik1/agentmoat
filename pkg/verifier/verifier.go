@@ -78,11 +78,13 @@ package verifier
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
 	corev1 "k8s.io/api/core/v1"
@@ -145,8 +147,11 @@ func Verify(ctx context.Context, opts Options) (*schema.VerifyReport, error) {
 		GeneratedAt:      time.Now().UTC().Format(time.RFC3339),
 		Cluster:          opts.Cluster,
 		AgentmoatVersion: opts.AgentmoatVersion,
-		PlanHash:         opts.Plan.Metadata.PlanHash,
 		InPodProbe:       opts.InPodProbe,
+	}
+	steps, selectors := stepsOf(opts)
+	if opts.Plan != nil {
+		report.Metadata.PlanHash = opts.Plan.Metadata.PlanHash
 	}
 
 	// Lazily build the default ExecRunner if the caller asked for the
@@ -165,14 +170,15 @@ func Verify(ctx context.Context, opts Options) (*schema.VerifyReport, error) {
 	}
 
 	deps := stepDeps{
-		client:       opts.Client,
-		doProbe:      opts.InPodProbe,
-		exec:         probe,
-		placement:    newPlacementChecker(opts.Client),
-		stderr:       stderr,
-		requireReady: opts.Wait > 0,
+		client:        opts.Client,
+		doProbe:       opts.InPodProbe,
+		exec:          probe,
+		placement:     newPlacementChecker(opts.Client),
+		stderr:        stderr,
+		requireReady:  opts.Wait > 0,
+		selectors:     selectors,
+		fromManifests: opts.Plan == nil,
 	}
-	steps := opts.Plan.Spec.Steps
 	var results []schema.VerifyResult
 	if opts.Wait > 0 {
 		// Look again until every step is ok or the time ends (wait.go).
@@ -189,11 +195,64 @@ func Verify(ctx context.Context, opts Options) (*schema.VerifyReport, error) {
 		}
 	}
 
+	// A target from a manifest has its origin in the report. A result
+	// with the status statusUnknown is not a result: it leaves the list
+	// here, so that the three wire values stay the only ones.
+	results, notChecked := splitUnknown(results, opts.Targets)
 	report.Spec = schema.VerifySpec{
-		Summary: summariseResults(results),
-		Results: results,
+		Summary:    summariseResults(results),
+		Results:    results,
+		NotChecked: notChecked,
 	}
+	report.Spec.Summary.NotChecked = len(notChecked)
 	return report, nil
+}
+
+// statusUnknown is the status of a look that gave no verdict: a target that
+// the verifier reads through the selector of a manifest, with no pods. It
+// is not a wire value and it never leaves this package. Inside the package
+// it works as each status that is not ok does: with a wait time the loop
+// looks again, because pods can come.
+const statusUnknown schema.VerifyStatus = "unknown"
+
+// stepsOf returns the steps to walk: the steps of the plan, or one step for
+// each target of a verify from manifests, with the selectors of the targets
+// that have one.
+func stepsOf(opts Options) ([]schema.PlanStep, map[schema.WorkloadRef]*metav1.LabelSelector) {
+	if opts.Plan != nil {
+		return opts.Plan.Spec.Steps, nil
+	}
+	steps := make([]schema.PlanStep, 0, len(opts.Targets))
+	selectors := map[schema.WorkloadRef]*metav1.LabelSelector{}
+	for i, t := range opts.Targets {
+		steps = append(steps, schema.PlanStep{Order: i + 1, Target: t.Ref, RuntimeClassName: t.Expected})
+		if t.Selector != nil {
+			selectors[t.Ref] = t.Selector
+		}
+	}
+	return steps, selectors
+}
+
+// splitUnknown takes the looks that gave no verdict out of the results, and
+// returns them as the not-checked list. With targets (a verify from
+// manifests) it also puts the origin of each target on its result;
+// results[i] is the result of targets[i].
+func splitUnknown(results []schema.VerifyResult, targets []Target) ([]schema.VerifyResult, []schema.VerifyNotChecked) {
+	kept := make([]schema.VerifyResult, 0, len(results))
+	var notChecked []schema.VerifyNotChecked
+	for i, r := range results {
+		var origin *schema.Origin
+		if i < len(targets) {
+			origin = targets[i].Origin
+		}
+		if r.Status == statusUnknown {
+			notChecked = append(notChecked, schema.VerifyNotChecked{Target: r.Target, Reason: r.Message, Origin: origin})
+			continue
+		}
+		r.Origin = origin
+		kept = append(kept, r)
+	}
+	return kept, notChecked
 }
 
 // validate enforces the pre-API contract: both Client and Plan must be
@@ -204,8 +263,24 @@ func validate(opts Options) error {
 	if opts.Client == nil {
 		return fmt.Errorf("verifier: opts.Client is nil")
 	}
-	if opts.Plan == nil {
+	if opts.Plan == nil && opts.Targets == nil {
 		return fmt.Errorf("verifier: opts.Plan is nil")
+	}
+	if opts.Plan != nil && opts.Targets != nil {
+		return fmt.Errorf("verifier: opts.Plan and opts.Targets are set; a verify has one source")
+	}
+	seen := map[schema.WorkloadRef]bool{}
+	for _, t := range opts.Targets {
+		// The selector of a target is found by its reference, so two
+		// targets with one reference would share one. And a selector with
+		// no terms selects each pod of the namespace.
+		if seen[t.Ref] {
+			return fmt.Errorf("verifier: the target %s %s/%s is in opts.Targets two times", t.Ref.Kind, t.Ref.Namespace, t.Ref.Name)
+		}
+		seen[t.Ref] = true
+		if t.Selector != nil && !hasSelectorTerms(t.Selector) {
+			return fmt.Errorf("verifier: the selector of the target %s %s/%s has no terms", t.Ref.Kind, t.Ref.Namespace, t.Ref.Name)
+		}
 	}
 	if opts.Wait < 0 {
 		return fmt.Errorf("verifier: the wait time is %s; it must be zero or more", opts.Wait)
@@ -245,7 +320,23 @@ func (c stepCheck) reportReadError(stderr io.Writer) {
 		return
 	}
 	t := c.result.Target
-	_, _ = fmt.Fprintf(stderr, "verify error: %s/%s %s: %v\n", t.Kind, t.Namespace, t.Name, c.readErr)
+	_, _ = fmt.Fprintln(stderr, plainLine(fmt.Sprintf("verify error: %s/%s %s: %v", t.Kind, t.Namespace, t.Name, c.readErr)))
+}
+
+// plainLine makes text safe to print as one line on stderr. The names of a
+// target come from a plan file or from a manifest, and the error of the API
+// server repeats them. Each control character and each format character
+// becomes U+FFFD, so that a name cannot start a new line, move the cursor,
+// or clear the screen of a terminal. It does no more than that: the table
+// renderer has the same rule (termLine in pkg/output), and the report has
+// the text as it is in JSON and YAML.
+func plainLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return unicode.ReplacementChar
+		}
+		return r
+	}, s)
 }
 
 // checkStep looks at one step one time. It is a pure function modulo the
@@ -274,8 +365,11 @@ func checkStep(ctx context.Context, deps stepDeps, step schema.PlanStep) stepChe
 		Expected: expected,
 	}
 
-	t, err := resolveTarget(ctx, deps.client, step.Target)
+	t, err := deps.resolve(ctx, step.Target)
 	if err != nil {
+		if deps.fromManifests && goneWithNoVerdict(step.Target, err, &result) {
+			return stepCheck{result: result}
+		}
 		result.Status = schema.VerifyStatusError
 		// We surface the underlying error so an operator sees the API
 		// server's reason (NotFound, Forbidden, etc.) rather than a
@@ -285,9 +379,7 @@ func checkStep(ctx context.Context, deps stepDeps, step schema.PlanStep) stepChe
 	}
 
 	pods := classVerdict(t, &result)
-	if result.Status == schema.VerifyStatusMismatch && deps.requireReady {
-		explainStuckRollout(t, &result)
-	}
+	refineClassVerdict(deps, t, &result)
 	if result.Status != schema.VerifyStatusOK || len(pods) == 0 {
 		// A verdict with no pods behind it: a mismatch, an error, or an
 		// ok from the pod template. There is nothing more to look at.
@@ -305,6 +397,16 @@ func checkStep(ctx context.Context, deps stepDeps, step schema.PlanStep) stepChe
 			result.Message = np.Message
 			return stepCheck{result: result, pods: pods}
 		}
+	}
+
+	if t.ended != "" {
+		// A pod that ran to its end has the class, and it ran on a node
+		// that the RuntimeClass selects. It is never Ready again and has
+		// no container to exec into, so the two checks below do not
+		// apply. With no pods in the stepCheck, the wait loop takes the
+		// result as final.
+		result.Message = t.ended + "; verify looked at its runtimeClassName, and did not read readiness"
+		return stepCheck{result: result}
 	}
 
 	// Readiness: only with a wait time. See readiness.go.
@@ -325,6 +427,68 @@ func checkStep(ctx context.Context, deps stepDeps, step schema.PlanStep) stepChe
 		applyProbeResult(ctx, deps.exec, pods, &result)
 	}
 	return stepCheck{result: result, pods: pods}
+}
+
+// goneWithNoVerdict handles a Job or a bare Pod from a manifest that is not
+// in the cluster. It sets the result to "no verdict" and returns true; for
+// each other kind and each other error it returns false and changes nothing.
+//
+// A Deployment that is not in the cluster is evidence: the deploy did not
+// make it, and nothing removes it. A Job and a Pod are different. After a
+// deploy that worked, the object can be gone: a Job with
+// ttlSecondsAfterFinished, a hook that its tool deletes when it succeeds, a
+// test pod that an install never makes. The verifier cannot tell these from
+// an object that was not deployed, so "not found" is not a reason for exit
+// code 4, which a pipeline acts on as a rollback signal. It is also not a
+// pass: the target goes to the not-checked list.
+//
+// This is for a list from manifests only. A plan has no step for a Job or a
+// Pod (`apply` cannot patch them), so the question does not come up there.
+func goneWithNoVerdict(ref schema.WorkloadRef, err error, result *schema.VerifyResult) bool {
+	if !errors.Is(err, errNotFound) || (ref.Kind != kindJob && ref.Kind != kindPod) {
+		return false
+	}
+	// The text is short on purpose: the Markdown renderer cuts a cell at a
+	// fixed length, and the last sentence (what to do) must stay, also for
+	// a name of the full length that Kubernetes permits. A test in
+	// pkg/output renders it.
+	result.Status = statusUnknown
+	result.Message = fmt.Sprintf("%s %s/%s is not in the cluster. That is not evidence that the deploy failed: "+
+		"a %s can be removed after it ends (a time to live, a hook delete policy), or be made only on request (a chart test). "+
+		"Look at the deploy, or leave the object out of the input",
+		ref.Kind, ref.Namespace, ref.Name, ref.Kind)
+	return true
+}
+
+// refineClassVerdict adds to the verdict on the class what the target says
+// about it: that the pods are from a selector, why a rollout does not go
+// on, and that a Job failed.
+func refineClassVerdict(deps stepDeps, t target, result *schema.VerifyResult) {
+	if t.bySelector {
+		markBySelector(result)
+	}
+	if result.Status == schema.VerifyStatusMismatch && deps.requireReady {
+		explainStuckRollout(t, result)
+	}
+	if result.Status == schema.VerifyStatusOK && deps.requireReady && t.failed != "" {
+		// The pod template has the class, and the Job did not come to a
+		// good end with it. With a wait time a step is ok only when the
+		// workload came up, so this is not ok. One look does not read how
+		// a workload does, for a Job as for a Deployment.
+		result.Status = schema.VerifyStatusMismatch
+		result.Message = fmt.Sprintf("%s; its pod template has runtimeClassName=%q", t.failed, result.Expected)
+	}
+}
+
+// markBySelector says on a result what the verdict is about: the verifier
+// did not read the object, so pods of another workload with the same labels
+// are in the list too.
+func markBySelector(result *schema.VerifyResult) {
+	result.Basis = schema.VerifyBasisSelector
+	if result.Status == schema.VerifyStatusOK {
+		result.Message = fmt.Sprintf("checked the pods that the selector of the manifest selects; verify did not read the %s object",
+			result.Target.Kind)
+	}
 }
 
 // explainStuckRollout adds to a class mismatch the reason that a wait most
@@ -363,6 +527,16 @@ func explainStuckRollout(t target, result *schema.VerifyResult) {
 func classVerdict(t target, result *schema.VerifyResult) []corev1.Pod {
 	if t.templateDecides {
 		return cronJobVerdict(t, result)
+	}
+	if len(t.pods) == 0 && t.bySelector {
+		// The verifier did not read the object, so it does not know if the
+		// workload wants pods. No pods is then not evidence of anything.
+		result.Status = statusUnknown
+		result.Message = fmt.Sprintf("no pods match the selector of the manifest, and verify does not read a %s object: "+
+			"it cannot tell a workload that is scaled to zero from one that is not deployed. "+
+			"Look at the object in the cluster, and at the runtimeClassName of its pods when it has some",
+			result.Target.Kind)
+		return nil
 	}
 	if len(t.pods) == 0 {
 		if t.hasTemplate && t.idle != "" {
@@ -457,7 +631,7 @@ func hasSelectorTerms(sel *metav1.LabelSelector) bool {
 // is propagated with a stage prefix.
 func controllerErr(kind string, target schema.WorkloadRef, err error) error {
 	if apierrors.IsNotFound(err) {
-		return fmt.Errorf("%s %s/%s not found", kind, target.Namespace, target.Name)
+		return fmt.Errorf("%s %s/%s %w", kind, target.Namespace, target.Name, errNotFound)
 	}
 	return fmt.Errorf("getting %s %s/%s: %w", kind, target.Namespace, target.Name, err)
 }

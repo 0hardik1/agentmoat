@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
+	"github.com/0hardik1/agentmoat/pkg/agentmoat"
 )
 
 // TestVerifyHelpListsFlags confirms `agentmoat verify --help` mentions the
@@ -23,7 +24,7 @@ func TestVerifyHelpListsFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify --help: %v", err)
 	}
-	wantFlags := []string{"--plan", "--in-pod-probe"}
+	wantFlags := []string{"--plan", "--in-pod-probe", "--filename", "--runtime-class", "--wait", "not checked"}
 	for _, f := range wantFlags {
 		if !strings.Contains(stdout, f) {
 			t.Errorf("verify --help should mention %q", f)
@@ -31,38 +32,59 @@ func TestVerifyHelpListsFlags(t *testing.T) {
 	}
 }
 
-// TestVerifyRequiresPlan asserts cobra's MarkFlagRequired is wired up:
-// `agentmoat verify` with no --plan errors out before any K8s call.
-func TestVerifyRequiresPlan(t *testing.T) {
-	_, _, err := runRoot("verify")
-	if err == nil {
-		t.Fatalf("expected error when --plan is missing")
+// TestVerifyRequiresOneSource: verify needs a plan or manifests, and not the
+// two. Each refusal comes before any Kubernetes call: the kubeconfig of the
+// test points at no cluster.
+func TestVerifyRequiresOneSource(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "no-such-kubeconfig"))
+	manifests := writeScanFiles(t, map[string]string{"web.yaml": plainWeb})
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no source", []string{"verify"}, "--plan <plan file>, or -f"},
+		{"two sources", []string{"verify", "--plan", "plan.json", "-f", manifests}, "--plan or -f, not the two"},
+		{"a class with a plan", []string{"verify", "--plan", "plan.json", "--runtime-class", "kata"}, "--runtime-class is for -f"},
+		{"two namespaces", []string{"verify", "-f", manifests, "-n", "a", "-n", "b"}, "takes one namespace"},
+		// The input errors of -f come before the client is built: this
+		// file has no workload that asks for the class.
+		{"nothing asks for the class", []string{"verify", "-f", manifests, "-n", "shop"}, "there is nothing to verify"},
+		{"a class name that is not a name", []string{"verify", "-f", manifests, "--runtime-class", "a b"}, "not a valid RuntimeClass name"},
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "plan") {
-		t.Errorf("error should mention --plan: %v", err)
+	for _, tc := range tests {
+		_, _, err := runRoot(tc.args...)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want it to have %q", tc.name, err, tc.want)
+		}
 	}
 }
 
-// TestHasVerifyFailures pins the exit-code-shaping helper. The CLI uses
-// these summary counts to choose between exit 0 and exit 4.
-func TestHasVerifyFailures(t *testing.T) {
+// TestVerifyExitCode pins the exit code of a report. The CLI and the MCP
+// server use the same function. A failure wins over "not checked": evidence
+// in the cluster is the rollback signal.
+func TestVerifyExitCode(t *testing.T) {
 	cases := []struct {
 		name string
 		s    schema.VerifySummary
-		want bool
+		want int
 	}{
-		{"all_ok", schema.VerifySummary{Total: 2, OK: 2}, false},
-		{"mismatch", schema.VerifySummary{Total: 2, OK: 1, Mismatch: 1}, true},
-		{"error", schema.VerifySummary{Total: 2, OK: 1, Error: 1}, true},
-		{"both", schema.VerifySummary{Total: 3, OK: 1, Mismatch: 1, Error: 1}, true},
-		{"empty", schema.VerifySummary{}, false},
+		{"all_ok", schema.VerifySummary{Total: 2, OK: 2}, 0},
+		{"mismatch", schema.VerifySummary{Total: 2, OK: 1, Mismatch: 1}, 4},
+		{"error", schema.VerifySummary{Total: 2, OK: 1, Error: 1}, 4},
+		{"both", schema.VerifySummary{Total: 3, OK: 1, Mismatch: 1, Error: 1}, 4},
+		{"empty", schema.VerifySummary{}, 0},
+		{"not_checked", schema.VerifySummary{Total: 2, OK: 2, NotChecked: 1}, 1},
+		{"not_checked_only", schema.VerifySummary{NotChecked: 1}, 1},
+		{"not_checked_and_mismatch", schema.VerifySummary{Total: 1, Mismatch: 1, NotChecked: 1}, 4},
+		{"excluded_is_not_a_failure", schema.VerifySummary{Total: 1, OK: 1, Excluded: 7}, 0},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			r := &schema.VerifyReport{Spec: schema.VerifySpec{Summary: tc.s}}
-			if got := hasVerifyFailures(r); got != tc.want {
-				t.Errorf("hasVerifyFailures(%+v) = %v, want %v", tc.s, got, tc.want)
+			if got := agentmoat.VerifyExitCode(r); got != tc.want {
+				t.Errorf("VerifyExitCode(%+v) = %d, want %d", tc.s, got, tc.want)
 			}
 		})
 	}

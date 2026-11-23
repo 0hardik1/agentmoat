@@ -499,43 +499,19 @@ func summarizeReasons(reasons []schema.Reason) string {
 // nodeSelector.
 func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor bool) error {
 	s := NewStyles(useColor)
-	sum := report.Spec.Summary
 
 	if _, err := fmt.Fprintln(w, s.Bold.Render("agentmoat verify")); err != nil {
 		return err
 	}
-
-	chips := []string{
-		"plan-hash: " + report.Metadata.PlanHash,
-		fmt.Sprintf("in-pod-probe: %v", report.Metadata.InPodProbe),
-	}
-	// A report after a wait says so, and says how the wait ended: "3 not
-	// ok" after one look and "3 not ok after 3 minutes" are different
-	// facts for the person who decides on a rollback.
 	waited := report.Metadata.Wait != nil
-	if waited {
-		chips = append(chips, "wait: "+describeWait(report.Metadata.Wait))
-	}
-	if _, err := fmt.Fprintln(w, s.Muted.Render(strings.Join(chips, "   "))); err != nil {
+	if _, err := fmt.Fprintln(w, s.Muted.Render(strings.Join(verifyChips(report), "   "))); err != nil {
 		return err
 	}
 
-	// SUMMARY block: total headline followed by a horizontal bar chart over
-	// the per-result verdict buckets.
-	if _, err := fmt.Fprintf(w, "%s  %d results\n", s.Bold.Render("SUMMARY"), sum.Total); err != nil {
+	if err := writeVerifySummary(s, w, report, useColor); err != nil {
 		return err
 	}
-	items := []barItem{
-		{Symbol: symbolOK, Label: "ok", Count: sum.OK, Style: s.Success, NoColorFill: '█'},
-		{Symbol: symbolWarn, Label: "mismatch", Count: sum.Mismatch, Style: s.Warn, NoColorFill: '▓'},
-		{Symbol: symbolFail, Label: "error", Count: sum.Error, Style: s.Danger, NoColorFill: '▒'},
-	}
-	if chart := renderSummaryBar(items, summaryBarWidth(w), useColor); chart != "" {
-		if _, err := fmt.Fprintln(w, chart); err != nil {
-			return err
-		}
-	}
-	if _, err := fmt.Fprintln(w); err != nil {
+	if err := writeVerifyNotCheckedTable(s, w, report.Spec.NotChecked); err != nil {
 		return err
 	}
 
@@ -558,16 +534,19 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 		row := []string{
 			strconv.Itoa(r.Order),
 			StatusBadge(s, string(r.Status)),
-			tr.cell(fmt.Sprintf("%s/%s/%s", r.Target.Kind, r.Target.Namespace, r.Target.Name), maxNameWidth),
-			r.Expected,
-			displayActual(r.Actual),
+			// With manifests as the source, the names and the class are
+			// text from a file, and a message can repeat them. termLine
+			// replaces control characters; a name from a cluster has none.
+			tr.cell(termLine(fmt.Sprintf("%s/%s/%s", r.Target.Kind, r.Target.Namespace, r.Target.Name)), maxNameWidth),
+			termLine(r.Expected),
+			termLine(displayActual(r.Actual)),
 			summarizeProbe(r.Probe),
 			summarizeNodePlacement(r.NodePlacement),
 		}
 		if waited {
 			row = append(row, summarizeReadiness(r))
 		}
-		row = append(row, tr.cell(r.Message, maxFreeformWidth))
+		row = append(row, tr.cell(termLine(r.Message), maxFreeformWidth))
 		t.Row(row...)
 	}
 	if _, err := fmt.Fprintln(w, t.Render()); err != nil {
@@ -577,6 +556,87 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 		return err
 	}
 	return maybePrintTruncationHint(s, w, tr, "messages")
+}
+
+// writeVerifySummary prints the SUMMARY block of the verify table: the total
+// headline, a horizontal bar chart over the verdicts of the results, and
+// (for a verify from manifests) the count of the workloads that verify did
+// not look at. An empty line ends the block.
+func writeVerifySummary(s *Styles, w io.Writer, report *schema.VerifyReport, useColor bool) error {
+	sum := report.Spec.Summary
+	if _, err := fmt.Fprintf(w, "%s  %d results\n", s.Bold.Render("SUMMARY"), sum.Total); err != nil {
+		return err
+	}
+	items := []barItem{
+		{Symbol: symbolOK, Label: "ok", Count: sum.OK, Style: s.Success, NoColorFill: '█'},
+		{Symbol: symbolWarn, Label: "mismatch", Count: sum.Mismatch, Style: s.Warn, NoColorFill: '▓'},
+		{Symbol: symbolFail, Label: "error", Count: sum.Error, Style: s.Danger, NoColorFill: '▒'},
+	}
+	if chart := renderSummaryBar(items, summaryBarWidth(w), useColor); chart != "" {
+		if _, err := fmt.Fprintln(w, chart); err != nil {
+			return err
+		}
+	}
+	if report.Metadata.Source != nil {
+		if _, err := fmt.Fprintln(w, s.Muted.Render(fmt.Sprintf("%d workload(s) of the input do not ask for the class and were not looked at",
+			sum.Excluded))); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(w)
+	return err
+}
+
+// verifyChips is the line under the title of the verify table: where the
+// list of workloads came from, and how the run was made.
+func verifyChips(report *schema.VerifyReport) []string {
+	chips := []string{
+		"plan-hash: " + report.Metadata.PlanHash,
+		fmt.Sprintf("in-pod-probe: %v", report.Metadata.InPodProbe),
+	}
+	if report.Metadata.Source != nil {
+		// A verify from manifest files has no plan. The class name is a
+		// value that the caller gave, so it goes through termLine.
+		chips = []string{
+			"source: manifests",
+			"runtime-class: " + termLine(report.Metadata.RuntimeClassName),
+			fmt.Sprintf("in-pod-probe: %v", report.Metadata.InPodProbe),
+		}
+	}
+	// A report after a wait says so, and says how the wait ended: "3 not
+	// ok" after one look and "3 not ok after 3 minutes" are different
+	// facts for the person who decides on a rollback.
+	if report.Metadata.Wait != nil {
+		chips = append(chips, "wait: "+describeWait(report.Metadata.Wait))
+	}
+	return chips
+}
+
+// writeVerifyNotCheckedTable prints the workloads that a verify from
+// manifests has no verdict for, above the results: a report with entries
+// here is not a pass, and the reader must see that first. The names and the
+// reasons have text from a manifest; termLine replaces control characters.
+func writeVerifyNotCheckedTable(s *Styles, w io.Writer, notChecked []schema.VerifyNotChecked) error {
+	if len(notChecked) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, s.Bold.Render(fmt.Sprintf("NOT CHECKED (%d): this is not a pass", len(notChecked)))); err != nil {
+		return err
+	}
+	for i, n := range notChecked {
+		if i == maxVerifyNotOK {
+			if _, err := fmt.Fprintln(w, s.Muted.Render(fmt.Sprintf("  ... and %d more (use --output json)", len(notChecked)-maxVerifyNotOK))); err != nil {
+				return err
+			}
+			break
+		}
+		if _, err := fmt.Fprintf(w, "  %s %s: %s\n", symbolWarn,
+			termLine(fmt.Sprintf("%s/%s/%s", n.Target.Kind, n.Target.Namespace, n.Target.Name)), termLine(n.Reason)); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(w)
+	return err
 }
 
 // maxVerifyNotOK is the most steps that the NOT OK block below the verify
@@ -607,7 +667,8 @@ func writeVerifyNotOK(s *Styles, w io.Writer, results []schema.VerifyResult) err
 			_, err := fmt.Fprintln(w, s.Muted.Render(fmt.Sprintf("  ... and %d more (use --output json)", len(notOK)-maxVerifyNotOK)))
 			return err
 		}
-		if _, err := fmt.Fprintf(w, "  %d  %s/%s/%s: %s\n", r.Order, r.Target.Kind, r.Target.Namespace, r.Target.Name, r.Message); err != nil {
+		if _, err := fmt.Fprintf(w, "  %d  %s: %s\n", r.Order,
+			termLine(fmt.Sprintf("%s/%s/%s", r.Target.Kind, r.Target.Namespace, r.Target.Name)), termLine(r.Message)); err != nil {
 			return err
 		}
 	}

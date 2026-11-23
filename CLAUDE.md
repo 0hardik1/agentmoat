@@ -40,7 +40,7 @@ invocation more than twice, prefer extending a target.
 | `make check-gvisor-latest`  | Same, plus exit 2 when a newer gVisor release is published. The weekly `gvisor-drift.yml` workflow runs this and opens (or updates) a `gvisor-drift` issue when the pin is behind; the run fails only on a real error, and it does not open a PR. See `docs/gvisor-version.md`. |
 | `make check-device-cgroup` | Checks that every runsc sandbox on a node is confined to a device cgroup (gVisor 20261116.0 and newer): `/dev/null` opens, `/dev/kmsg` is refused. `NODE=<kind node>` runs it through `docker exec`; `make e2e` runs it on the kind worker. |
 | `make kind-up`    | Builds the gVisor-enabled kind worker image and creates the local cluster. Idempotent; an existing cluster is reused as is, so run `make kind-down` first after a gVisor pin bump. |
-| `make e2e`        | Builds, brings up kind, runs scan/plan/apply/rollback end-to-end against a real `runsc` runtime, tears down. Honors `KEEP_CLUSTER=1`. |
+| `make e2e`        | Builds, brings up kind, runs scan/plan/apply/verify/rollback end-to-end against a real `runsc` runtime, and the move through files (`patch`, a deploy, `verify -f`), tears down. Honors `KEEP_CLUSTER=1`. |
 | `make offline-smoke` | Builds, then runs `scan -f`, the `--fail-on` gate, the Markdown and SARIF outputs, and `patch` on the manifest fixtures in `test/testdata/manifests` and `test/testdata/patch` with no cluster. For `patch --kustomize` it builds the component with `kubectl kustomize` (and `helm template`) when the tools are installed. Then it runs the script of the GitHub Action (`scripts/action-smoke.sh`) with a model of the runner. Needs `jq`, `curl`, and `tar`. CI runs it on every PR. Run it after changes to the manifest scanner, the gate, `pkg/patcher`, `pkg/output`, `action.yml`, or `scripts/github-action.sh`. |
 | `make kind-down`  | Tear down the kind cluster from `make kind-up`. |
 
@@ -68,6 +68,9 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   `--kustomize <dir>`: it reads the directory (`readKustomizeDir`, which
   refuses a directory with files of a person), plans the patch files and
   the list, and writes the patch files first and the list last.
+  `verify_manifests.go` is the source of `verify -f`: it makes the list of
+  workloads to check from manifest files (each workload that asks for the
+  class), and `VerifyExitCode` in `verify.go` is the exit code of a report.
 - `pkg/scanner/`: returns canonical `[]scanner.Workload` from one of two
   sources. `Enumerate` lists a cluster through `client-go`. `FromManifests`
   decodes YAML or JSON text with no cluster (`ReadManifestPaths` reads the
@@ -78,8 +81,9 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   position, so keep the reading order of `readValue` and the order in
   `patcher.collectObjects` the same. Each one also has its identity as the
   file has it (`ManifestResult.Written`, a `ManifestObject`: apiVersion,
-  kind, name, namespace, and the path of the pod spec), which is not the
-  same as the names in a report; the Kustomize patches use it.
+  kind, name, namespace, the path of the pod spec, and `spec.selector`),
+  which is not the same as the names in a report; the Kustomize patches and
+  `verify -f` use it.
 - `pkg/classifier/`: pure-function rule engine. `Classify(w, registry)`
   returns a `Verdict`; `ClassifyWithFacts` adds `schema.ClusterFacts` so a
   rule's `Refine` hook can move its severity (`gpu-passthrough` in
@@ -126,7 +130,11 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   `nodeSelector` selects; `explain` renders the embedded docs and
   per-workload evidence. In the verifier, `target.go` reads one workload
   (its pods, its pod template, and whether it wants pods now), `wait.go` is
-  the `--wait` loop, and `readiness.go` says why a pod is not Ready.
+  the `--wait` loop, and `readiness.go` says why a pod is not Ready. The
+  list of what to check is a plan or `Options.Targets` (`verify -f`). A
+  target of a kind with no reader has the selector of its manifest, and the
+  verifier lists pods by it. A target with no verdict (that selector has no
+  pods) goes to `spec.notChecked` and never to the results.
 - `pkg/output/`: the renderers. Table, JSON, and YAML for every document;
   Markdown (`markdown.go`, `markdown_pipeline.go`) for a CI job summary or a
   pull-request comment; SARIF (`sarif.go`) for `scan` only. `patch.go` has
@@ -204,7 +212,10 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
    option for a client or a kubeconfig at all; keep it so. Do not use a fake client
    either: the report must not name a cluster that it did not read. A test
    in `pkg/agentmoat/scan_manifests_test.go` sets a kubeconfig that points
-   at a dead server and a client that fails on any call.
+   at a dead server and a client that fails on any call. `verify -f` is not
+   in this rule: it reads the files with the same code and then reads the
+   cluster, which is its job. It reads and refuses the input before it
+   builds the client (a test in `pkg/agentmoat/verify_manifests_test.go`).
 10. **A file scan fails closed.** Exit 0 from `scan -f` means the input was
     read and nothing in it failed the gate. A document that does not parse
     is an error, not a skip. A workload kind with no containers (an overlay
@@ -236,11 +247,25 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
     for a moment in each restart. The wait time is checked between looks and
     is never a deadline on the API calls, so a report after a timeout has
     the reason for each step. A workload that wants no pods now is checked
-    on its pod template and does not use the wait time. Without `--wait`,
+    on its pod template and does not use the wait time (the exception: a
+    Job with the condition Failed is a mismatch with a wait time, and is
+    looked at again like each other step that is not ok). Without `--wait`,
     verify looks one time and does not read readiness. The CLI installs no
     signal handler: an interrupt must end the process by the signal, so
     that Ctrl-C on `verify --wait 3m || rollback --dry-run=false` does not
     start a rollback (a test in `cmd/agentmoat/verify_test.go` checks it).
+    For `verify -f` the same signal has one more rule: exit 4 comes only
+    from what the cluster shows. Where the files do not name what is in the
+    cluster, verify does not guess. It refuses the run before a cluster read
+    (input that is not rendered, a workload with no namespace, no workload
+    that asks for the class), or it lists the one workload as not checked
+    (an object with `generateName`, a kind with no reader and no selector,
+    a selector with no pods, a Job or a bare Pod that is not in the
+    cluster: a time to live or a hook delete policy removes those after a
+    deploy that worked). Each of the two is exit 1, and the report says
+    "not a pass" in words. `status` keeps its three values. A pod that ran
+    to its end is checked on its class only, never on readiness.
+    `agentmoat.VerifyExitCode` is the one place for this code.
 13. **`patch` adds one line for each workload and changes nothing else.**
     The edit is a text edit: comments, key order, quotes, indent, and line
     endings stay. Do not encode YAML from objects to write a file. A form
@@ -290,7 +315,8 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   `make e2e`.
 - **Phase 3** (verifier + explainer): shipped. `verify` (pod
   `runtimeClassName` check, optional `--in-pod-probe`, `--wait` for a
-  pipeline that runs it directly after `apply`) and `explain`
+  pipeline that runs it directly after `apply`, `-f` to check the workloads
+  of manifest files with no plan) and `explain`
   (embedded docs plus `explain namespace` / `explain workload` deep scans)
   are wired in `cmd/agentmoat/` and exercised by `make e2e`.
 - **Phase 4** (MCP server): shipped. `cmd/agentmoat-mcp/` serves 10 tools

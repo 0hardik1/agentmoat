@@ -25,8 +25,8 @@ are the interface between agentmoat and a pipeline:
 this page a test proves and which parts it does not.
 
 The action, the container image, and the scan of manifests (`scan -f`) are
-in the releases from `v0.3.0`. `patch` (section 3) is in the releases from
-`v0.4.0`. The release `v0.1.0` has none of them.
+in the releases from `v0.3.0`. `patch` and `verify -f` (section 3) are in the
+releases from `v0.4.0`. The release `v0.1.0` has none of them.
 
 ## 1. The pull request check
 
@@ -186,10 +186,8 @@ GitLab. [`output-formats.md`](output-formats.md) has the two report formats.
   scan ignores it, and Kubernetes does too (or refuses the object).
 - The cluster: the nodes, the RuntimeClass, the GPU drivers.
 
-The check of the result is `agentmoat verify` after the deploy. It needs a
-plan from before the deploy:
-[Check the result of a change that came through the source](#check-the-result-of-a-change-that-came-through-the-source)
-has the steps.
+The check of the result is `agentmoat verify -f` after the deploy:
+[Check the result of a change that came through the source](#check-the-result-of-a-change-that-came-through-the-source).
 
 ## 2. The migration pipeline
 
@@ -351,8 +349,8 @@ a branch         agentmoat patch -f <dir> --dry-run=false     one added line for
                  (with --kustomize <dir>: patch files for one overlay, and no source file changes)
 pull request     the check of section 1 runs on the result; a person reads the diff
 merge            your deploy pipeline or deploy tool deploys the change
-after the deploy agentmoat verify --plan <the plan from before> --wait 5m
-                 (Deployment, StatefulSet, DaemonSet, CronJob; see below)
+after the deploy agentmoat verify -f <dir> -n <namespace> --wait 5m
+                 (reads the cluster; the files say which workloads to check)
 rollback         git revert
 ```
 
@@ -643,37 +641,103 @@ nothing.
 
 ### Check the result of a change that came through the source
 
-`verify` checks the workloads of a plan, and a plan has a step only for a
-workload that has no RuntimeClass at the time of the scan. So the plan for
-this check must be from before the deploy:
+A move through the repository has no plan. The manifest files say which
+workloads must run in the sandbox, so `verify -f` takes the list from the
+files and the live state from the cluster:
 
 ```sh
-# Before the deploy: the workloads do not have the class yet.
-agentmoat scan --namespace shop --fail-on none --output json > scan.json
-agentmoat plan --scan scan.json --output json > plan.json     # keep this file
+# After the deploy of the source that now has runtimeClassName:
+agentmoat verify -f ./k8s -n shop --wait 5m
 
-# ... the deploy tool deploys the source that now has runtimeClassName ...
-
-# After the deploy: do the workloads of that plan run in the sandbox?
-agentmoat verify --plan plan.json --wait 5m
+# Kustomize and Helm: give the objects as they were deployed.
+kustomize build overlays/prod | agentmoat verify -f - --wait 5m
+helm template shop ./chart -f values-prod.yaml --no-hooks | agentmoat verify -f - -n shop --wait 5m
 ```
 
-This check covers the kinds that a plan has a step for: Deployment,
-StatefulSet, DaemonSet, and CronJob. `patch` also edits a Pod, a Job, and
-other kinds with a pod template (an Argo `Rollout`, for example). A plan
-from a cluster has no step for those, so `verify` does not look at them, and
-its exit code says nothing about them. agentmoat has no check after the
-deploy for those kinds. Look at the `runtimeClassName` of their pods.
+`helm template` also prints the hooks of a chart: a Job that Helm can delete
+when it succeeds, and the test pods, which an install does not make. With
+`--no-hooks` they are not in the output (checked with Helm 4.3), so verify
+does not look at them. Without the flag, verify lists each hook object that
+is not in the cluster as not checked (see the table of kinds below).
 
-Limit the scan to the workloads that the change moves, with `--namespace`
-and `--selector` (a label selector). The plan has a step for each compatible
-workload of the scan that has no RuntimeClass, and verify reports a mismatch
-(exit `4`) for a workload of the plan that the change did not move.
+verify reads the files as `scan -f` does. Then it checks, in the cluster,
+each workload whose pod spec asks for the RuntimeClass (`--runtime-class`,
+default `gvisor`). It does not look at the other workloads of the input;
+the report has their count (`summary.excluded`).
 
-A plan from a scan after the deploy cannot do this. The workloads then have
-the class, that plan has no step for them, and verify checks nothing. It
-says so (`nothing was verified`, on stderr and in the Markdown report) and
-exits `0`.
+Use `--wait` directly after a deploy, for the reason in
+[Apply, verify, roll back](#apply-verify-roll-back): a workload is ok only
+when all its pods have the class, are Ready, and stayed Ready.
+
+| Exit code | Meaning | What the pipeline does |
+| --- | --- | --- |
+| `0` | Each workload that asks for the class runs with it (with `--wait`: and its pods stayed Ready). | Done. |
+| `4` | The cluster shows that one workload or more does not: a pod with no class, a Deployment (or another controller) that is not there, pods that are not Ready after the wait time, a Job that failed (with `--wait`). | The deploy did not give the sandbox. Revert, or find the cause. |
+| `1` | verify has no answer: an error, input that it refuses, or a workload that it could not check. | Not a pass, and not a reason for a revert. Read the message. |
+
+The rule for exit `4`: it comes only from what the cluster shows. When the
+files do not name what is in the cluster, verify does not guess. It refuses
+the run, or it lists the workload as not checked. Each of the two is exit
+`1`.
+
+#### What the input must be
+
+- **The objects as they were deployed.** Input with a kustomization file or
+  an overlay patch is refused: a name in such files is not always the name
+  in the cluster (an overlay adds a name prefix and a namespace). Render it,
+  and give `-` for standard input.
+- **`-n <namespace>` when the files name no namespace.** It is the namespace
+  that the objects were deployed to, and it is not a filter. verify refuses
+  a workload that has no namespace. It does not use `default`.
+- **The files after the change.** When no workload of the input asks for
+  the class, verify refuses the run (`there is nothing to verify`, exit
+  `1`). The usual cause is the wrong input: the base and not the overlay, or
+  the branch before the merge. This is different from `verify --plan` with a
+  plan that has no steps, which is exit `0` with a note.
+
+agentmoat does not know what your deploy tool deployed. You give it the
+files, so give it the same commit and the same render.
+
+#### Which kinds it can check
+
+| Kind in the files | How verify finds the pods | Result |
+| --- | --- | --- |
+| Deployment, StatefulSet, DaemonSet, CronJob | It reads the object from the cluster, and then its pods. This is the check of `verify --plan`. An object that is not in the cluster is an `error`: nothing removes these kinds. | `ok`, `mismatch`, or `error` |
+| Job, Pod (in the cluster) | The same. A pod that ran to its end (phase `Succeeded`) is checked on its `runtimeClassName` only: it is never Ready again. A Job that is finished is checked on its pod template. With `--wait`, a Job that failed is a `mismatch`, with the reason from the Job; verify looks at it again until the time ends, because a deploy tool can replace the Job. | `ok` or `mismatch` |
+| Job, Pod (not in the cluster) | After a deploy that worked, these can be gone: a Job with `ttlSecondsAfterFinished`, a hook that its tool deletes, a test pod that an install does not make. verify cannot tell that from an object that was not deployed. With `--wait` it looks again until the time ends. | Not checked |
+| Another kind with a pod template and a `spec.selector` (an Argo `Rollout`, a ReplicaSet) | It has no reader for the object. It lists the pods that the selector of the manifest selects, in the namespace of the object. | `ok` or `mismatch`, with `basis: selector` |
+| The same, when the selector selects no pods | It cannot tell "scaled to zero" from "not there". With `--wait` it looks again until the time ends. | Not checked |
+| A kind with no selector in the manifest (a Knative `Service`), and an object with `generateName` and no name | It cannot find the pods from the file. | Not checked |
+
+A result with `basis: selector` is about pods, not about the object. Pods of
+another workload that have the same labels count too. So do the pods of an
+earlier revision of the same object: an Argo `Rollout` that is paused on a
+canary step has old pods with no class, and it is a `mismatch` until the
+rollout is complete.
+
+A Job from before the change keeps its pod template (the template of a Job
+cannot change). When the deploy did not replace such a Job, the Job in the
+cluster has no class, and the result is a `mismatch`.
+
+A workload that is not checked has no result. The report lists it with the
+reason (`spec.notChecked`, and a block at the top of the table and of the
+Markdown report), and the exit code is `1` when no other workload failed.
+For such a workload, look at the `runtimeClassName` of its pods.
+
+#### Permissions
+
+The read-only role
+([`deploy/clusterrole-readonly.yaml`](../deploy/clusterrole-readonly.yaml))
+is sufficient. For a kind that verify has no reader for, it lists pods only,
+so the role needs no rule for that kind.
+
+#### What this check does not tell you
+
+- Nothing about a workload that does not ask for the class. When a change
+  removes `runtimeClassName` from a workload, verify does not look at that
+  workload. The pull request check of section 1 is the gate for the content
+  of the files.
+- Nothing about an object that is in the cluster and not in the files.
 
 ## 4. What is tested, and what is not
 
@@ -687,7 +751,8 @@ exits `0`.
 | `patch` on a Kustomize tree | `make offline-smoke`: the base is edited, an overlay patch is not, the output says that the input is not rendered, and the render of the overlay (`kubectl kustomize`) then has the class. One tree (a base, and an overlay with a name prefix, a namespace, and a patch). |
 | `patch --kustomize` | Unit tests in CI (`pkg/patcher`, `pkg/agentmoat`): the patch of each kind, the directory rules, a run that only adds, a second run, a file that cannot be written. `make offline-smoke` builds real trees with `kubectl kustomize` (it passed with Kustomize 5.5 and 5.8): a base with a name prefix and a namespace, and two overlays. The overlay that uses the component has the class, the other overlay does not, and the scan of the render passes the gate. Input as the files of the base, as the output of the base, and as the output of `helm template`. The two inputs that do not work stop the build. `git apply` makes the same files from the diff of the dry-run. |
 | `examples/ci/github-patch-pr.yml` as a workflow | Not run. Its `patch` command is the one in the rows above. The `git` and `gh` commands, the `permissions:` keys, and the repository setting are from the GitHub documentation only. |
-| A deploy of patched files by a deploy tool, and `verify` after it | Not tested. `verify` with a plan from before a change is tested for a live `apply` only (`make e2e`). |
+| `verify -f` | Unit tests in CI (`pkg/verifier`, `pkg/agentmoat`): each kind, each refusal before a cluster read, a selector with no pods, a Job and a Pod in each state (not there, at its end, failed), the exit codes. `make e2e`, on a kind cluster with a real `runsc`: `patch` writes the class into a copy of the manifest file, `kubectl apply` deploys the copy to a second namespace, and `verify -f --wait` directly after it exits `0`. The run has 11 workloads: the 8 of the file, a ReplicaSet that is checked through its selector, and a Job and a bare Pod that run to their end. `--in-pod-probe` then finds gVisor in each pod that runs. Before the deploy the same file gives exit `4` against the namespace that has no class, and a Job that is not in the cluster gives exit `1`. A person runs `make e2e`; it is not in CI. |
+| A deploy of patched files by a deploy tool (Argo CD, Flux, Helm), and `verify -f` after it | Not tested. The e2e deploys with `kubectl apply`. An Argo `Rollout` is tested with a fake cluster only; the e2e uses a ReplicaSet for the selector path. A hook that Helm or Argo CD deletes is tested as "a Job that is not in the cluster" only. `helm template --no-hooks` was run with Helm 4.3 on a chart with one hook Job and one test pod: the output had neither. |
 | `examples/ci/github-migration.yml` as a workflow | Not run. Its commands are the ones in the row above. |
 | `examples/ci/gitlab-ci.yml` | Not run. The keywords were checked against the GitLab documentation. |
 | A deploy tool (Argo CD, Flux, Helm) with a live change | Not tested. The `source-managed` warning says only what agentmoat knows. |

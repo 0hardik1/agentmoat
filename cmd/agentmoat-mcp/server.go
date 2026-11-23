@@ -24,6 +24,7 @@ Read-only tools: scan_cluster, preflight_cluster, assess_workload, propose_plan,
 Mutating tools: apply_plan, rollback_plan, probe_nvproxy change the cluster; patch_manifests changes manifest files (all default dry_run=true; must set "dry_run": false to mutate).
 To check the manifests in a repository with no cluster, call scan_cluster with manifest_paths (files or directories): it reads the files and contacts no cluster. A plan made from that report is a preview; apply_plan, rollback_plan, and verify_migration refuse it.
 To make the move as a change to the repository (a pull request, then the deploy pipeline), call patch_manifests: it adds runtimeClassName to the files of the workloads that can run in gVisor, and returns the diff. Show the diff before a call with "dry_run": false.
+After that change is deployed, call verify_migration with manifest_paths (the files as they were deployed): it checks in the cluster each workload of the files that asks for the RuntimeClass. A report with summary.notChecked above 0 is not a pass.
 Call preflight_cluster before apply_plan: apply refuses to run (every step skipped) when the cluster has no Ready node that can host the RuntimeClass.
 For GPU or systemd workloads, run probe_nvproxy (dry_run=false, creates and deletes one pod at a time), save its JSON, and pass the path as facts_path to scan_cluster: the gpu-passthrough verdict is then settled from the real card and driver list, and systemd-init is checked against the installed runsc release.
 Resources: agentmoat://compatibility-rules, agentmoat://known-gotchas.

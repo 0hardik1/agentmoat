@@ -153,6 +153,13 @@ type ManifestObject struct {
 	// for another kind with a job template), and spec.template.spec for
 	// each other kind.
 	PodSpecPath []string
+
+	// Selector is spec.selector of the object, when it has one in a form
+	// that selects pods by label: a label selector (matchLabels,
+	// matchExpressions), or the plain map of a ReplicationController. Nil
+	// when the object has no such field. `verify -f` finds the pods of a
+	// kind that it has no reader for (an Argo Rollout) with it.
+	Selector *metav1.LabelSelector
 }
 
 // ManifestResult is what FromManifests found.
@@ -565,6 +572,7 @@ func (c *manifestCollector) readObject(raw json.RawMessage, header objectHeader,
 			Name:        header.Metadata.Name,
 			Namespace:   header.Metadata.Namespace,
 			PodSpecPath: podSpecPath,
+			Selector:    selectorOf(raw),
 		},
 		owners: header.Metadata.OwnerReferences,
 	})
@@ -855,6 +863,44 @@ func workloadFromPodTemplate(raw []byte, gk schema.GroupKind) (Workload, objectS
 	default:
 		return Workload{}, shapeOther, nil
 	}
+}
+
+// selectorOf returns spec.selector of an object as a label selector, or nil.
+// Kubernetes has two forms of the field: the label selector of the apps
+// kinds and of most custom kinds ({matchLabels: ..., matchExpressions: ...}),
+// and the plain map of labels of a ReplicationController. Any other form (a
+// string, a list) is not a selector that this package knows.
+func selectorOf(raw []byte) *metav1.LabelSelector {
+	var probe struct {
+		Spec struct {
+			Selector json.RawMessage `json:"selector"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil || len(probe.Spec.Selector) == 0 {
+		return nil
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(probe.Spec.Selector, &keys); err != nil || len(keys) == 0 {
+		return nil
+	}
+	structured := true
+	for key := range keys {
+		if key != "matchLabels" && key != "matchExpressions" {
+			structured = false
+		}
+	}
+	if structured {
+		var sel metav1.LabelSelector
+		if err := json.Unmarshal(probe.Spec.Selector, &sel); err != nil {
+			return nil
+		}
+		return &sel
+	}
+	var flat map[string]string
+	if err := json.Unmarshal(probe.Spec.Selector, &flat); err != nil {
+		return nil
+	}
+	return &metav1.LabelSelector{MatchLabels: flat}
 }
 
 // groupKindOf splits apiVersion ("apps/v1", "v1", "argoproj.io/v1alpha1")
