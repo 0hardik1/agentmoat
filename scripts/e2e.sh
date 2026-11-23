@@ -951,7 +951,7 @@ set -e
 if (( EXPLAIN_BOGUS_EXIT == 0 )); then
   fail "explain bogus-topic should exit non-zero (got 0); output: $EXPLAIN_BOGUS"
 fi
-for want in runtimeclass gvisor threat-model performance compatibility preflight gpu; do
+for want in runtimeclass gvisor threat-model performance compatibility preflight gpu ci-cd; do
   if ! printf '%s' "$EXPLAIN_BOGUS" | grep -q "$want"; then
     fail "explain bogus-topic stderr missing topic '$want':\n$EXPLAIN_BOGUS"
   fi

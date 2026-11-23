@@ -100,6 +100,17 @@ func Verify(ctx context.Context, opts VerifyOptions) (*schema.VerifyReport, erro
 		opts.InPodProbe,
 		waitNote(res.Metadata.Wait),
 	)
+	// A plan with no steps gives "0 ok, 0 mismatch" and exit 0. That is
+	// correct (the second run of a pipeline with no new workload gets
+	// here), but it must not read as "everything is in the sandbox": the
+	// verify looked at no workload. The usual cause is a plan from a scan
+	// after the workloads got the class: the planner makes no step for a
+	// workload that has a RuntimeClass.
+	if len(plan.Spec.Steps) == 0 {
+		_, _ = fmt.Fprintln(stderr, "verify: nothing was verified: the plan has no steps. "+
+			"A plan has a step only for a workload that had no RuntimeClass at the time of the scan. "+
+			"To check workloads after a change, use the plan from before the change.")
+	}
 	return res, nil
 }
 

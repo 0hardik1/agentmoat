@@ -96,6 +96,22 @@ The Markdown report starts with the result of the gate. A SARIF result has the
 level `error` only when it makes the gate fail. See
 [`docs/output-formats.md`](docs/output-formats.md).
 
+On GitHub Actions, the action does the same in two lines (from release
+`v0.3.0`). It scans, writes the report to the job summary, and puts an error
+annotation on each workload that makes the gate fail. It reads no cluster and
+needs no secret:
+
+```yaml
+- uses: actions/checkout@v7
+- uses: 0hardik1/agentmoat@v0
+  with:
+    path: k8s
+```
+
+[`docs/ci-cd.md`](docs/ci-cd.md) has the inputs, the Kustomize and Helm
+renders, and the same check for other CI systems.
+[`examples/ci/`](examples/ci/) has the files to copy.
+
 A pipeline that moves the workloads runs `verify` as the next command after
 `apply`, with a wait time, and rolls back when it fails:
 
@@ -107,7 +123,12 @@ A pipeline that moves the workloads runs `verify` as the next command after
 
 `verify --wait` looks again until every workload has the RuntimeClass on all
 its pods and those pods stay Ready. A pod that has the class and does not
-start in gVisor fails the check, with the reason in the report.
+start in gVisor fails the check, with the reason in the report. `rollback`
+with the same plan also undoes an apply that failed on some steps (exit 3).
+In a CI system, make the rollback its own step with a condition:
+[`docs/ci-cd.md`](docs/ci-cd.md#2-the-migration-pipeline) has the pipeline
+(plan, approval, apply, verify, rollback) and what the rollback does for each
+way that a run can end.
 
 ## What it does
 
@@ -555,6 +576,7 @@ Roadmap:
 
 ## Where to go next
 
+- [CI/CD](docs/ci-cd.md): the pull request check (the GitHub Action, other CI systems) and the migration pipeline.
 - [Architecture](docs/architecture.md): the Go library at the core; CLI as a thin shell.
 - [gVisor 101](docs/gvisor-101.md): Sentry, Gofer, platforms, and where the overhead lives.
 - [RuntimeClass 101](docs/runtimeclass-101.md): one-page intro to the `RuntimeClass` API.

@@ -1,0 +1,149 @@
+# ---------------------------------------------------------------------------
+# agentmoat: the GitHub Action
+# ---------------------------------------------------------------------------
+#
+# A check for a pull request: can the Kubernetes workloads in this repository
+# run in a gVisor sandbox? The action scans manifests with `agentmoat scan -f`
+# and fails the step when the gate fails. It reads no cluster and needs no
+# credentials.
+#
+#     - uses: actions/checkout@v7
+#     - uses: 0hardik1/agentmoat@v0
+#       with:
+#         path: k8s
+#
+# What it writes: the report in the job summary, one error annotation for
+# each workload that makes the gate fail, and the table in the step log.
+#
+# This file is only the interface. It is a composite action with one step,
+# and that step runs scripts/github-action.sh, which has the logic and the
+# reasons for it. Two rules are visible here:
+#
+#   - Every input goes to the script through `env:`. No `${{ inputs.* }}` is
+#     in the `run:` line: the runner pastes such an expression into the shell
+#     text before the shell reads it, so a value with a quote in it would be
+#     code.
+#   - `github.action_ref` goes through `env:` too. The GitHub documents say
+#     that this is the only way to read it in a composite action.
+#
+# The full description is in docs/ci-cd.md. Examples are in examples/ci/.
+# ---------------------------------------------------------------------------
+
+name: agentmoat scan
+description: >-
+  Check that the Kubernetes workloads in a pull request can run in a gVisor
+  sandbox. Scans manifests, Kustomize, and Helm with no cluster.
+author: 0hardik1
+
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  path:
+    description: >-
+      Files or directories with Kubernetes manifests, one for each line.
+      Relative to the root of the repository. Set one of `path`, `kustomize`,
+      and `helm-chart`.
+    required: false
+    default: ''
+  kustomize:
+    description: >-
+      A directory with a kustomization file. The action renders it
+      (`kubectl kustomize`) and scans the result.
+    required: false
+    default: ''
+  helm-chart:
+    description: >-
+      The directory of a Helm chart. The action renders it (`helm template`)
+      and scans the result.
+    required: false
+    default: ''
+  helm-values:
+    description: >-
+      Values files for the chart, one for each line. Used with `helm-chart`.
+    required: false
+    default: ''
+  fail-on:
+    description: >-
+      When the step fails. `sandboxed`: a workload that asks for the sandbox
+      RuntimeClass cannot run in it. `incompatible`: a workload cannot run in
+      gVisor, also one that does not ask for it. `none`: never, the report is
+      the result.
+    required: false
+    default: sandboxed
+  runtime-class:
+    description: The name of the sandbox RuntimeClass.
+    required: false
+    default: gvisor
+  namespace:
+    description: >-
+      The namespace for objects that name none. It does not filter. With
+      `helm-chart`, it is also the namespace of the render.
+    required: false
+    default: ''
+  rules:
+    description: A file with rule overrides (`agentmoat scan --rules`).
+    required: false
+    default: ''
+  sarif-file:
+    description: >-
+      Where to write a SARIF report, for an upload to code scanning in a
+      later step. Empty: no file.
+    required: false
+    default: ''
+  version:
+    description: >-
+      The agentmoat release to download: `latest`, or a tag such as `v0.3.0`.
+      Empty: the release of the action when the workflow names a full version
+      (`@v0.3.0`), and `latest` for every other ref. Set it when the workflow
+      pins the action to a commit SHA.
+    required: false
+    default: ''
+  binary:
+    description: >-
+      The path of an agentmoat binary on the runner. The action then
+      downloads nothing. For a runner with no access to github.com.
+    required: false
+    default: ''
+
+outputs:
+  exit-code:
+    description: >-
+      The exit code of the scan. 0: the gate did not fail. 2: the gate
+      failed. 1: the scan did not get an answer.
+    value: ${{ steps.scan.outputs.exit-code }}
+  markdown-file:
+    description: The path of the Markdown report (the text of the job summary).
+    value: ${{ steps.scan.outputs.markdown-file }}
+  json-file:
+    description: The path of the JSON report (schema `agentmoat.io/v1alpha1`).
+    value: ${{ steps.scan.outputs.json-file }}
+  sarif-file:
+    description: The path of the SARIF report. Empty when `sarif-file` was not set.
+    value: ${{ steps.scan.outputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: agentmoat scan
+      id: scan
+      # A composite step must name its shell. The script is started with
+      # `bash <file>` so that it does not need the executable bit, and so
+      # that its own `set` lines decide how it fails, not the flags that the
+      # runner gives to `shell: bash`.
+      shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_KUSTOMIZE: ${{ inputs.kustomize }}
+        INPUT_HELM_CHART: ${{ inputs.helm-chart }}
+        INPUT_HELM_VALUES: ${{ inputs.helm-values }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_RUNTIME_CLASS: ${{ inputs.runtime-class }}
+        INPUT_NAMESPACE: ${{ inputs.namespace }}
+        INPUT_RULES: ${{ inputs.rules }}
+        INPUT_SARIF_FILE: ${{ inputs.sarif-file }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_BINARY: ${{ inputs.binary }}
+        AGENTMOAT_ACTION_REF: ${{ github.action_ref }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/github-action.sh"

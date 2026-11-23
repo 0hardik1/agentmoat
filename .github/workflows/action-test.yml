@@ -1,0 +1,234 @@
+# ---------------------------------------------------------------------------
+# agentmoat: the GitHub Action, on a real runner
+# ---------------------------------------------------------------------------
+#
+# What this workflow is for
+#
+#   scripts/action-smoke.sh (`make offline-smoke`, in ci.yml) tests the script
+#   of the action with a model of the runner. This workflow tests what a
+#   model cannot: that the runner reads action.yml, that the inputs get to
+#   the script, that the outputs come back, and that the step fails when the
+#   gate fails. It uses the action the way a user does (`uses:`), with one
+#   difference: `uses: ./` is the action of this commit, and the input
+#   `binary` gives it the agentmoat of this commit. So a pull request tests
+#   its own action with its own binary, and needs no release.
+#
+# When it runs
+#
+#   Only when the action changes (the `paths` lists), and by hand. The gate
+#   steps below fail on purpose, and each one puts error annotations on the
+#   fixture files. On every pull request that would be noise.
+#
+# The jobs
+#
+#   * `action`: Linux and macOS. macOS is there because its bash is 3.2 and
+#     its tools are the BSD ones; the script must run with them. The macOS
+#     image has no kubectl and no helm, so the render step is Linux only.
+#   * `download`: by hand only (the `download` input). It uses the action
+#     with no `binary` input, so the action downloads a release and checks
+#     its SHA-256. It needs a release that has `scan -f`; before such a
+#     release exists, the job fails with a message that says so.
+# ---------------------------------------------------------------------------
+
+name: Action test
+
+on:
+  pull_request:
+    paths:
+      - action.yml
+      - scripts/github-action.sh
+      - .github/workflows/action-test.yml
+  push:
+    branches: [main]
+    paths:
+      - action.yml
+      - scripts/github-action.sh
+      - .github/workflows/action-test.yml
+  workflow_dispatch:
+    inputs:
+      download:
+        description: Also test the download of a release (needs a release that has scan -f)
+        type: boolean
+        default: false
+      version:
+        description: The release for the download test (latest, or a tag such as v0.3.0)
+        type: string
+        default: latest
+
+# The action reads files and writes the job summary. It needs no token
+# permission; `contents: read` is for the checkout.
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------- action -----------------------------------
+  action:
+    name: Action (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build agentmoat
+        run: make build
+
+      # 1. A workload that asks for the sandbox and can run in it: the gate
+      #    does not fail, and the step passes.
+      - name: Scan a workload that can run in the sandbox
+        id: pass
+        uses: ./
+        with:
+          path: test/testdata/manifests/sandboxed-compatible.yaml
+          binary: bin/agentmoat
+
+      # 2. A workload that asks for the sandbox and cannot run in it: the
+      #    step must fail. `continue-on-error` lets the job go on, and the
+      #    check at the end reads `outcome`, which is the result before
+      #    `continue-on-error` is applied.
+      - name: Scan a workload that cannot (this step fails on purpose)
+        id: gate
+        continue-on-error: true
+        uses: ./
+        with:
+          path: test/testdata/manifests/sandboxed-hostnetwork.yaml
+          binary: bin/agentmoat
+          sarif-file: results/agentmoat.sarif
+
+      # 3. The same input with `fail-on: none`: the report, and no failure.
+      - name: Scan with no gate
+        id: report
+        uses: ./
+        with:
+          path: |
+            test/testdata/manifests/sandboxed-compatible.yaml
+            test/testdata/manifests/sandboxed-hostnetwork.yaml
+          fail-on: none
+          binary: bin/agentmoat
+
+      # 4. Input that is not rendered: the scan gets no answer (exit code 1),
+      #    which is not a pass.
+      - name: Scan input that cannot be scanned (this step fails on purpose)
+        id: broken
+        continue-on-error: true
+        uses: ./
+        with:
+          path: test/testdata/manifests/helm-unrendered
+          binary: bin/agentmoat
+
+      # 5. A render by the action. The overlay adds runtimeClassName to a
+      #    base that has host networking, so the gate fails on the rendered
+      #    result. Linux only: the macOS image has no kubectl.
+      - name: Render a Kustomize overlay and scan it (this step fails on purpose)
+        id: kustomize
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        uses: ./
+        with:
+          kustomize: test/testdata/manifests/kustomize/overlay
+          binary: bin/agentmoat
+
+      # The values go to the script through `env:`. An expression in the
+      # text of a `run:` line would be pasted into the shell code.
+      - name: Check the results
+        if: always()
+        shell: bash
+        env:
+          PASS_OUTCOME: ${{ steps.pass.outcome }}
+          PASS_CODE: ${{ steps.pass.outputs.exit-code }}
+          PASS_MARKDOWN: ${{ steps.pass.outputs.markdown-file }}
+          PASS_JSON: ${{ steps.pass.outputs.json-file }}
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+          GATE_CODE: ${{ steps.gate.outputs.exit-code }}
+          GATE_MARKDOWN: ${{ steps.gate.outputs.markdown-file }}
+          GATE_SARIF: ${{ steps.gate.outputs.sarif-file }}
+          REPORT_OUTCOME: ${{ steps.report.outcome }}
+          REPORT_CODE: ${{ steps.report.outputs.exit-code }}
+          BROKEN_OUTCOME: ${{ steps.broken.outcome }}
+          BROKEN_CODE: ${{ steps.broken.outputs.exit-code }}
+          KUSTOMIZE_OUTCOME: ${{ steps.kustomize.outcome }}
+          KUSTOMIZE_CODE: ${{ steps.kustomize.outputs.exit-code }}
+        run: |
+          failed=0
+          expect() {
+            if [[ "$2" == "$3" ]]; then
+              echo "ok: $1 is '$3'"
+            else
+              echo "::error title=action-test::$1: expected '$2', got '$3'"
+              failed=1
+            fi
+          }
+          expect_text() {
+            if [[ -f "$2" ]] && grep -q -- "$3" "$2"; then
+              echo "ok: $1"
+            else
+              echo "::error title=action-test::$1: the file is not there, or it does not have the text"
+              failed=1
+            fi
+          }
+
+          expect "pass: outcome" success "$PASS_OUTCOME"
+          expect "pass: exit-code" 0 "$PASS_CODE"
+          expect_text "pass: the Markdown report starts with the heading" "$PASS_MARKDOWN" '^## agentmoat scan'
+          expect_text "pass: the JSON report is a ScanReport" "$PASS_JSON" '"kind": "ScanReport"'
+
+          expect "gate: outcome" failure "$GATE_OUTCOME"
+          expect "gate: exit-code" 2 "$GATE_CODE"
+          expect_text "gate: the Markdown report says that the gate failed" "$GATE_MARKDOWN" 'Gate failed'
+          expect "gate: sarif-file" results/agentmoat.sarif "$GATE_SARIF"
+          expect_text "gate: the SARIF file has an error result" results/agentmoat.sarif '"level": "error"'
+
+          expect "report: outcome" success "$REPORT_OUTCOME"
+          expect "report: exit-code" 0 "$REPORT_CODE"
+
+          expect "broken: outcome" failure "$BROKEN_OUTCOME"
+          expect "broken: exit-code" 1 "$BROKEN_CODE"
+
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            expect "kustomize: outcome" failure "$KUSTOMIZE_OUTCOME"
+            expect "kustomize: exit-code" 2 "$KUSTOMIZE_CODE"
+          fi
+          exit "$failed"
+
+  # ---------------------------- download ----------------------------------
+  # The path that a user takes: no `binary` input, so the action downloads
+  # a release archive and checks it against the checksums file of the same
+  # release. By hand only: it tests a published release, not this commit.
+  download:
+    name: Download (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' && inputs.download
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Scan with a downloaded release
+        id: scan
+        uses: ./
+        with:
+          path: test/testdata/manifests/sandboxed-compatible.yaml
+          version: ${{ inputs.version }}
+
+      - name: Check the result
+        shell: bash
+        env:
+          CODE: ${{ steps.scan.outputs.exit-code }}
+        run: |
+          if [[ "$CODE" != "0" ]]; then
+            echo "::error title=action-test::download: expected exit-code '0', got '$CODE'"
+            exit 1
+          fi
+          echo "ok: the action downloaded a release and the scan passed"

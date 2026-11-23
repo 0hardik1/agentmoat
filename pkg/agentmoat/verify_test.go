@@ -259,6 +259,56 @@ func TestVerify_NoWaitIsOneLook(t *testing.T) {
 	}
 }
 
+// TestVerify_APlanWithNoStepsSaysThatNothingWasVerified: a plan with no
+// steps gives "0 ok, 0 mismatch" and exit 0. That result must not read as
+// "every workload is in the sandbox": verify looked at no workload. The
+// usual cause is a plan from a scan after the workloads got the class (the
+// planner makes no step for a workload that has a RuntimeClass). stderr
+// says it; the Markdown report says it too (pkg/output).
+func TestVerify_APlanWithNoStepsSaysThatNothingWasVerified(t *testing.T) {
+	t.Parallel()
+	plan := schema.NewMigrationPlan()
+	plan.Spec = schema.PlanSpec{
+		Options:  schema.PlannerOptions{RuntimeClassName: "gvisor"},
+		Steps:    []schema.PlanStep{},
+		Excluded: []schema.ExcludedWorkload{},
+	}
+	hash, err := planner.ComputePlanHash(plan.Spec.Steps, plan.Spec.Options)
+	if err != nil {
+		t.Fatalf("compute plan hash: %v", err)
+	}
+	plan.Metadata = schema.PlanMetadata{GeneratedAt: "2026-05-22T12:00:00Z", PlanHash: hash}
+	data, err := yaml.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "empty-plan.yaml")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	stderr := &bytes.Buffer{}
+	report, err := Verify(context.Background(), VerifyOptions{PlanPath: path, KubeClient: verifyCluster(false), Stderr: stderr})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if n := len(report.Spec.Results); n != 0 {
+		t.Fatalf("results = %d, want 0", n)
+	}
+	if want := "verify: nothing was verified: the plan has no steps."; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
+	}
+
+	// A plan with steps does not get the line.
+	stderr.Reset()
+	if _, err := Verify(context.Background(), VerifyOptions{PlanPath: writeTestPlan(t), KubeClient: verifyCluster(false), Stderr: stderr}); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if strings.Contains(stderr.String(), "nothing was verified") {
+		t.Errorf("a plan with a step must not say that nothing was verified:\n%s", stderr.String())
+	}
+}
+
 // TestVerify_NegativeWaitIsRefusedFirst: before the plan file is read.
 func TestVerify_NegativeWaitIsRefusedFirst(t *testing.T) {
 	t.Parallel()

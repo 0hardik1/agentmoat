@@ -3,9 +3,9 @@
 // ReadManifestPaths is the I/O half of manifest input. It turns what a user
 // typed after `-f` (a file, a directory, or "-" for stdin) into the
 // (name, bytes) pairs that FromManifests decodes. The split keeps
-// FromManifests free of I/O, so the manifests embedded in the binary for
-// `agentmoat demo` and the files of a real repository go through the same
-// decoder.
+// FromManifests free of I/O, so manifest text from another source (text
+// that is embedded in a binary, for example) and the files of a real
+// repository go through the same decoder.
 //
 // The rules are written for the place this runs most: a CI job pointed at a
 // repository it did not write.

@@ -1,0 +1,196 @@
+# ---------------------------------------------------------------------------
+# agentmoat: move one namespace to gVisor, from a pipeline (GitHub Actions)
+# ---------------------------------------------------------------------------
+#
+# Copy this file to .github/workflows/agentmoat-migrate.yml, and read
+# docs/ci-cd.md before the first run.
+#
+# The pipeline:
+#
+#   plan job    scan the namespace, make the plan, rehearse the apply
+#               (dry-run). The plan is an artifact. Read-only identity.
+#   approval    the `production` environment: a person reads the plan in the
+#               job summary and approves.
+#   apply job   apply the plan, wait until the workloads are Ready in the
+#               sandbox, and roll back if one of the two fails.
+#
+# What you must set up:
+#
+#   1. Two identities in the cluster (deploy/clusterrole-readonly.yaml and
+#      deploy/clusterrole-apply.yaml), and a kubeconfig for each.
+#   2. The secret AGENTMOAT_READONLY_KUBECONFIG in the repository: the
+#      kubeconfig of the read-only identity.
+#   3. An environment named `production` with required reviewers, and in it
+#      the secret AGENTMOAT_APPLY_KUBECONFIG: the kubeconfig of the apply
+#      identity. A secret of an environment is given to a job only after the
+#      approval.
+#
+# If your platform has a login action (for example an OIDC login to your
+# cloud), use it in place of the two "Write the kubeconfig" steps. agentmoat
+# reads the KUBECONFIG variable, as kubectl does.
+#
+# This project does not run this file in its CI: there is no cluster with
+# gVisor nodes there. The commands in it are the ones that `make e2e` runs
+# on a kind cluster with a real runsc, including an apply that fails on one
+# step and the rollback after it.
+# ---------------------------------------------------------------------------
+
+name: agentmoat migrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: The namespace to move to gVisor
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# One run for a namespace at a time. agentmoat records one plan on a
+# namespace (docs/exit-codes.md), and it has no lock: two applies in one
+# namespace at the same time would write over the record of each other. A
+# second run waits. It does not cancel the first: a canceled apply runs no
+# rollback.
+concurrency:
+  group: agentmoat-migrate-${{ inputs.namespace }}
+  cancel-in-progress: false
+
+env:
+  # The release to use. Change this line to update.
+  AGENTMOAT_VERSION: v0.3.0
+
+jobs:
+  # ------------------------------ plan -------------------------------------
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    env:
+      # The input goes through the environment. An expression in the text
+      # of a `run:` line would be pasted into the shell code.
+      TARGET_NAMESPACE: ${{ inputs.namespace }}
+    steps:
+      # The archive is checked against the checksums file of the release.
+      # `--ignore-missing` skips the lines for the other archives;
+      # sha256sum still fails when it checked no file at all.
+      - name: Install agentmoat
+        run: |
+          base="https://github.com/0hardik1/agentmoat/releases/download/${AGENTMOAT_VERSION}"
+          curl -fsSLO "$base/agentmoat_linux_amd64.tar.gz"
+          curl -fsSLO "$base/checksums.txt"
+          sha256sum --check --ignore-missing checksums.txt
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf agentmoat_linux_amd64.tar.gz -C "$RUNNER_TEMP/bin" agentmoat
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Write the kubeconfig (read-only identity)
+        env:
+          KUBECONFIG_DATA: ${{ secrets.AGENTMOAT_READONLY_KUBECONFIG }}
+        run: |
+          printf '%s' "$KUBECONFIG_DATA" > "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+
+      # `--fail-on none`: this scan is the input of the plan, not a gate. A
+      # workload that cannot run in gVisor gets no step in the plan, and
+      # must not stop the ones that can.
+      - name: Scan the namespace
+        run: agentmoat scan --namespace "$TARGET_NAMESPACE" --fail-on none --output json > scan.json
+
+      # The plan is a pure function of the scan: the two runs give the same
+      # plan, one as the file for the apply job and one as the report for
+      # the reviewer.
+      - name: Make the plan
+        run: |
+          agentmoat plan --scan scan.json --output json > plan.json
+          agentmoat plan --scan scan.json --output markdown >> "$GITHUB_STEP_SUMMARY"
+
+      # The rehearsal. A dry-run runs the preflight too: when the cluster
+      # cannot host the plan (no RuntimeClass, no Ready gVisor node), this
+      # step fails with exit code 5, before a person is asked to approve.
+      - name: Rehearse the apply (dry-run)
+        run: agentmoat apply --plan plan.json --output markdown >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: agentmoat-plan
+          path: |
+            plan.json
+            scan.json
+          if-no-files-found: error
+
+  # ------------------------------ apply ------------------------------------
+  apply:
+    name: Apply, verify, and roll back on a failure
+    needs: plan
+    runs-on: ubuntu-latest
+    # The approval gate: the job starts when a reviewer of this environment
+    # approves.
+    environment: production
+    env:
+      # agentmoat appends one line for each step to this file. The last
+      # step of the job keeps it as an artifact.
+      AGENTMOAT_AUDIT_PATH: ${{ github.workspace }}/agentmoat-audit.jsonl
+    steps:
+      - name: Install agentmoat
+        run: |
+          base="https://github.com/0hardik1/agentmoat/releases/download/${AGENTMOAT_VERSION}"
+          curl -fsSLO "$base/agentmoat_linux_amd64.tar.gz"
+          curl -fsSLO "$base/checksums.txt"
+          sha256sum --check --ignore-missing checksums.txt
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf agentmoat_linux_amd64.tar.gz -C "$RUNNER_TEMP/bin" agentmoat
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # The plan that the reviewer saw. agentmoat checks the hash of the
+      # file before it uses it.
+      - name: Get the plan
+        uses: actions/download-artifact@v8
+        with:
+          name: agentmoat-plan
+
+      - name: Write the kubeconfig (apply identity)
+        env:
+          KUBECONFIG_DATA: ${{ secrets.AGENTMOAT_APPLY_KUBECONFIG }}
+        run: |
+          printf '%s' "$KUBECONFIG_DATA" > "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+
+      # Exit code 0: every step is applied. 3: some steps failed. 5: the
+      # preflight refused, and nothing changed. 1: an error.
+      - name: Apply
+        id: apply
+        run: agentmoat apply --plan plan.json --dry-run=false --output markdown >> "$GITHUB_STEP_SUMMARY"
+
+      # Wait until every workload of the plan runs in the sandbox and stays
+      # Ready. Exit code 4 after the wait time means that one does not.
+      - name: Verify
+        id: verify
+        run: agentmoat verify --plan plan.json --wait 5m --output markdown >> "$GITHUB_STEP_SUMMARY"
+
+      # The rollback runs when the apply or the verify failed. It is its own
+      # step, and not `verify || rollback` in one script, so that:
+      #
+      #   - it also runs when the apply itself failed in the middle (exit
+      #     code 3). The rollback undoes the steps that worked.
+      #   - it does not run when the job is canceled. `failure()` is false
+      #     for a canceled job. To roll back after a cancel, see
+      #     docs/ci-cd.md.
+      #
+      # `steps.apply.outcome != 'skipped'`: when an earlier step failed (the
+      # install, the kubeconfig), the apply did not start, and there is
+      # nothing to roll back.
+      - name: Roll back
+        if: ${{ failure() && steps.apply.outcome != 'skipped' }}
+        run: agentmoat rollback --plan plan.json --dry-run=false --output markdown >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the audit log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: agentmoat-audit
+          path: agentmoat-audit.jsonl
+          if-no-files-found: ignore

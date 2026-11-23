@@ -23,6 +23,7 @@ import (
 func TestListsAllTopics(t *testing.T) {
 	got := Topics()
 	want := []string{
+		"ci-cd",
 		"compatibility",
 		"gpu",
 		"gvisor",

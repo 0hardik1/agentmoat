@@ -39,7 +39,7 @@ invocation more than twice, prefer extending a target.
 | `make check-device-cgroup` | Checks that every runsc sandbox on a node is confined to a device cgroup (gVisor 20261116.0 and newer): `/dev/null` opens, `/dev/kmsg` is refused. `NODE=<kind node>` runs it through `docker exec`; `make e2e` runs it on the kind worker. |
 | `make kind-up`    | Builds the gVisor-enabled kind worker image and creates the local cluster. Idempotent; an existing cluster is reused as is, so run `make kind-down` first after a gVisor pin bump. |
 | `make e2e`        | Builds, brings up kind, runs scan/plan/apply/rollback end-to-end against a real `runsc` runtime, tears down. Honors `KEEP_CLUSTER=1`. |
-| `make offline-smoke` | Builds, then runs `scan -f`, the `--fail-on` gate, and the Markdown and SARIF outputs on the manifest fixtures in `test/testdata/manifests` with no cluster. Needs `jq`. CI runs it on every PR. Run it after changes to the manifest scanner, the gate, or `pkg/output`. |
+| `make offline-smoke` | Builds, then runs `scan -f`, the `--fail-on` gate, and the Markdown and SARIF outputs on the manifest fixtures in `test/testdata/manifests` with no cluster. Then it runs the script of the GitHub Action (`scripts/action-smoke.sh`) with a model of the runner. Needs `jq`, `curl`, and `tar`. CI runs it on every PR. Run it after changes to the manifest scanner, the gate, `pkg/output`, `action.yml`, or `scripts/github-action.sh`. |
 | `make kind-down`  | Tear down the kind cluster from `make kind-up`. |
 
 CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
@@ -117,6 +117,15 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   the default one (distroless, no shell, non-root) and `-alpine` (has a
   shell, for CI systems that run a script in the job image). The Dockerfiles
   only copy prebuilt binaries; GoReleaser builds them.
+- `action.yml`, `scripts/github-action.sh`: the GitHub Action (a pull
+  request check: `scan -f` with the `--fail-on` gate, no cluster).
+  `action.yml` is only the interface; the script has the logic and its five
+  rules in the header. `scripts/action-smoke.sh` tests it with a model of
+  the runner, and `.github/workflows/action-test.yml` runs it on real
+  runners when the action changes.
+- `examples/ci/`: the pipeline files that users copy (the GitHub pull
+  request check, the GitHub migration pipeline, GitLab CI). `docs/ci-cd.md`
+  describes them and says which parts a test proves.
 - `test/e2e/`: e2e harness invoked by `scripts/e2e.sh`.
 
 ## Architectural invariants (do not break)
@@ -176,7 +185,13 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
     a fenced block; a pull request must not be able to add structure, a
     link, or a mention to its own report. The size has a limit for any
     input (a job summary on GitHub takes 1 MiB); a test in
-    `pkg/output/markdown_test.go` checks it.
+    `pkg/output/markdown_test.go` checks it. The GitHub Action has the same
+    two rules for the runner: every way out that is not exit 0 writes to the
+    job summary first, and the step log is a command channel (the runner
+    runs a line that starts with `::` or has `##[` in it), so the script
+    prints the output of a tool only inside a `stop-commands` block and
+    makes each annotation with the encoding of the runner.
+    `scripts/action-smoke.sh` checks it with hostile names.
 12. **Exit 4 from `verify --wait` is a rollback signal.** With a wait time,
     a step is ok only when all its pods have the class, are Ready, and
     stayed Ready for the settle time (the same pods, no restart). One look
@@ -249,6 +264,7 @@ Read the relevant doc:
 
 - Architecture and package map: [`docs/architecture.md`](docs/architecture.md)
 - Rule catalog and `--rules` override schema: [`docs/compatibility-checklist.md`](docs/compatibility-checklist.md)
+- Pipelines (the GitHub Action, the migration pipeline, what `rollback` does in each case): [`docs/ci-cd.md`](docs/ci-cd.md)
 - Exit codes: [`docs/exit-codes.md`](docs/exit-codes.md)
 - Output formats (Markdown, SARIF, the gate line): [`docs/output-formats.md`](docs/output-formats.md)
 - Preflight findings and the apply gate: [`docs/preflight.md`](docs/preflight.md)

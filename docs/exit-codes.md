@@ -71,6 +71,13 @@ selects no node, a Job that is finished. The result then has
 from before the change keeps its old pods until it ends. A workload that
 wants pods and has none is an `error`.
 
+A plan with no steps gives exit `0` and no result: verify looked at no
+workload. It says so (`nothing was verified`, on stderr and at the top of the
+Markdown report). This is the result for a plan from a scan after the
+workloads got the class, because a plan has a step only for a workload that
+has no RuntimeClass. To check workloads after a change, use the plan from
+before the change ([`ci-cd.md`](ci-cd.md#check-the-result-of-a-change-that-came-through-the-source)).
+
 ### `verify --wait`
 
 Without `--wait`, verify looks at the cluster one time. Directly after
@@ -278,13 +285,23 @@ helm template ./chart | agentmoat scan -f - --fail-on sandboxed
 agentmoat verify --plan plan.json --in-pod-probe || test $? -eq 4
 
 # In a pipeline: apply, wait for the workloads to come up in gVisor, and roll
-# back when they do not. Exit 4 from `verify --wait` is "they did not come up
-# in 3 minutes"; exit 1 is "verify could not run". In the two cases the
-# cluster is not in a known good state, so roll back and fail the job.
-# Rollback is idempotent.
-agentmoat apply --plan plan.json --dry-run=false
+# back when one of the two fails. Exit 3 from `apply` is "some steps failed":
+# the rollback undoes the steps that worked. Exit 4 from `verify --wait` is
+# "they did not come up in 3 minutes"; exit 1 is "verify could not run". In
+# each case the cluster is not in a known good state, so roll back and fail
+# the job. Rollback is idempotent.
+#
+# Capture the exit code of `apply` too. A CI shell has `set -e`: a bare
+# `agentmoat apply` line that exits 3 would end the script before the
+# rollback.
+#
+# In a CI system, a rollback step with a condition is better than this one
+# script: see ci-cd.md and examples/ci/.
 rc=0
-agentmoat verify --plan plan.json --wait 3m -o markdown >> "$GITHUB_STEP_SUMMARY" || rc=$?
+agentmoat apply --plan plan.json --dry-run=false || rc=$?
+if [ "$rc" -eq 0 ]; then
+  agentmoat verify --plan plan.json --wait 3m -o markdown >> "$GITHUB_STEP_SUMMARY" || rc=$?
+fi
 if [ "$rc" -ne 0 ]; then
   agentmoat rollback --plan plan.json --dry-run=false
   exit "$rc"

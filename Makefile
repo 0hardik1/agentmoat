@@ -173,7 +173,7 @@ mcp-smoke: build ## Drive a JSON-RPC session against agentmoat-mcp on the kind c
 	@# vice versa.
 	@./scripts/mcp-smoke.sh
 
-offline-smoke: build ## Run the checks that need no cluster (scan -f, the --fail-on gate) on the built binary.
+offline-smoke: build ## Run the checks that need no cluster (scan -f, the --fail-on gate, the GitHub Action script) on the built binary.
 	@# scripts/offline-smoke.sh runs ./bin/agentmoat against the manifest
 	@# fixtures in test/testdata/manifests and asserts exit codes and
 	@# output. It needs jq, and no cluster: every run has KUBECONFIG set
@@ -182,3 +182,10 @@ offline-smoke: build ## Run the checks that need no cluster (scan -f, the --fail
 	@# every PR. kubectl, when present, is used only for a local
 	@# `kubectl kustomize` render.
 	@./scripts/offline-smoke.sh
+	@# scripts/action-smoke.sh runs the script behind action.yml
+	@# (scripts/github-action.sh) the way the action does, and checks
+	@# the exit code, the job summary, the outputs, and the log. The log
+	@# check is a model of the runner: no text from a manifest may reach
+	@# the runner as a workflow command. It also needs curl and tar; helm
+	@# and kubectl are optional.
+	@./scripts/action-smoke.sh

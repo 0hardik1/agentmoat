@@ -1,0 +1,173 @@
+# ---------------------------------------------------------------------------
+# agentmoat: GitLab CI
+# ---------------------------------------------------------------------------
+#
+# Two pipelines in one file. Copy the jobs that you need into your
+# .gitlab-ci.yml (or keep this file and `include:` it), and read
+# docs/ci-cd.md before the first run.
+#
+#   1. The check for merge requests (the job `agentmoat:check`). It scans the
+#      manifests in the repository and fails when a workload that asks for
+#      the gVisor RuntimeClass cannot run in it. It reads no cluster and
+#      needs no variable.
+#
+#   2. The migration of one namespace (the other jobs). Start it with "Run
+#      pipeline" in the GitLab pages, with the variable TARGET_NAMESPACE.
+#
+#        plan      scan, plan, and a dry-run of the apply. plan.json is an
+#                  artifact.
+#        apply     manual: a person reads the plan job and starts it.
+#        verify    waits until the workloads are Ready in the sandbox.
+#        rollback  runs only when an earlier job failed.
+#
+# What the migration needs: a CI/CD variable KUBECONFIG of the type "File"
+# (GitLab then puts the path of the file in the variable, which is what
+# agentmoat and kubectl read). The identity in it needs the rules of
+# deploy/clusterrole-apply.yaml. To give the plan job a read-only identity,
+# set a second File variable and point KUBECONFIG at it in that job.
+#
+# The image: the `-alpine` tag has a shell, which a GitLab job needs. The
+# default tag has no shell.
+#
+# NOT RUN BY THIS PROJECT. The agentmoat repository is on GitHub, and its CI
+# does not run this file. The commands in it are tested (`make e2e` runs
+# them on a kind cluster with a real runsc). The GitLab keywords were
+# checked against the GitLab documentation, and not by a pipeline run. If a
+# job does not do what its comment says, please open an issue.
+# ---------------------------------------------------------------------------
+
+stages:
+  - check
+  - plan
+  - apply
+  - verify
+  - rollback
+
+variables:
+  # The release to use. Change this line to update.
+  AGENTMOAT_IMAGE: ghcr.io/0hardik1/agentmoat:v0.3.0-alpine
+  # The directory of the manifests, for the merge request check.
+  AGENTMOAT_MANIFESTS: k8s
+
+# ------------------------------ 1. the check --------------------------------
+
+agentmoat:check:
+  stage: check
+  image: $AGENTMOAT_IMAGE
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    # The table goes to the job log. Exit code 2 (the gate failed) and exit
+    # code 1 (the input cannot be scanned) fail the job.
+    - agentmoat scan -f "$AGENTMOAT_MANIFESTS" --fail-on sandboxed
+  after_script:
+    # The same report as Markdown, for a merge request note or a download.
+    # `after_script` runs also when the job failed. Its exit code does not
+    # change the result of the job.
+    - agentmoat scan -f "$AGENTMOAT_MANIFESTS" --fail-on sandboxed --output markdown > agentmoat-scan.md || true
+  artifacts:
+    when: always
+    paths:
+      - agentmoat-scan.md
+
+# Kustomize or Helm: the agentmoat image has no kubectl and no helm. Render
+# in an earlier job with the image of that tool, keep the result as an
+# artifact, and scan the file:
+#
+#   render:
+#     stage: .pre
+#     image: <an image with helm>
+#     script:
+#       - helm template charts/my-app > rendered.yaml
+#     artifacts:
+#       paths: [rendered.yaml]
+#
+#   and in agentmoat:check:   AGENTMOAT_MANIFESTS: rendered.yaml
+#
+# Do not use a pipe (`helm template ... | agentmoat scan -f -`) in a shell
+# that does not have `set -o pipefail`: when the render fails, the scan
+# would get cut input and could pass on it.
+
+# ---------------------------- 2. the migration ------------------------------
+
+# The plan job is the rehearsal. It changes nothing: `scan` and `plan` only
+# read, and `apply` with no --dry-run=false is a dry-run.
+agentmoat:plan:
+  stage: plan
+  image: $AGENTMOAT_IMAGE
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $TARGET_NAMESPACE
+  script:
+    # `--fail-on none`: this scan is the input of the plan, not a gate.
+    - agentmoat scan --namespace "$TARGET_NAMESPACE" --fail-on none --output json > scan.json
+    - agentmoat plan --scan scan.json --output json > plan.json
+    # The plan as a table, for the person who starts the apply job. The
+    # plan is a pure function of the scan: this is the plan in plan.json.
+    - agentmoat plan --scan scan.json
+    # The dry-run runs the preflight too. Exit code 5: the cluster cannot
+    # host the plan (no RuntimeClass, no Ready gVisor node).
+    - agentmoat apply --plan plan.json
+  artifacts:
+    paths:
+      - plan.json
+      - scan.json
+
+# The approval gate: a manual job. The stages after it wait for it.
+agentmoat:apply:
+  stage: apply
+  image: $AGENTMOAT_IMAGE
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $TARGET_NAMESPACE
+      when: manual
+  variables:
+    # agentmoat appends one line for each step to this file.
+    AGENTMOAT_AUDIT_PATH: $CI_PROJECT_DIR/agentmoat-audit.jsonl
+  script:
+    # Exit code 0: every step is applied. 3: some steps failed. 5: the
+    # preflight refused, and nothing changed. 1: an error.
+    - agentmoat apply --plan plan.json --dry-run=false
+  artifacts:
+    when: always
+    paths:
+      - agentmoat-audit.jsonl
+
+agentmoat:verify:
+  stage: verify
+  image: $AGENTMOAT_IMAGE
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $TARGET_NAMESPACE
+  script:
+    # Wait until every workload of the plan runs in the sandbox and stays
+    # Ready. Exit code 4 after the wait time means that one does not.
+    - agentmoat verify --plan plan.json --wait 5m
+
+# `when: on_failure`: GitLab runs this job only when a job in an earlier
+# stage failed. That is the apply job (some steps failed, exit code 3: the
+# rollback undoes the steps that worked) or the verify job (exit code 4).
+#
+# It can also be the plan job. Then nothing was applied, and the rollback
+# has nothing to do: with no plan file the script stops, and with a plan
+# that was never applied agentmoat finds no record of it on the namespace
+# and changes nothing.
+#
+# A pipeline that a person cancels does not run this job. To roll back after
+# a cancel, see docs/ci-cd.md.
+agentmoat:rollback:
+  stage: rollback
+  image: $AGENTMOAT_IMAGE
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $TARGET_NAMESPACE
+      when: on_failure
+  variables:
+    AGENTMOAT_AUDIT_PATH: $CI_PROJECT_DIR/agentmoat-rollback-audit.jsonl
+  script:
+    - |
+      if [ ! -s plan.json ]; then
+        echo "There is no plan file: the plan job failed, so nothing was applied."
+        exit 0
+      fi
+    - agentmoat rollback --plan plan.json --dry-run=false
+  artifacts:
+    when: always
+    paths:
+      - agentmoat-rollback-audit.jsonl

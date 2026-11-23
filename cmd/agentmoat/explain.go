@@ -53,6 +53,7 @@ Run with a topic name to print that topic's content:
     agentmoat explain threat-model
     agentmoat explain performance
     agentmoat explain compatibility
+    agentmoat explain ci-cd
 
 Topic lookup is case-insensitive. The text is sourced from docs/*.md in
 the agentmoat repo, embedded into the binary at build time so the CLI and
