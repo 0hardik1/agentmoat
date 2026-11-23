@@ -96,6 +96,19 @@ The Markdown report starts with the result of the gate. A SARIF result has the
 level `error` only when it makes the gate fail. See
 [`docs/output-formats.md`](docs/output-formats.md).
 
+A pipeline that moves the workloads runs `verify` as the next command after
+`apply`, with a wait time, and rolls back when it fails:
+
+```bash
+./bin/agentmoat apply --plan plan.json --dry-run=false
+./bin/agentmoat verify --plan plan.json --wait 3m \
+  || ./bin/agentmoat rollback --plan plan.json --dry-run=false
+```
+
+`verify --wait` looks again until every workload has the RuntimeClass on all
+its pods and those pods stay Ready. A pod that has the class and does not
+start in gVisor fails the check, with the reason in the report.
+
 ## What it does
 
 ```
@@ -139,6 +152,10 @@ level `error` only when it makes the gate fail. See
   and Jobs with an actionable reason: the Kubernetes API rejects in-place
   `runtimeClassName` patches for both (a running Pod's spec and a Job's
   template are immutable), so those workloads must be re-created instead.
+  When a workload in the plan has the marker of a deploy tool (Argo CD,
+  Flux, Helm), the plan has the warning `source-managed`: `apply` changes
+  the live object only, so the source that the tool deploys from needs the
+  change too. `scan` records the marker as `managedBy` on the workload.
 - **`apply`** is the only stage that mutates the cluster. It runs the
   preflight first and refuses to touch anything when the cluster cannot host
   the plan (exit `5`, every step `skipped`, `--skip-preflight` to override).
@@ -158,6 +175,16 @@ level `error` only when it makes the gate fail. See
   is harmless, and removing a specific toleration by JSON Patch index is
   fragile). Rollback runs no preflight: moving pods back to runc needs no
   gVisor node.
+- **`verify`** is read-only. For each step of the plan it checks that every
+  live pod has the `runtimeClassName` and runs on a node that the
+  RuntimeClass selects; `--in-pod-probe` also looks for gVisor markers in
+  one pod. One look directly after `apply` finds a rollout in progress and
+  reports a mismatch, so a pipeline passes `--wait <duration>`: verify then
+  looks again until every step is ok or the time ends. With a wait, a step
+  is ok only when its pods are Ready and stay Ready for 10 seconds with no
+  restart, so exit `4` after a wait means that the workloads did not come
+  up in gVisor. A workload with no pods now (`replicas: 0`, a CronJob
+  between two runs) is checked on its pod template.
 
 The manual alternative is a sequence of `kubectl get` to enumerate, hand
 classification against the gVisor docs, per-controller `kubectl patch` for
@@ -311,7 +338,7 @@ elided fields are marked `...`.
   | 1    | Generic error (kubeconfig, network, malformed plan, etc). |
   | 2    | `scan` / `explain namespace` / `explain workload`: at least one `incompatible` workload. |
   | 3    | `apply` or `rollback`: partial outcome; idempotent re-run is safe. |
-  | 4    | `verify`: `runtimeClassName` mismatch, hosting node outside the RuntimeClass `nodeSelector`, and/or in-pod probe did not find gVisor. |
+  | 4    | `verify`: `runtimeClassName` mismatch, hosting node outside the RuntimeClass `nodeSelector`, in-pod probe did not find gVisor, and/or (with `--wait`) pods that did not stay Ready before the time ended. |
   | 5    | `preflight` / `probe` / `apply`: the cluster cannot host the RuntimeClass; `apply` mutated nothing. |
 
   Full table in [`docs/exit-codes.md`](docs/exit-codes.md).
@@ -369,7 +396,7 @@ make kind-down
 | `agentmoat plan`     | Produce a deterministic `MigrationPlan` from a scan. RO.      |
 | `agentmoat apply`    | Patch workloads per the plan. Default dry-run. Idempotent.    |
 | `agentmoat rollback` | Reverse a previously applied plan. Default dry-run.           |
-| `agentmoat verify`   | Confirm live pods match the plan's `runtimeClassName`. RO.    |
+| `agentmoat verify`   | Confirm live pods match the plan's `runtimeClassName`. With `--wait`, wait for the rollout and for Ready pods. RO. |
 | `agentmoat explain`  | Embedded docs viewer; `explain namespace` / `explain workload` for deep scans. |
 | `agentmoat version`  | Print binary version and git SHA.                             |
 
@@ -408,6 +435,7 @@ make kind-down
 | `--no-events`              | apply/rollback | `false`   | Do not emit Kubernetes Events per mutation.                             |
 | `--no-audit`               | apply/rollback | `false`   | Do not append to `~/.agentmoat/audit.jsonl`.                            |
 | `--in-pod-probe`           | verify         | `false`   | Exec into a running pod and check dmesg/cmdline for gVisor markers.     |
+| `--wait`                   | verify         | `0`       | Look again until every step is ok and its pods stay Ready, for at most this long (`3m`). `0` looks one time and does not read readiness. |
 
 ### Output formats
 

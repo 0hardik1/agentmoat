@@ -50,7 +50,16 @@ The other commands follow the same order. The headline says the result
 (`apply`: was the cluster changed; `verify`: do the pods run in the sandbox;
 `preflight`: can the cluster host the RuntimeClass). The rows that need a
 person come next: failed steps, mismatches, error findings. The rest is in a
-collapsed block. `probe nvproxy` writes the preflight report with the probe
+collapsed block.
+
+The headline of `verify --wait` says that the result is after a wait, and how
+the wait ended: "3 of 8 workload(s) are not verified after a wait of 3m0s".
+After one look, "not verified" can mean that the rollout is in progress.
+After a wait it means that the workloads did not come up, and the reader of a
+job summary cannot see the command line to tell the two apart. The table then
+has a Ready column (the Ready pods of all pods of the step).
+
+`probe nvproxy` writes the preflight report with the probe
 result in the facts: the `runsc` release, the number of drivers that nvproxy
 supports, and the support status of each group of GPU nodes.
 

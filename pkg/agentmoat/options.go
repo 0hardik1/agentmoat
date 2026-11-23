@@ -227,6 +227,17 @@ type VerifyOptions struct {
 	// API-side.
 	InPodProbe bool
 
+	// Wait, when it is more than zero, makes Verify look at the cluster
+	// again until every step is ok or this much time passed. With a wait
+	// time, a step is ok only when its pods are also Ready and stay
+	// Ready. Zero means one look, with no readiness check. This is what a
+	// pipeline uses directly after `apply --dry-run=false`.
+	Wait time.Duration
+
+	// Clock is the testing seam for the wait loop. Nil means the system
+	// clock.
+	Clock verifier.Clock
+
 	// Stderr is the writer for progress messages. Defaults to os.Stderr
 	// in cmd/. Set to io.Discard to silence.
 	Stderr io.Writer

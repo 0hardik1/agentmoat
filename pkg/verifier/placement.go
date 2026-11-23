@@ -41,11 +41,19 @@ type stepDeps struct {
 	exec      ExecRunner
 	placement *placementChecker
 	stderr    io.Writer
+
+	// requireReady makes a step ok only when its pods are Ready. It is on
+	// when the verify has a wait time (see wait.go and readiness.go).
+	requireReady bool
 }
 
 // placementChecker memoizes RuntimeClass and Node reads across steps. A
 // plan with 40 Deployments on the same 3 nodes should cost 1 RuntimeClass
 // GET and 3 Node GETs, not 43 and 120.
+//
+// A read that failed for a reason other than "not found" is not kept. With
+// a wait time the same checker serves every round, and one network error in
+// the first round must not turn the placement check off for the full wait.
 type placementChecker struct {
 	client kubernetes.Interface
 	rcs    map[string]rcLookup
@@ -130,7 +138,9 @@ func (p *placementChecker) runtimeClass(ctx context.Context, name string) rcLook
 	default:
 		out.selector = rc.Scheduling.NodeSelector
 	}
-	p.rcs[name] = out
+	if err == nil || apierrors.IsNotFound(err) {
+		p.rcs[name] = out
+	}
 	return out
 }
 
@@ -149,7 +159,9 @@ func (p *placementChecker) node(ctx context.Context, name string) nodeLookup {
 	default:
 		out.labels = n.Labels
 	}
-	p.nodes[name] = out
+	if err == nil || apierrors.IsNotFound(err) {
+		p.nodes[name] = out
+	}
 	return out
 }
 

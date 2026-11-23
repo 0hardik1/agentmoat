@@ -9,7 +9,7 @@ and AI agents can branch on it.
 | `1` | Generic error. Could not load kubeconfig, network failure, unparseable flag, etc. For `apply`/`rollback`, also emitted when **every** step failed. For `scan -f`, a manifest that does not parse, or `--fail-on sandboxed` on input that is not rendered. The stderr message names the cause. | All commands |
 | `2` | Compatibility issues found. At least one workload was classified as `incompatible`. For `scan`, `--fail-on` changes which workloads count (see below). | `agentmoat scan`, `agentmoat explain namespace`, `agentmoat explain workload` |
 | `3` | Partial outcome. Some steps succeeded and others failed; idempotent re-run is safe. | `agentmoat apply`, `agentmoat rollback` |
-| `4` | Verify failed. Live pods do not match the plan's expected `runtimeClassName`, the hosting nodes fall outside the RuntimeClass `nodeSelector`, and/or (with `--in-pod-probe`) the in-container probe did not find gVisor markers. | `agentmoat verify` |
+| `4` | Verify failed. Live pods do not match the plan's expected `runtimeClassName`, the hosting nodes fall outside the RuntimeClass `nodeSelector`, (with `--in-pod-probe`) the in-container probe did not find gVisor markers, and/or (with `--wait`) the pods did not stay Ready before the wait time ended. | `agentmoat verify` |
 | `5` | Cluster not ready. The preflight found an error: no RuntimeClass, a RuntimeClass with no `scheduling.nodeSelector`, no Ready node matching it, untolerated taints on every matching node, or only EKS Auto Mode / Bottlerocket nodes. For `apply`, every step is reported `skipped` and nothing was mutated. For `probe nvproxy`, the probe pod was not created. | `agentmoat preflight`, `agentmoat probe nvproxy`, `agentmoat apply` |
 
 ## Scan exit code 2 and `--fail-on`
@@ -63,6 +63,68 @@ With `--in-pod-probe`, the verifier also execs into a running pod and
 checks `dmesg`, `/proc/cmdline`, and `uname` output for a gVisor marker.
 A pod whose spec says `gvisor` but whose kernel surface does not look
 gVisor-shaped is demoted to `mismatch` even when the API field is correct.
+
+A workload that has no pods now, and wants none, is checked on its pod
+template: a Deployment or StatefulSet at `replicas: 0`, a DaemonSet that
+selects no node, a Job that is finished. The result then has
+`basis: template`. A CronJob is always checked on its template, because a Job
+from before the change keeps its old pods until it ends. A workload that
+wants pods and has none is an `error`.
+
+### `verify --wait`
+
+Without `--wait`, verify looks at the cluster one time. Directly after
+`apply --dry-run=false` that look finds a rollout in progress (old pods with
+no class, or no pods), and the result is exit `4` for a migration that is
+correct and not finished. A pipeline cannot act on that.
+
+With `--wait <duration>` (for example `--wait 3m`), verify looks again every
+5 seconds until every step is ok or the time ends. Two things change:
+
+- **Pods must be Ready, and stay Ready.** A step is ok only when all its pods
+  have the class, are Ready, and stayed Ready for 10 seconds with no restart
+  and no replaced pod. One look that finds a pod Ready is not sufficient: a
+  container with no readiness probe is Ready from its start until it stops,
+  so a pod in a crash loop is Ready for a moment in each restart. The settle
+  time is never more than the wait time.
+- **Exit `4` means more.** After a wait, exit `4` says that the workloads did
+  not come up in gVisor in the time that you gave them. That is the signal
+  to roll back.
+
+A step that is not ok after the wait is a `mismatch` (or an `error`, when
+the workload could not be read or has no pods). Its `message` and its
+`readiness` block say why: the pods that are not Ready, and the reason of the
+first one (`container app is waiting: CrashLoopBackOff, 4 restart(s)`, or the
+message of the scheduler for a pod that has no node). In a rolling update
+that does not go on, the old pods stay, and the message names both: the old
+pod that does not have the class, and the new pod that does not start.
+
+The report says how the wait ended, in `metadata.wait`:
+
+| Field | Meaning |
+| --- | --- |
+| `requestedSeconds` | The `--wait` value. |
+| `waitedSeconds` | The time from the first look to the last one. |
+| `rounds` | The number of looks. |
+| `timedOut` | `true` when the time ended with one or more steps not ok. |
+| `interrupted` | `true` when the caller canceled the verify: an MCP client that cancels the tool call, or a program that uses the library and cancels its context. The results are those of the last complete look, and they are not a verdict. The CLI never writes this field (see below). |
+
+The wait time is not a deadline on the API calls. A look that started before
+the time ended runs to its end, so the report has the reason for each step
+and not `context deadline exceeded`. The command can thus run a few seconds
+longer than the wait time.
+
+An interrupt (Ctrl-C, or the SIGTERM of a job that the CI system cancels)
+ends `agentmoat verify` by the signal, with no report and no exit code of its
+own. This is on purpose. A shell goes on with the right side of
+`verify --wait 3m || rollback --dry-run=false` when the left side returns an
+exit code, and it stops the full list when the left side dies by the signal.
+An interrupt must never start a rollback.
+
+A workload with no pods now (see above) does not use the wait time. With
+`--in-pod-probe`, the probe runs one time for each step, when its pods have
+settled. Progress goes to stderr (`verify: waiting: 3 of 8 step(s) ok, 2m10s
+left`); `-q` removes it.
 
 ## Preflight exit code 5 in detail
 
@@ -129,6 +191,19 @@ helm template ./chart | agentmoat scan -f - --fail-on sandboxed
 
 # After apply, confirm spec and (optionally) runtime inside the pod.
 agentmoat verify --plan plan.json --in-pod-probe || test $? -eq 4
+
+# In a pipeline: apply, wait for the workloads to come up in gVisor, and roll
+# back when they do not. Exit 4 from `verify --wait` is "they did not come up
+# in 3 minutes"; exit 1 is "verify could not run". In the two cases the
+# cluster is not in a known good state, so roll back and fail the job.
+# Rollback is idempotent.
+agentmoat apply --plan plan.json --dry-run=false
+rc=0
+agentmoat verify --plan plan.json --wait 3m -o markdown >> "$GITHUB_STEP_SUMMARY" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  agentmoat rollback --plan plan.json --dry-run=false
+  exit "$rc"
+fi
 
 # Before planning at all: can this cluster host gVisor pods? Exit 5 is
 # "not yet", with the finding ids in the JSON.

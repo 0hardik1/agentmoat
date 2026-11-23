@@ -67,10 +67,31 @@ func TestVerifyReportRoundTrip(t *testing.T) {
 		AgentmoatVersion: "test",
 		PlanHash:         "abc123",
 		InPodProbe:       true,
+		Wait:             &VerifyWait{RequestedSeconds: 180, WaitedSeconds: 180, Rounds: 37, TimedOut: true},
 	}
 	r.Spec = VerifySpec{
-		Summary: VerifySummary{Total: 2, OK: 1, Mismatch: 1, Error: 0},
+		Summary: VerifySummary{Total: 4, OK: 2, Mismatch: 2, Error: 0},
 		Results: []VerifyResult{
+			{
+				Order:    3,
+				Target:   WorkloadRef{Kind: "CronJob", Namespace: "ns-a", Name: "report"},
+				Status:   VerifyStatusOK,
+				Expected: "gvisor",
+				Actual:   "gvisor",
+				Basis:    VerifyBasisTemplate,
+			},
+			{
+				Order:    4,
+				Target:   WorkloadRef{Kind: "StatefulSet", Namespace: "ns-a", Name: "db"},
+				Status:   VerifyStatusMismatch,
+				Expected: "gvisor",
+				Actual:   "gvisor",
+				Message:  "pod db-0 is not Ready: container app is waiting: CrashLoopBackOff, 4 restart(s)",
+				Readiness: &PodReadiness{
+					Pods: 2, Ready: 1, NotReady: []string{"db-0"},
+					Message: "pod db-0 is not Ready: container app is waiting: CrashLoopBackOff, 4 restart(s)",
+				},
+			},
 			{
 				Order:    1,
 				Target:   WorkloadRef{Kind: "Deployment", Namespace: "ns-a", Name: "web"},
@@ -552,5 +573,86 @@ func TestPlanMetadataSource(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"source":{"type":"manifests"}`) {
 		t.Errorf("JSON lacks the source block:\n%s", data)
+	}
+}
+
+// TestVerifyWaitFields pins the wire names of the fields that `verify
+// --wait` adds, and checks that a verify with no wait has none of them: a
+// reader of the report must be able to tell "one look" from "a wait" by the
+// key alone.
+func TestVerifyWaitFields(t *testing.T) {
+	t.Parallel()
+	plain := NewVerifyReport()
+	plain.Spec.Results = []VerifyResult{{Order: 1, Status: VerifyStatusOK, Expected: "gvisor", Actual: "gvisor"}}
+	data, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, key := range []string{`"wait"`, `"basis"`, `"readiness"`} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("a verify with no wait has the key %s:\n%s", key, data)
+		}
+	}
+
+	waited := NewVerifyReport()
+	waited.Metadata.Wait = &VerifyWait{RequestedSeconds: 60, WaitedSeconds: 20, Rounds: 5}
+	waited.Spec.Results = []VerifyResult{
+		{Order: 1, Status: VerifyStatusOK, Basis: VerifyBasisTemplate},
+		{Order: 2, Status: VerifyStatusOK, Readiness: &PodReadiness{Pods: 2, Ready: 2, Stable: true}},
+	}
+	data, err = json.Marshal(waited)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, want := range []string{
+		// timedOut is always there in a wait block: false is an answer.
+		// interrupted is there only when it is true.
+		`"wait":{"requestedSeconds":60,"waitedSeconds":20,"rounds":5,"timedOut":false}`,
+		`"basis":"template"`,
+		`"readiness":{"pods":2,"ready":2,"stable":true}`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("JSON lacks %s:\n%s", want, data)
+		}
+	}
+}
+
+// TestWorkloadResultManagedBy pins the wire shape of the deploy tool marker
+// on a scan row, the three tool names, and its absence when there is no
+// marker.
+func TestWorkloadResultManagedBy(t *testing.T) {
+	t.Parallel()
+	for got, want := range map[string]string{ManagedByArgoCD: "argocd", ManagedByFlux: "flux", ManagedByHelm: "helm"} {
+		if got != want {
+			t.Errorf("tool name %q, want %q", got, want)
+		}
+	}
+	row := WorkloadResult{Kind: "Deployment", Namespace: "ns", Name: "web", Compatibility: CompatibilityCompatible}
+	data, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "managedBy") {
+		t.Errorf("a row with no marker has the key managedBy:\n%s", data)
+	}
+
+	row.ManagedBy = &ManagedBy{Tool: ManagedByArgoCD, Evidence: "annotation argocd.argoproj.io/tracking-id"}
+	data, err = json.Marshal(row)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if want := `"managedBy":{"tool":"argocd","evidence":"annotation argocd.argoproj.io/tracking-id"}`; !strings.Contains(string(data), want) {
+		t.Errorf("JSON lacks %s:\n%s", want, data)
+	}
+	yamlData, err := yaml.Marshal(row)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	var back WorkloadResult
+	if err := yaml.Unmarshal(yamlData, &back); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if back.ManagedBy == nil || *back.ManagedBy != *row.ManagedBy {
+		t.Errorf("managedBy did not survive the YAML round trip: %s", yamlData)
 	}
 }

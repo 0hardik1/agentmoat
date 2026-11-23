@@ -8,7 +8,8 @@
 //   - resolving the source (in-memory ScanReport vs running a Scan).
 //   - stamping the produced MigrationPlan with the agentmoat binary version.
 //   - attaching Spec.Warnings derived from the scan's ClusterFacts (see
-//     warnings.go). The planner itself stays a pure function of workloads
+//     warnings.go) and from the deploy tool markers on the workloads (see
+//     managed.go). The planner itself stays a pure function of workloads
 //     and options; warnings never enter the plan hash.
 //
 // Both the CLI and the MCP server call into this so the resulting
@@ -61,27 +62,39 @@ func Plan(ctx context.Context, opts PlanOptions) (*schema.MigrationPlan, error) 
 	// the scan ran. Apply re-checks the live cluster regardless.
 	plan.Spec.Warnings = planWarnings(report.Metadata.ClusterFacts, plan.Spec.Options.RuntimeClassName)
 
+	clusterWarnings := len(plan.Spec.Warnings)
+
 	// A plan made from manifests is a preview. Mark it (loadPlan refuses a
 	// marked plan for apply, rollback, and verify) and say so in a warning,
 	// first in the list, because it is the one that changes what the
 	// reader can do with the file. Like every warning, and like Source, it
 	// is outside the plan hash.
+	var sourceManaged *schema.PlanWarning
 	if src := report.Metadata.Source; src != nil {
 		plan.Metadata.Source = &schema.ReportSource{Type: src.Type}
 		plan.Spec.Warnings = append([]schema.PlanWarning{{
 			ID:      WarningManifestSource,
 			Message: manifestPlanMessage,
 		}}, plan.Spec.Warnings...)
+	} else if sourceManaged = sourceManagedWarning(plan, report); sourceManaged != nil {
+		// Workloads that a deploy tool owns (managed.go). Only for a plan
+		// that `apply` accepts: a preview changes no live object, so
+		// there is no live change that the source does not have.
+		plan.Spec.Warnings = append(plan.Spec.Warnings, *sourceManaged)
 	}
 
 	_, _ = fmt.Fprintf(stderr, "planned %d steps (%d workloads excluded)\n",
 		plan.Spec.Summary.Included,
 		plan.Spec.Summary.Excluded,
 	)
-	if plan.Metadata.Source != nil {
+	switch {
+	case plan.Metadata.Source != nil:
 		_, _ = fmt.Fprintf(stderr, "plan: %s\n", manifestPlanMessage)
-	} else if n := len(plan.Spec.Warnings); n > 0 {
-		_, _ = fmt.Fprintf(stderr, "plan: %d cluster warning(s); the cluster may not be able to host this plan yet (run 'agentmoat preflight')\n", n)
+	case clusterWarnings > 0:
+		_, _ = fmt.Fprintf(stderr, "plan: %d cluster warning(s); the cluster may not be able to host this plan yet (run 'agentmoat preflight')\n", clusterWarnings)
+	}
+	if sourceManaged != nil {
+		_, _ = fmt.Fprintf(stderr, "plan: %s\n", sourceManaged.Message)
 	}
 	return plan, nil
 }

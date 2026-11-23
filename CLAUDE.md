@@ -55,7 +55,9 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   (`Scan`, `Plan`, `Apply`, `Rollback`, ...). Both binaries call these.
   `Scan` has two sources: a cluster, or manifest files
   (`scan_manifests.go`, `scan -f`). `gate.go` holds the `--fail-on` decision
-  (`EvaluateGate`), so the exit code logic is not in `cmd/`.
+  (`EvaluateGate`), so the exit code logic is not in `cmd/`. `managed.go`
+  reads the markers of deploy tools (Argo CD, Flux, Helm) into
+  `managedBy`, and makes the `source-managed` plan warning from them.
 - `pkg/scanner/`: returns canonical `[]scanner.Workload` from one of two
   sources. `Enumerate` lists a cluster through `client-go`. `FromManifests`
   decodes YAML or JSON text with no cluster (`ReadManifestPaths` reads the
@@ -87,7 +89,9 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
 - `pkg/verifier/` and `pkg/explainer/`: Phase 3 (shipped). `verify` checks
   that live pods match the plan and run on nodes the RuntimeClass
   `nodeSelector` selects; `explain` renders the embedded docs and
-  per-workload evidence.
+  per-workload evidence. In the verifier, `target.go` reads one workload
+  (its pods, its pod template, and whether it wants pods now), `wait.go` is
+  the `--wait` loop, and `readiness.go` says why a pod is not Ready.
 - `pkg/output/`: the renderers. Table, JSON, and YAML for every document;
   Markdown (`markdown.go`, `markdown_pipeline.go`) for a CI job summary or a
   pull-request comment; SARIF (`sarif.go`) for `scan` only. The renderer
@@ -158,6 +162,18 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
     link, or a mention to its own report. The size has a limit for any
     input (a job summary on GitHub takes 1 MiB); a test in
     `pkg/output/markdown_test.go` checks it.
+12. **Exit 4 from `verify --wait` is a rollback signal.** With a wait time,
+    a step is ok only when all its pods have the class, are Ready, and
+    stayed Ready for the settle time (the same pods, no restart). One look
+    that finds a pod Ready is not sufficient: a pod in a crash loop is Ready
+    for a moment in each restart. The wait time is checked between looks and
+    is never a deadline on the API calls, so a report after a timeout has
+    the reason for each step. A workload that wants no pods now is checked
+    on its pod template and does not use the wait time. Without `--wait`,
+    verify looks one time and does not read readiness. The CLI installs no
+    signal handler: an interrupt must end the process by the signal, so
+    that Ctrl-C on `verify --wait 3m || rollback --dry-run=false` does not
+    start a rollback (a test in `cmd/agentmoat/verify_test.go` checks it).
 
 ## Conventions (mirror the existing code)
 
@@ -183,7 +199,8 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   **Phase 2** (planner + applier + rollback): shipped and exercised by
   `make e2e`.
 - **Phase 3** (verifier + explainer): shipped. `verify` (pod
-  `runtimeClassName` check, optional `--in-pod-probe`) and `explain`
+  `runtimeClassName` check, optional `--in-pod-probe`, `--wait` for a
+  pipeline that runs it directly after `apply`) and `explain`
   (embedded docs plus `explain namespace` / `explain workload` deep scans)
   are wired in `cmd/agentmoat/` and exercised by `make e2e`.
 - **Phase 4** (MCP server): shipped. `cmd/agentmoat-mcp/` serves 9 tools

@@ -238,6 +238,10 @@ func workloadResult(w scanner.Workload, v classifier.Verdict) schema.WorkloadRes
 	if rc := w.PodSpec.RuntimeClassName; rc != nil {
 		result.RuntimeClassName = *rc
 	}
+	// The deploy tool that owns the object, when it left a marker (see
+	// managed.go). The planner does not read it; `plan` makes a warning
+	// from it.
+	result.ManagedBy = managedBy(w.Labels, w.Annotations)
 	return result
 }
 

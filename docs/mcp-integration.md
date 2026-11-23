@@ -42,7 +42,7 @@ byte-identical: same Go struct, same `json:` tags, same APIVersion
 | `propose_plan`      | `agentmoat.Plan`              | no       | Same scan in -> same `planHash`. Accepts `scan_report_path` to reuse a saved scan, `facts_path` for the facts, `add_toleration` for the pod toleration. |
 | `apply_plan`        | `agentmoat.Apply`             | YES      | Defaults to dry-run. Must set `"dry_run": false` explicitly to mutate. Runs the preflight first; `skip_preflight` bypasses it. |
 | `rollback_plan`     | `agentmoat.Rollback`          | YES      | Same dry-run gate as `apply_plan`.                                   |
-| `verify_migration`  | `agentmoat.Verify`            | no       | Set `in_pod_probe=true` to also exec a /proc-and-uname probe.        |
+| `verify_migration`  | `agentmoat.Verify`            | no       | Set `in_pod_probe=true` to also exec a /proc-and-uname probe. Set `wait` (a duration such as `"2m"`) directly after `apply_plan`: the tool then looks again until every step is ok and its pods stay Ready, and the report has `metadata.wait`. The call does not return before that, so keep `wait` below the time limit that your client has for a tool call. |
 | `explain`           | `agentmoat.Explain`           | no       | Offline; reads the embedded docs.                                    |
 
 **Safety gate.** The mutating tools (`apply_plan`, `rollback_plan`,

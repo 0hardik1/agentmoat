@@ -57,7 +57,7 @@ admitted with that selector and lands on the worker.
 ./bin/agentmoat plan -n agentmoat-e2e -o json > plan.json
 ./bin/agentmoat apply --plan plan.json                 # dry-run by default
 ./bin/agentmoat apply --plan plan.json --dry-run=false
-./bin/agentmoat verify --plan plan.json --in-pod-probe
+./bin/agentmoat verify --plan plan.json --wait 3m --in-pod-probe  # waits for the rollout and for Ready pods
 ./bin/agentmoat rollback --plan plan.json --dry-run=false
 ```
 

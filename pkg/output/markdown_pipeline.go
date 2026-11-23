@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/0hardik1/agentmoat/internal/schema"
 )
@@ -200,12 +201,19 @@ func writeStepTable(d *mdDoc, steps []schema.StepResult, dryRun bool) {
 // the rest.
 func writeVerifyReportMarkdown(d *mdDoc, report *schema.VerifyReport) {
 	sum := report.Spec.Summary
+	wait := report.Metadata.Wait
 	d.heading(2, "agentmoat verify")
 	switch {
 	case sum.Mismatch+sum.Error > 0:
-		d.linef("❌ **%d of %d workload(s) are not verified.**", sum.Mismatch+sum.Error, sum.Total)
+		// The headline says when the result is after a wait. A job
+		// summary shows no stderr: "not verified" after one look means
+		// "look again", and after a wait that timed out it means "roll
+		// back". The reader must not have to guess which one this is.
+		d.linef("❌ **%d of %d workload(s) are not verified%s.**", sum.Mismatch+sum.Error, sum.Total, verifyWaitClause(wait))
 	case sum.Total == 0:
 		d.linef("⚠️ **Nothing was verified.** The plan has no steps.")
+	case wait != nil:
+		d.linef("✅ **All %d workload(s) are verified, and their pods stayed Ready.**", sum.Total)
 	default:
 		d.linef("✅ **All %d workload(s) are verified.**", sum.Total)
 	}
@@ -214,11 +222,15 @@ func writeVerifyReportMarkdown(d *mdDoc, report *schema.VerifyReport) {
 	if report.Metadata.InPodProbe {
 		probe = "yes"
 	}
-	mdChips(d,
+	chips := []string{
 		mdChip("Plan hash", report.Metadata.PlanHash),
 		mdChip("Cluster", report.Metadata.Cluster),
-		"In-pod probe: "+probe,
-	)
+		"In-pod probe: " + probe,
+	}
+	if wait != nil {
+		chips = append(chips, "Wait: "+describeWait(wait))
+	}
+	mdChips(d, chips...)
 	d.table(
 		[]string{"Workloads", "OK", "Mismatch", "Error"},
 		map[int]bool{0: true, 1: true, 2: true, 3: true},
@@ -235,17 +247,38 @@ func writeVerifyReportMarkdown(d *mdDoc, report *schema.VerifyReport) {
 	}
 	if len(attention) > 0 {
 		d.heading(3, fmt.Sprintf("Mismatch or error (%d)", len(attention)))
-		writeVerifyTable(d, attention)
+		writeVerifyTable(d, attention, wait != nil)
 	}
 	if len(ok) > 0 {
 		d.details(fmt.Sprintf("OK (%d)", len(ok)))
-		writeVerifyTable(d, ok)
+		writeVerifyTable(d, ok, wait != nil)
 		d.endDetails()
 	}
 }
 
-// writeVerifyTable writes one row for each verify result.
-func writeVerifyTable(d *mdDoc, results []schema.VerifyResult) {
+// verifyWaitClause is the end of the "not verified" headline for a verify
+// with a wait time: how the wait ended. It is empty with no wait.
+func verifyWaitClause(w *schema.VerifyWait) string {
+	if w == nil {
+		return ""
+	}
+	requested := time.Duration(w.RequestedSeconds) * time.Second
+	if w.Interrupted {
+		return fmt.Sprintf(". The wait of %s was interrupted after %s",
+			requested, time.Duration(w.WaitedSeconds)*time.Second)
+	}
+	return fmt.Sprintf(" after a wait of %s", requested)
+}
+
+// writeVerifyTable writes one row for each verify result. The Ready column
+// is there only after a wait: without one the verifier does not read
+// readiness.
+func writeVerifyTable(d *mdDoc, results []schema.VerifyResult, waited bool) {
+	headers := []string{"#", "Namespace", "Kind", "Name", "Status", "Expected", "Actual", "Probe", "Node"}
+	if waited {
+		headers = append(headers, "Ready")
+	}
+	headers = append(headers, "Message")
 	rows := make([][]string, 0, len(results))
 	for _, r := range results {
 		row := []string{fmt.Sprint(r.Order)}
@@ -256,12 +289,17 @@ func writeVerifyTable(d *mdDoc, results []schema.VerifyResult) {
 			mdCodeCell(r.Actual),
 			mdText(summarizeProbe(r.Probe)),
 			mdText(summarizeNodePlacement(r.NodePlacement)),
-			mdText(r.Message),
 		)
+		if waited {
+			row = append(row, mdText(summarizeReadiness(r)))
+		}
+		// The message of a step that is not Ready has text from the
+		// cluster in it: a pod name, a container name, a scheduler
+		// message. mdText makes it inert.
+		row = append(row, mdText(r.Message))
 		rows = append(rows, row)
 	}
-	d.table([]string{"#", "Namespace", "Kind", "Name", "Status", "Expected", "Actual", "Probe", "Node", "Message"},
-		map[int]bool{0: true}, rows)
+	d.table(headers, map[int]bool{0: true}, rows)
 }
 
 // ---------------------------------------------------------------------------

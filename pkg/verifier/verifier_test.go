@@ -551,7 +551,7 @@ func TestVerify_DefaultRuntimeClassName_WhenStepEmpty(t *testing.T) {
 }
 
 func TestVerify_JobAndDaemonSetSelectors(t *testing.T) {
-	// Cover the Job and DaemonSet branches in resolvePods.
+	// Cover the Job and DaemonSet branches in resolveTarget.
 	jobLabels := map[string]string{"app": "j"}
 	dsLabels := map[string]string{"app": "d"}
 	client := fake.NewSimpleClientset(
@@ -589,7 +589,9 @@ func TestVerify_JobAndDaemonSetSelectors(t *testing.T) {
 func TestVerify_CronJobFallbackToTemplateLabels(t *testing.T) {
 	// CronJob has no top-level selector. The verifier falls back to the
 	// JobTemplate's pod-template labels: the pod the cron eventually
-	// creates carries those labels.
+	// creates carries those labels. The template has the class, as it
+	// does after an apply: for a CronJob the template decides the verdict
+	// (see target.go), and the pod is what placement and the probe use.
 	cjLabels := map[string]string{"cronjob": "nightly"}
 	client := fake.NewSimpleClientset(
 		&batchv1.CronJob{
@@ -599,6 +601,7 @@ func TestVerify_CronJobFallbackToTemplateLabels(t *testing.T) {
 					Spec: batchv1.JobSpec{
 						Template: corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{Labels: cjLabels},
+							Spec:       corev1.PodSpec{RuntimeClassName: strPtr("gvisor")},
 						},
 					},
 				},
@@ -727,6 +730,7 @@ func TestVerify_TerminalPodsIgnored(t *testing.T) {
 				Spec: batchv1.JobSpec{
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{Labels: cronLabels},
+						Spec:       corev1.PodSpec{RuntimeClassName: strPtr("gvisor")},
 					},
 				},
 			},

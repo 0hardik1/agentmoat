@@ -239,6 +239,11 @@ type WorkloadResult struct {
 	// Nil for a cluster scan.
 	Origin *Origin `json:"origin,omitempty" yaml:"origin,omitempty"`
 
+	// ManagedBy names the tool that deploys this workload from a source,
+	// when the object has a marker of one. Nil means that no known marker
+	// is there, which is not proof that no tool owns the workload.
+	ManagedBy *ManagedBy `json:"managedBy,omitempty" yaml:"managedBy,omitempty"`
+
 	// Compatibility is the verdict and the primary field operators look at.
 	Compatibility Compatibility `json:"compatibility" yaml:"compatibility"`
 
@@ -256,6 +261,25 @@ type WorkloadResult struct {
 	// when the workload class is detectable.
 	Overhead string `json:"overhead,omitempty" yaml:"overhead,omitempty"`
 }
+
+// ManagedBy is the deploy tool that a workload has a marker of. `plan` uses
+// it to warn that a live `apply` changes the cluster and not the source that
+// the tool deploys from.
+type ManagedBy struct {
+	// Tool is one of the ManagedBy* constants: "argocd", "flux", "helm".
+	Tool string `json:"tool" yaml:"tool"`
+
+	// Evidence is the label or annotation key that the verdict is from,
+	// with its kind: "annotation argocd.argoproj.io/tracking-id".
+	Evidence string `json:"evidence" yaml:"evidence"`
+}
+
+// The values of ManagedBy.Tool. They are a public surface, like rule IDs.
+const (
+	ManagedByArgoCD = "argocd"
+	ManagedByFlux   = "flux"
+	ManagedByHelm   = "helm"
+)
 
 // Reason is a single classifier finding. The combination of (RuleID,
 // Severity, Description) tells an operator exactly which gotcha tripped and
@@ -629,18 +653,25 @@ const (
 	// for. For controller steps every pod selected by the controller
 	// reports the expected runtimeClassName; for Pod steps the pod itself
 	// does. When --in-pod-probe is on, the probe also returned gVisor
-	// markers.
+	// markers. With a wait time (--wait), the pods are also Ready and
+	// stayed Ready (Readiness.Stable). A controller that wants no pods
+	// now is ok when its pod template has the class (Basis "template").
 	VerifyStatusOK VerifyStatus = "ok"
 
-	// VerifyStatusMismatch: the target exists but its (or its pods')
-	// runtimeClassName does not match Expected. Common after rollback or
-	// when the operator points verify at the wrong plan.
+	// VerifyStatusMismatch: the target exists but the cluster is not in
+	// the state that the plan asked for. Its pods (or, with no pods, its
+	// pod template) do not have the expected runtimeClassName: common
+	// after rollback, in a rollout that is in progress, or when the
+	// operator points verify at the wrong plan. Or the pods have the
+	// class and run on a node that the RuntimeClass does not select. Or,
+	// with a wait time, the pods have the class and are not Ready, or
+	// did not stay Ready; Readiness then says which pods and why.
 	VerifyStatusMismatch VerifyStatus = "mismatch"
 
 	// VerifyStatusError: the verifier could not reach a verdict. The
-	// controller was missing, the selector returned zero pods, the API
-	// server errored, or (when --in-pod-probe is on) the exec call
-	// itself failed. The Message field explains which.
+	// controller was missing, the controller wants pods and the selector
+	// returned none, the API server errored, or (when --in-pod-probe is
+	// on) the exec call itself failed. The Message field explains which.
 	VerifyStatusError VerifyStatus = "error"
 )
 
@@ -677,6 +708,37 @@ type VerifyMetadata struct {
 	// (kubectl exec into a pod and grep /proc/cmdline et al). When false,
 	// the verifier only checked the controller's runtimeClassName field.
 	InPodProbe bool `json:"inPodProbe" yaml:"inPodProbe"`
+
+	// Wait is set when the verify ran with a wait time (`verify --wait`).
+	// Nil means one look at the cluster, with no wait.
+	Wait *VerifyWait `json:"wait,omitempty" yaml:"wait,omitempty"`
+}
+
+// VerifyWait records a verify that looked at the cluster more than one time
+// (`verify --wait <duration>`). A job summary shows no stderr and no exit
+// code, so the fact that the result is "after a wait that timed out" must be
+// in the report.
+type VerifyWait struct {
+	// RequestedSeconds is the wait time that the caller gave.
+	RequestedSeconds int `json:"requestedSeconds" yaml:"requestedSeconds"`
+
+	// WaitedSeconds is the time from the first look to the last one.
+	WaitedSeconds int `json:"waitedSeconds" yaml:"waitedSeconds"`
+
+	// Rounds is the number of times the verifier looked at the cluster.
+	Rounds int `json:"rounds" yaml:"rounds"`
+
+	// TimedOut is true when the wait time ended and one or more steps
+	// were not ok.
+	TimedOut bool `json:"timedOut" yaml:"timedOut"`
+
+	// Interrupted is true when the caller canceled the verify. The
+	// results are then those of the last complete round, and a step that
+	// is not ok in them is not a verdict: the wait did not get its time.
+	// The CLI never writes this: an interrupt ends the process. It is
+	// for a caller that cancels the context of the library, such as an
+	// MCP client that cancels the tool call.
+	Interrupted bool `json:"interrupted,omitempty" yaml:"interrupted,omitempty"`
 }
 
 // VerifySpec is the payload of a VerifyReport: a summary plus the per-step
@@ -732,6 +794,50 @@ type VerifyResult struct {
 	// RuntimeClass nodeSelector selects (see preflight.go). Nil when the
 	// spec-level check already failed, so placement was not evaluated.
 	NodePlacement *NodePlacement `json:"nodePlacement,omitempty" yaml:"nodePlacement,omitempty"`
+
+	// Basis says what the verdict is about. Empty means the live pods,
+	// which is the usual case. VerifyBasisTemplate means the pod template
+	// of the controller, because the workload has no pods to look at now
+	// (replicas: 0, a CronJob between two runs).
+	Basis string `json:"basis,omitempty" yaml:"basis,omitempty"`
+
+	// Readiness reports whether the step's pods are Ready. It is set
+	// only with a wait time (`verify --wait`); nil in all other cases.
+	// It is about the live pods that have the expected runtimeClassName.
+	// In a rolling update that does not go on, those are the new pods,
+	// and their readiness is the reason that the old pods are still
+	// there.
+	Readiness *PodReadiness `json:"readiness,omitempty" yaml:"readiness,omitempty"`
+}
+
+// VerifyBasisTemplate is the VerifyResult.Basis of a verdict that comes from
+// the controller's pod template and not from live pods.
+const VerifyBasisTemplate = "template"
+
+// PodReadiness is the verifier's answer to "do the pods run?". A pod can
+// have runtimeClassName=gvisor and never start in the sandbox (a crash loop,
+// a node with no runsc). `verify --wait` reads the Ready condition of each
+// pod so that such a workload is not reported as ok.
+type PodReadiness struct {
+	// Pods is the number of pods that were checked (the live pods that
+	// have the expected runtimeClassName), and Ready is how many of them
+	// have the condition Ready=True.
+	Pods  int `json:"pods"  yaml:"pods"`
+	Ready int `json:"ready" yaml:"ready"`
+
+	// Stable is true when all the pods were Ready, with no restart and no
+	// replaced pod, for the settle time. One look that finds a pod Ready
+	// is not enough: a container with no readiness probe is Ready from
+	// its start until it crashes.
+	Stable bool `json:"stable" yaml:"stable"`
+
+	// NotReady names the pods that are not Ready, sorted. At most ten.
+	NotReady []string `json:"notReady,omitempty" yaml:"notReady,omitempty"`
+
+	// Message says why the first pod in NotReady is not Ready, for
+	// example "container web is waiting: CrashLoopBackOff". It is also
+	// set when the pods are Ready and not yet stable.
+	Message string `json:"message,omitempty" yaml:"message,omitempty"`
 }
 
 // ProbeResult is the output of one in-pod gVisor probe. The verifier picks a

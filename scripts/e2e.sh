@@ -13,6 +13,8 @@
 #   2. `agentmoat plan`     over the stored ScanReport (deterministic
 #                           ordering, eight compatible steps, PlanHash
 #                           present, no toleration, no cluster warnings).
+#                           One workload has the marker of a deploy tool,
+#                           so the plan has the `source-managed` warning.
 #   3. `agentmoat apply`    in dry-run mode (default; patch carries only
 #                           runtimeClassName), then again with
 #                           --dry-run=false (real strategic-merge patch),
@@ -20,6 +22,14 @@
 #                           targeting the selector-less RuntimeClass is
 #                           refused (exit 5, nothing patched) unless
 #                           --skip-preflight is passed.
+#   3b. `agentmoat verify --wait`  directly after the real apply, with
+#                           the rollout in progress. This is the pipeline
+#                           form: it must wait for the rollout and exit 0,
+#                           where one look at that moment gives exit 4.
+#                           Run again after the re-apply (with the probe:
+#                           a steady cluster needs only the settle time)
+#                           and after rollback (a short wait that must
+#                           time out and exit 4).
 #   4. `agentmoat verify --in-pod-probe`  confirms each patched workload
 #                           actually runs on runsc by exec-ing a probe
 #                           inside the pod and grepping dmesg / proc for
@@ -121,6 +131,7 @@ E2E_REPLAY_APPLY_BLOCKED="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan-
 E2E_REPLAY_APPLY="$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
 E2E_REPLAY_VERIFY_PROBE="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json --in-pod-probe"
 E2E_REPLAY_VERIFY="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json"
+E2E_REPLAY_VERIFY_WAIT="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json --wait 3m"
 E2E_REPLAY_DEVICE_CGROUP="scripts/check-device-cgroup.sh --node <gvisor-worker>"
 E2E_REPLAY_ROLLBACK="$E2E_REPLAY_AGENT rollback --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
 E2E_REPLAY_EXPLAIN="bin/agentmoat explain"
@@ -324,6 +335,12 @@ assert_eq "scan clusterFacts.runtimeClass.found" "true" \
   "$(jq -r '.metadata.clusterFacts.runtimeClass.found' "$WORK_DIR/scan.json")"
 assert_eq "scan clusterFacts.nodes.matchingAndReady" 1 \
   "$(jq -r '.metadata.clusterFacts.nodes.matchingAndReady' "$WORK_DIR/scan.json")"
+
+# The analytics Deployment has the tracking annotation of Argo CD. The scan
+# records the tool and the key, and no other workload has a marker.
+assert_eq "scan managedBy (workloads with a deploy tool marker)" \
+  "analytics argocd annotation argocd.argoproj.io/tracking-id" \
+  "$(jq -r '.spec.workloads | map(select(.managedBy != null) | "\(.name) \(.managedBy.tool) \(.managedBy.evidence)") | join(";")' "$WORK_DIR/scan.json")"
 e2e_step_pass "scan" "$E2E_REPLAY_SCAN"
 
 # -----------------------------------------------------------------------------
@@ -399,17 +416,23 @@ PLAN_HASH_2=$(jq -r '.metadata.planHash' "$WORK_DIR/plan2.json")
 assert_eq "plan determinism (re-run hash)" "$PLAN_HASH" "$PLAN_HASH_2"
 
 # Placement is the RuntimeClass's job: no step injects the toleration, and
-# a ready cluster produces no plan-level warnings.
+# a ready cluster produces no cluster warning. The one warning is about the
+# workload that a deploy tool owns: `apply` changes the live object, and the
+# source that the tool deploys from does not get the change.
 assert_eq "plan steps addToleration values" "false" \
   "$(jq -r '.spec.steps | map(.addToleration) | unique | join(",")' "$WORK_DIR/plan.json")"
-assert_eq "plan spec.warnings length" 0 \
-  "$(jq -r '.spec.warnings // [] | length' "$WORK_DIR/plan.json")"
+assert_eq "plan warning ids" "source-managed" \
+  "$(jq -r '.spec.warnings // [] | map(.id) | join(",")' "$WORK_DIR/plan.json")"
+SOURCE_MANAGED_MSG=$(jq -r '.spec.warnings[0].message' "$WORK_DIR/plan.json")
+if [[ "$SOURCE_MANAGED_MSG" != "1 of $E2E_COMPAT workload(s) in this plan have the marker of a deploy tool (Argo CD: 1)."* ]]; then
+  fail "plan source-managed warning: unexpected text: $SOURCE_MANAGED_MSG"
+fi
 
 # A plan that targets the selector-less RuntimeClass: the scan's facts
 # describe "gvisor", so the planner flags the mismatch. Used by 3b below.
 "${AGENT[@]}" plan --scan "$WORK_DIR/scan.json" --runtime-class gvisor-noselector --output json \
   >"$WORK_DIR/plan-noselector.json"
-assert_eq "plan (noselector) warning ids" "cluster-facts-runtime-class-mismatch" \
+assert_eq "plan (noselector) warning ids" "cluster-facts-runtime-class-mismatch,source-managed" \
   "$(jq -r '.spec.warnings // [] | map(.id) | join(",")' "$WORK_DIR/plan-noselector.json")"
 e2e_step_pass "plan" "$E2E_REPLAY_PLAN"
 
@@ -493,6 +516,57 @@ assert_eq "apply summary.applied" "$E2E_COMPAT" "$REAL_APPLIED"
 assert_eq "apply summary.alreadyApplied" 0 "$REAL_ALREADY"
 assert_eq "apply summary.failed" 0 "$REAL_FAILED"
 
+# -----------------------------------------------------------------------------
+# 4a. verify --wait, directly after the apply: the pipeline form.
+# -----------------------------------------------------------------------------
+#
+# A pipeline runs verify as the next command after apply. At that moment the
+# rollout is in progress: old pods with no class, or no pods at all. One
+# look reports a mismatch (exit 4) for a migration that is correct. With
+# --wait, verify looks again until every step is ok and its pods stayed
+# Ready, so its exit code is one that a pipeline can act on.
+#
+# Nothing in this script waits for the rollout before this command. The
+# `rollout status` loops below run after it and must find nothing to wait
+# for.
+#
+# The checks:
+#   - exit 0, every step ok, and no timeout.
+#   - every step has pods that are Ready and stable (no step passed on the
+#     class alone).
+#   - more than 3 looks. This is the proof that the command waited for the
+#     rollout. A cluster that is already in the wanted state needs exactly 3
+#     looks (at 0, 5, and 10 seconds: the settle time; step 5b pins that).
+#     A fourth look means that in the first look one step or more did not
+#     have all its pods Ready with the class, which is a rollout in
+#     progress. A progress line on stderr is not such a proof: the first
+#     look never makes a step final, so "0 of 8 step(s) ok" is on stderr in
+#     every run.
+
+e2e_step "verify --wait 3m (directly after apply): expect ok=$E2E_COMPAT, exit 0"
+VERIFY_WAIT_EXIT=0
+"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --wait 3m --output json \
+  >"$WORK_DIR/verify-wait.json" 2>"$WORK_DIR/verify-wait.stderr" || VERIFY_WAIT_EXIT=$?
+sed 's/^/    /' "$WORK_DIR/verify-wait.stderr"
+assert_eq "verify --wait exit code" 0 "$VERIFY_WAIT_EXIT"
+assert_eq "verify --wait summary.ok" "$E2E_COMPAT" \
+  "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-wait.json")"
+assert_eq "verify --wait metadata.wait.requestedSeconds" 180 \
+  "$(jq -r '.metadata.wait.requestedSeconds' "$WORK_DIR/verify-wait.json")"
+assert_eq "verify --wait metadata.wait.timedOut" "false" \
+  "$(jq -r '.metadata.wait.timedOut' "$WORK_DIR/verify-wait.json")"
+assert_eq "verify --wait steps with Ready and stable pods" "$E2E_COMPAT" \
+  "$(jq -r '[.spec.results[] | select(.readiness.stable == true and .readiness.pods > 0 and .readiness.ready == .readiness.pods)] | length' "$WORK_DIR/verify-wait.json")"
+VERIFY_WAIT_ROUNDS=$(jq -r '.metadata.wait.rounds' "$WORK_DIR/verify-wait.json")
+if (( VERIFY_WAIT_ROUNDS <= 3 )); then
+  fail "verify --wait: $VERIFY_WAIT_ROUNDS look(s); more than 3 expected, because the rollout was in progress at the first look"
+fi
+if ! grep -q "^verify: waiting: " "$WORK_DIR/verify-wait.stderr"; then
+  fail "verify --wait: stderr has no progress line"
+fi
+e2e_infra "verify --wait: $VERIFY_WAIT_ROUNDS look(s) in $(jq -r '.metadata.wait.waitedSeconds' "$WORK_DIR/verify-wait.json")s"
+e2e_step_pass "verify --wait (post-apply)" "$E2E_REPLAY_VERIFY_WAIT"
+
 wait_runtime_class deployment web "gvisor"
 wait_runtime_class statefulset cache "gvisor"
 
@@ -501,8 +575,9 @@ NS_HASH=$("${KCTL[@]}" get namespace "$NAMESPACE" \
   -o jsonpath='{.metadata.annotations.agentmoat\.io/plan-hash}')
 assert_eq "namespace plan-hash annotation" "$PLAN_HASH" "$NS_HASH"
 
-# Wait for the rolled workloads to be Ready again so the next apply runs
-# against a steady-state spec.
+# The rolled workloads are Ready again: `verify --wait` above returned only
+# when they were. These loops are a second opinion from kubectl on that, and
+# they keep the next apply on a steady-state spec.
 for dep in "${E2E_COMPAT_DEPLOYMENTS[@]}"; do
   "${KCTL[@]}" -n "$NAMESPACE" rollout status "deployment/$dep" --timeout=180s
 done
@@ -619,6 +694,23 @@ assert_eq "verify summary.ok (post-reapply)" "$E2E_COMPAT" \
   "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-after-reapply.json")"
 assert_eq "verify summary.mismatch (post-reapply)" 0 \
   "$(jq -r '.spec.summary.mismatch' "$WORK_DIR/verify-after-reapply.json")"
+
+# The same check with a wait time, on a cluster that is already in the
+# wanted state. The wait is then the settle time and no more: three looks
+# (at 0, 5, and 10 seconds), and not the 30 seconds that it may use. The
+# in-pod probe runs when the pods have settled, one time for each step.
+VERIFY_STEADY_EXIT=0
+"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --wait 30s --in-pod-probe --output json \
+  >"$WORK_DIR/verify-wait-steady.json" 2>"$WORK_DIR/verify-wait-steady.stderr" || VERIFY_STEADY_EXIT=$?
+assert_eq "verify --wait (steady) exit code" 0 "$VERIFY_STEADY_EXIT"
+assert_eq "verify --wait (steady) summary.ok" "$E2E_COMPAT" \
+  "$(jq -r '.spec.summary.ok' "$WORK_DIR/verify-wait-steady.json")"
+assert_eq "verify --wait (steady) looks" 3 \
+  "$(jq -r '.metadata.wait.rounds' "$WORK_DIR/verify-wait-steady.json")"
+assert_eq "verify --wait (steady) timedOut" "false" \
+  "$(jq -r '.metadata.wait.timedOut' "$WORK_DIR/verify-wait-steady.json")"
+assert_eq "verify --wait (steady) probe detected count" "$E2E_COMPAT" \
+  "$(jq -r '[.spec.results[] | select(.probe.detected == true and .readiness.stable == true)] | length' "$WORK_DIR/verify-wait-steady.json")"
 e2e_step_pass "verify (post-idempotent-apply)" "$E2E_REPLAY_VERIFY_PROBE"
 
 # -----------------------------------------------------------------------------
@@ -678,6 +770,21 @@ assert_eq "verify summary.mismatch (post-rollback)" "$E2E_COMPAT" \
 STATUSES_RB=$(jq -r '.spec.results | map(.status) | sort | unique | join(",")' \
   "$WORK_DIR/verify-after-rollback.json")
 assert_eq "verify result statuses (post-rollback)" "mismatch" "$STATUSES_RB"
+
+# A wait cannot make a wrong state right. With a short wait time the same
+# verify uses all of it, says that it timed out (in the report and on
+# stderr), and exits 4: the signal that a pipeline rolls back on.
+VERIFY_RB_WAIT_EXIT=0
+"${AGENT[@]}" verify --plan "$WORK_DIR/plan.json" --wait 6s --output json \
+  >"$WORK_DIR/verify-wait-rollback.json" 2>"$WORK_DIR/verify-wait-rollback.stderr" || VERIFY_RB_WAIT_EXIT=$?
+assert_eq "verify --wait (post-rollback) exit code" 4 "$VERIFY_RB_WAIT_EXIT"
+assert_eq "verify --wait (post-rollback) timedOut" "true" \
+  "$(jq -r '.metadata.wait.timedOut' "$WORK_DIR/verify-wait-rollback.json")"
+assert_eq "verify --wait (post-rollback) summary.mismatch" "$E2E_COMPAT" \
+  "$(jq -r '.spec.summary.mismatch' "$WORK_DIR/verify-wait-rollback.json")"
+if ! grep -q "wait of 6s timed out" "$WORK_DIR/verify-wait-rollback.stderr"; then
+  fail "verify --wait (post-rollback): stderr does not say that the wait timed out: $(cat "$WORK_DIR/verify-wait-rollback.stderr")"
+fi
 e2e_step_pass "verify (post-rollback)" "$E2E_REPLAY_VERIFY"
 
 # -----------------------------------------------------------------------------
@@ -922,7 +1029,7 @@ assert_eq "preflight (V100) gpu finding" "gpu-product-unsupported" \
 agentmoat_table_and_json "$WORK_DIR/plan-v100.json" \
   "${AGENT[@]}" plan --scan "$WORK_DIR/scan-v100.json"
 assert_eq "plan (V100) exit code" 0 "$AGENT_EXIT"
-assert_eq "plan (V100) warning ids" "gpu-product-unsupported" \
+assert_eq "plan (V100) warning ids" "gpu-product-unsupported,source-managed" \
   "$(jq -r '[.spec.warnings[].id] | join(",")' "$WORK_DIR/plan-v100.json")"
 
 e2e_step "gpu facts: remove the simulated GFD labels from $WORKER_NODE"

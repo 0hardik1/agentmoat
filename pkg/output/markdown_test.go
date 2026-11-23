@@ -995,6 +995,81 @@ func TestVerifyMarkdown(t *testing.T) {
 	if !strings.Contains(empty, "⚠️ **Nothing was verified.**") {
 		t.Errorf("a verify of nothing must not say that all is verified:\n%s", empty)
 	}
+	for _, bad := range []string{"Wait:", "| Ready |"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("a verify with no wait must not show %q:\n%s", bad, out)
+		}
+	}
+}
+
+// TestVerifyMarkdown_Wait: a job summary shows no stderr. The headline must
+// say when "not verified" is the result after a wait, because that is the
+// difference between "look again" and "roll back".
+func TestVerifyMarkdown_Wait(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		wait schema.VerifyWait
+		ok   bool
+		want []string
+	}{
+		{
+			name: "timed out",
+			wait: schema.VerifyWait{RequestedSeconds: 180, WaitedSeconds: 180, Rounds: 37, TimedOut: true},
+			want: []string{
+				"❌ **1 of 3 workload(s) are not verified after a wait of 3m0s.**",
+				"Wait: timed out after 3m0s",
+				"| Node | Ready | Message |",
+				"| 1/3 | pod cache-1 is not Ready: container app is waiting: CrashLoopBackOff, 4 restart(s) (and 1 more pod(s) not Ready) |",
+				"| 2/2 |",
+				"| no pods |",
+			},
+		},
+		{
+			name: "interrupted",
+			wait: schema.VerifyWait{RequestedSeconds: 180, WaitedSeconds: 45, Rounds: 10, Interrupted: true},
+			want: []string{
+				"❌ **1 of 3 workload(s) are not verified. The wait of 3m0s was interrupted after 45s.**",
+				"Wait: interrupted after 45s of 3m0s",
+			},
+		},
+		{
+			name: "all ok",
+			wait: schema.VerifyWait{RequestedSeconds: 180, WaitedSeconds: 20, Rounds: 5},
+			ok:   true,
+			want: []string{
+				"✅ **All 2 workload(s) are verified, and their pods stayed Ready.**",
+				"Wait: done after 20s of 3m0s",
+			},
+		},
+	}
+	for _, tc := range tests {
+		report := waitedVerifyReport(tc.wait)
+		if tc.ok {
+			report.Spec.Results = report.Spec.Results[:2]
+			report.Spec.Summary = schema.VerifySummary{Total: 2, OK: 2}
+		}
+		out := renderMarkdown(t, report, nil)
+		for _, want := range tc.want {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s: the output lacks %q:\n%s", tc.name, want, out)
+			}
+		}
+	}
+}
+
+// TestVerifyMarkdown_HostileReadiness: the reason that a pod is not Ready
+// has text from the cluster in it (a pod name, a container name, a
+// scheduler message). It must be inert in the report, like text from a
+// manifest.
+func TestVerifyMarkdown_HostileReadiness(t *testing.T) {
+	t.Parallel()
+	report := waitedVerifyReport(schema.VerifyWait{RequestedSeconds: 60, WaitedSeconds: 60, Rounds: 13, TimedOut: true})
+	last := &report.Spec.Results[2]
+	last.Message = "pod " + hostile("pod") + " is not Ready: container " + hostile("container") + " is waiting: " + hostile("reason")
+	last.Readiness.Message = last.Message
+	last.Readiness.NotReady = []string{hostile("pod")}
+	assertInert(t, renderMarkdown(t, report, nil), []string{"## agentmoat verify", "### Mismatch or error (1)"})
 }
 
 func TestPreflightMarkdown(t *testing.T) {

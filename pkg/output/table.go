@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
@@ -508,6 +509,13 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 		"plan-hash: " + report.Metadata.PlanHash,
 		fmt.Sprintf("in-pod-probe: %v", report.Metadata.InPodProbe),
 	}
+	// A report after a wait says so, and says how the wait ended: "3 not
+	// ok" after one look and "3 not ok after 3 minutes" are different
+	// facts for the person who decides on a rollback.
+	waited := report.Metadata.Wait != nil
+	if waited {
+		chips = append(chips, "wait: "+describeWait(report.Metadata.Wait))
+	}
 	if _, err := fmt.Fprintln(w, s.Muted.Render(strings.Join(chips, "   "))); err != nil {
 		return err
 	}
@@ -538,11 +546,16 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 
 	var tr trackingTruncator
 
-	// "#" right-aligned.
-	headers := []string{"#", "STATUS", "KIND/NS/NAME", "EXPECTED", "ACTUAL", "PROBE", "NODE", "MESSAGE"}
+	// "#" right-aligned. The READY column is there only after a wait:
+	// without one the verifier does not read readiness.
+	headers := []string{"#", "STATUS", "KIND/NS/NAME", "EXPECTED", "ACTUAL", "PROBE", "NODE"}
+	if waited {
+		headers = append(headers, "READY")
+	}
+	headers = append(headers, "MESSAGE")
 	t := newBaseTable(s, headers, map[int]bool{0: true})
 	for _, r := range report.Spec.Results {
-		t.Row(
+		row := []string{
 			strconv.Itoa(r.Order),
 			StatusBadge(s, string(r.Status)),
 			tr.cell(fmt.Sprintf("%s/%s/%s", r.Target.Kind, r.Target.Namespace, r.Target.Name), maxNameWidth),
@@ -550,13 +563,85 @@ func renderVerifyReportTable(report *schema.VerifyReport, w io.Writer, useColor 
 			displayActual(r.Actual),
 			summarizeProbe(r.Probe),
 			summarizeNodePlacement(r.NodePlacement),
-			tr.cell(r.Message, maxFreeformWidth),
-		)
+		}
+		if waited {
+			row = append(row, summarizeReadiness(r))
+		}
+		row = append(row, tr.cell(r.Message, maxFreeformWidth))
+		t.Row(row...)
 	}
 	if _, err := fmt.Fprintln(w, t.Render()); err != nil {
 		return err
 	}
+	if err := writeVerifyNotOK(s, w, report.Spec.Results); err != nil {
+		return err
+	}
 	return maybePrintTruncationHint(s, w, tr, "messages")
+}
+
+// maxVerifyNotOK is the most steps that the NOT OK block below the verify
+// table lists in full.
+const maxVerifyNotOK = 10
+
+// writeVerifyNotOK prints, below the table, the full message of each step
+// that is not ok. The MESSAGE cell of the table is cut at maxFreeformWidth
+// to keep the columns in line, and that cut removes the part that a person
+// needs: in "pod cache-1 is not Ready: container app is waiting:
+// CrashLoopBackOff" the reason is at the end. A pipeline log shows this
+// table, and the person who reads it decides on a rollback.
+func writeVerifyNotOK(s *Styles, w io.Writer, results []schema.VerifyResult) error {
+	var notOK []schema.VerifyResult
+	for _, r := range results {
+		if r.Status != schema.VerifyStatusOK && r.Message != "" {
+			notOK = append(notOK, r)
+		}
+	}
+	if len(notOK) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, s.Bold.Render("NOT OK")); err != nil {
+		return err
+	}
+	for i, r := range notOK {
+		if i == maxVerifyNotOK {
+			_, err := fmt.Fprintln(w, s.Muted.Render(fmt.Sprintf("  ... and %d more (use --output json)", len(notOK)-maxVerifyNotOK)))
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "  %d  %s/%s/%s: %s\n", r.Order, r.Target.Kind, r.Target.Namespace, r.Target.Name, r.Message); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// describeWait says in a few words how the wait of a verify ended. The
+// table and the Markdown view share it. Every part is made from numbers in
+// the report, so the text needs no escape.
+func describeWait(w *schema.VerifyWait) string {
+	requested := time.Duration(w.RequestedSeconds) * time.Second
+	waited := time.Duration(w.WaitedSeconds) * time.Second
+	switch {
+	case w.Interrupted:
+		return fmt.Sprintf("interrupted after %s of %s", waited, requested)
+	case w.TimedOut:
+		return fmt.Sprintf("timed out after %s", requested)
+	default:
+		return fmt.Sprintf("done after %s of %s", waited, requested)
+	}
+}
+
+// summarizeReadiness condenses the readiness of one step into a table cell:
+// "2/2" (Ready pods of all pods), "no pods" when the verdict is from the pod
+// template, "-" when the verifier did not get as far as the readiness check.
+func summarizeReadiness(r schema.VerifyResult) string {
+	switch {
+	case r.Readiness != nil:
+		return fmt.Sprintf("%d/%d", r.Readiness.Ready, r.Readiness.Pods)
+	case r.Basis == schema.VerifyBasisTemplate:
+		return "no pods"
+	default:
+		return "-"
+	}
 }
 
 // displayActual returns "(empty)" for an unset Actual so the table row is

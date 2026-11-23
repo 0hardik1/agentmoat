@@ -75,7 +75,7 @@ Jobs, Pods). This pattern matches the K8s-tooling ecosystem (`kube-bench`,
 | `pkg/probe` | The nvproxy probe: a one-shot pod that reads `runsc --version` and `runsc nvproxy list-supported-drivers` from a gVisor node. Dry-run by default. |
 | `pkg/planner` | Migration plan generation from a `ScanReport`. |
 | `pkg/applier` | Pod-template patching with `runtimeClassName`. |
-| `pkg/verifier` | Compares live pods' `runtimeClassName` and hosting nodes to the plan; optional in-pod probe. |
+| `pkg/verifier` | Compares live pods' `runtimeClassName` and hosting nodes to the plan; optional in-pod probe. With a wait time, looks again until every step is ok and its pods stay Ready (`wait.go`, `readiness.go`). |
 | `pkg/explainer` | Educational text for `agentmoat explain`. |
 | `pkg/output` | Renderers: table, JSON, YAML, Markdown (job summaries and pull-request comments), and SARIF (`scan` only). `Format.Supports` is the list of which document takes which format. See [`output-formats.md`](output-formats.md). |
 | `internal/kube` | client-go construction helpers. |
