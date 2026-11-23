@@ -89,8 +89,9 @@ func TestLoadPlanRejectsTamperedHash(t *testing.T) {
 		t.Errorf("error should mention the integrity check: %v", err)
 	}
 
-	// A plan with no hash at all is allowed through: the applier never
-	// short-circuits on an empty hash.
+	// A plan with no hash at all is allowed through by the loader: verify
+	// only reads the steps. Apply and Rollback refuse it after the load
+	// (TestApplyAndRollback_RefuseAPlanWithNoHash in apply_test.go).
 	noHash := strings.ReplaceAll(string(data), "planHash:", "somethingElse:")
 	noHashPath := filepath.Join(t.TempDir(), "nohash.yaml")
 	// #nosec G703 -- noHashPath is a t.TempDir() join; not attacker-controlled.

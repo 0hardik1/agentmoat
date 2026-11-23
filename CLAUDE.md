@@ -84,8 +84,9 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   Same scan in, same plan and same SHA-256 `planHash` out. Don't break
   determinism.
 - `pkg/applier/`: the only package that mutates the cluster. Strategic
-  merge patch with `runtimeClassName`, namespace plan-hash annotation,
-  event emission, audit log append.
+  merge patch with `runtimeClassName`, the two namespace annotations
+  (`idempotency.go`: `plan-hash` when an apply is complete, `apply-started`
+  before its first patch), event emission, audit log append.
 - `pkg/verifier/` and `pkg/explainer/`: Phase 3 (shipped). `verify` checks
   that live pods match the plan and run on nodes the RuntimeClass
   `nodeSelector` selects; `explain` renders the embedded docs and
@@ -133,6 +134,18 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
 6. **Idempotency.** `apply` writes `agentmoat.io/plan-hash` on the
    namespace; re-running an applied plan reports every step as
    `already-applied` and exits 0. Preserve this on any new apply path.
+   The stamp is written only when every step in the namespace is done.
+   **Record first, then mutate:** before its first patch in a namespace,
+   `apply` writes `agentmoat.io/apply-started`, and it patches nothing when
+   that write fails. `rollback` acts only where one of the two annotations
+   has the hash of its plan, never from the workloads alone, so it can undo
+   an apply that did not finish and it changes nothing for a plan that was
+   never applied. The annotations hold one plan for a namespace: an apply
+   replaces the annotation of an older plan in the same write that sets
+   `apply-started` (a stamp that stays could become false), and a rollback
+   removes only the annotations of its own plan. A plan with no `planHash`
+   cannot be recorded, so `apply` and `rollback` refuse it
+   (`applier.CheckPlan`).
 7. **Deterministic exit codes.** Documented in
    [`docs/exit-codes.md`](docs/exit-codes.md). New commands pick from the
    existing codes (0/1/2/3/4/5) or add a new one to that table, do not

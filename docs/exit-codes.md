@@ -6,9 +6,9 @@ and AI agents can branch on it.
 | Code | Meaning | Emitted by |
 | --- | --- | --- |
 | `0` | Success. The command completed and (for mutating commands) the cluster matches the requested state. | All commands |
-| `1` | Generic error. Could not load kubeconfig, network failure, unparseable flag, etc. For `apply`/`rollback`, also emitted when **every** step failed. For `scan -f`, a manifest that does not parse, or `--fail-on sandboxed` on input that is not rendered. The stderr message names the cause. | All commands |
+| `1` | Generic error. Could not load kubeconfig, network failure, unparseable flag, etc. For `apply`/`rollback`, also emitted when **every** step failed. They also refuse a plan with no `metadata.planHash` with this code. For `scan -f`, a manifest that does not parse, or `--fail-on sandboxed` on input that is not rendered. The stderr message names the cause. | All commands |
 | `2` | Compatibility issues found. At least one workload was classified as `incompatible`. For `scan`, `--fail-on` changes which workloads count (see below). | `agentmoat scan`, `agentmoat explain namespace`, `agentmoat explain workload` |
-| `3` | Partial outcome. Some steps succeeded and others failed; idempotent re-run is safe. | `agentmoat apply`, `agentmoat rollback` |
+| `3` | Partial outcome. Some steps succeeded and others failed; idempotent re-run is safe. After a partial `apply`, `rollback` with the same plan undoes the steps that succeeded (see below). | `agentmoat apply`, `agentmoat rollback` |
 | `4` | Verify failed. Live pods do not match the plan's expected `runtimeClassName`, the hosting nodes fall outside the RuntimeClass `nodeSelector`, (with `--in-pod-probe`) the in-container probe did not find gVisor markers, and/or (with `--wait`) the pods did not stay Ready before the wait time ended. | `agentmoat verify` |
 | `5` | Cluster not ready. The preflight found an error: no RuntimeClass, a RuntimeClass with no `scheduling.nodeSelector`, no Ready node matching it, untolerated taints on every matching node, or only EKS Auto Mode / Bottlerocket nodes. For `apply`, every step is reported `skipped` and nothing was mutated. For `probe nvproxy`, the probe pod was not created. | `agentmoat preflight`, `agentmoat probe nvproxy`, `agentmoat apply` |
 
@@ -125,6 +125,82 @@ A workload with no pods now (see above) does not use the wait time. With
 `--in-pod-probe`, the probe runs one time for each step, when its pods have
 settled. Progress goes to stderr (`verify: waiting: 3 of 8 step(s) ok, 2m10s
 left`); `-q` removes it.
+
+## `rollback` after each way that `apply` can end
+
+A pipeline runs `apply`, and when a later step fails it runs `rollback` with
+the same plan. `rollback` must then do the correct thing for every way that
+the `apply` ended, also when it ended in the middle.
+
+### The record on the namespace
+
+`apply` records itself on each namespace that it changes, with two
+annotations. The value of each is the hash of the plan
+(`metadata.planHash`).
+
+| Annotation | Written | Meaning |
+| --- | --- | --- |
+| `agentmoat.io/apply-started` | Before the first patch in the namespace. | An apply of this plan started here. |
+| `agentmoat.io/plan-hash` | When every step in the namespace is done. `apply-started` is removed in the same write. | This plan is applied here. A second `apply` reports `already-applied`. |
+
+`apply` writes `apply-started` first and patches after. If it cannot write the
+annotation (the identity has no `patch` on namespaces), it patches no
+workload in that namespace, and each step there fails with `the workload was
+not changed`. So a workload is never changed with no record of it in the
+cluster.
+
+A plan with no `metadata.planHash` cannot be recorded. `apply` and `rollback`
+refuse it with exit `1`, in a dry-run too. `agentmoat plan` always sets the
+hash.
+
+### What `rollback` does
+
+`rollback` acts on a namespace only when one of the two annotations has the
+hash of its plan:
+
+| `apply` ended with | The cluster then | `rollback` with the same plan |
+| --- | --- | --- |
+| `0` | Every step is applied. Each namespace has `plan-hash`. | Un-patches every step and removes the annotation. |
+| `3` (some steps failed) | A namespace with a step that failed has `apply-started` and no `plan-hash`. Some of its workloads have the RuntimeClass. | In such a namespace: reads each workload of the plan and un-patches the ones that have the RuntimeClass of the plan. Then removes the annotation. |
+| Stopped in the middle (the process was killed, the CI system canceled the job) | The same as for `3`, for each namespace that the apply got to. | The same as for `3`. |
+| `1` because every step failed | `apply-started` on each namespace where a patch was tried. No workload got the RuntimeClass from this apply. | The same as for `3`. |
+| `5` (the preflight gate), or `1` before the first write | Nothing changed. No annotation. | Changes nothing. Every step is `already-applied`, exit `0`. |
+
+The limits of this, in plain words:
+
+- With no annotation of the plan, `rollback` reads no workload and patches
+  none. A RuntimeClass that another tool put on a workload stays. `rollback`
+  prints a note on stderr for such a namespace, because the result
+  (`already-applied`, exit `0`) is also the result for a plan whose record
+  another plan replaced (see below).
+- `rollback` removes the RuntimeClass of the plan from the workloads of the
+  plan. It has no record of each workload, so it cannot tell a workload that
+  this apply changed from one that had the same RuntimeClass before the
+  apply. The two lose it.
+- After an apply that did not finish, a workload of the plan that has
+  another RuntimeClass, or none, is left as it is: the apply did not get to
+  it.
+
+After a partial `apply` you can also run the same `apply` again: the
+namespace has no `plan-hash`, so every step is done again, and a complete run
+leaves `plan-hash` only.
+
+### One plan for a namespace at a time
+
+The two annotations hold the hash of one plan. The newest `apply` has the
+namespace:
+
+- When an `apply` starts in a namespace that has the annotation of another
+  plan, it replaces it (the same write sets `apply-started` and removes the
+  old `plan-hash`), and prints a note on stderr with the hash that it
+  replaced.
+- A `rollback` with a plan that does not have the namespace changes nothing
+  there. When the annotations have the hash of another plan, each step is
+  `skipped` with a message that names that hash. When no annotation is
+  left, each step is `already-applied` and stderr has the note.
+- To roll back a plan that lost the namespace: `apply` it again (for
+  workloads that have the RuntimeClass, the patch changes nothing and starts
+  no rollout), and then `rollback` it.
 
 ## Preflight exit code 5 in detail
 

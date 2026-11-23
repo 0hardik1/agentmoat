@@ -11,7 +11,8 @@
 //     fully-successful apply, and re-running the same plan reports every
 //     step as `already-applied` and exits with no mutations.
 //   - A partial apply (one step that fails) leaves the namespace annotation
-//     unset so a follow-up apply retries.
+//     unset so a follow-up apply retries. partial_test.go has the tests for
+//     an apply that did not finish, and for the rollback after it.
 //   - Rollback removes runtimeClassName via JSON merge patch and clears the
 //     annotation. A second rollback reports already-applied.
 package applier
@@ -142,7 +143,9 @@ func TestApply_RealApplyMutatesAndStampsAnnotation(t *testing.T) {
 		t.Errorf("Applied: got %d want 2", got)
 	}
 
-	// Two namespaces -> two annotation patches.
+	// Two namespaces, and two annotation patches for each: apply-started
+	// before the first workload patch, and at the end the stamp (which
+	// also removes apply-started).
 	annotationPatches := 0
 	deploymentPatches := 0
 	podPatches := 0
@@ -159,8 +162,8 @@ func TestApply_RealApplyMutatesAndStampsAnnotation(t *testing.T) {
 			podPatches++
 		}
 	}
-	if annotationPatches != 2 {
-		t.Errorf("annotation patches: got %d want 2", annotationPatches)
+	if annotationPatches != 4 {
+		t.Errorf("annotation patches: got %d want 4", annotationPatches)
 	}
 	if deploymentPatches != 1 {
 		t.Errorf("deployment patches: got %d want 1", deploymentPatches)
@@ -178,6 +181,10 @@ func TestApply_RealApplyMutatesAndStampsAnnotation(t *testing.T) {
 	if gotNs.Annotations[schema.PlanHashAnnotation] != "test-hash-1" {
 		t.Errorf("annotation on ns-a: got %q want %q",
 			gotNs.Annotations[schema.PlanHashAnnotation], "test-hash-1")
+	}
+	// A complete apply leaves the stamp only.
+	if v, ok := gotNs.Annotations[schema.ApplyStartedAnnotation]; ok {
+		t.Errorf("ns-a still has %s=%q after a complete apply", schema.ApplyStartedAnnotation, v)
 	}
 }
 
@@ -328,7 +335,8 @@ func TestRollback_SkipsNamespaceStampedWithDifferentPlan(t *testing.T) {
 	ctx := context.Background()
 
 	// Stamp ns-a with a DIFFERENT plan's hash; ns-b stays unstamped.
-	if _, err := writeNamespaceAnnotation(ctx, client, "ns-a", "some-other-plan-hash", false); err != nil {
+	other := "some-other-plan-hash"
+	if err := patchNamespaceMarks(ctx, client, "ns-a", map[string]*string{schema.PlanHashAnnotation: &other}); err != nil {
 		t.Fatalf("seeding annotation: %v", err)
 	}
 
@@ -358,11 +366,11 @@ func TestRollback_SkipsNamespaceStampedWithDifferentPlan(t *testing.T) {
 	}
 
 	// The other plan's annotation must survive.
-	got, err := readNamespaceAnnotation(ctx, client, "ns-a")
+	got, err := readNamespaceMarks(ctx, client, "ns-a")
 	if err != nil {
-		t.Fatalf("readNamespaceAnnotation: %v", err)
+		t.Fatalf("readNamespaceMarks: %v", err)
 	}
-	if got != "some-other-plan-hash" {
-		t.Errorf("ns-a annotation: got %q, want the other plan's hash preserved", got)
+	if got.stamp != "some-other-plan-hash" {
+		t.Errorf("ns-a annotation: got %q, want the other plan's hash preserved", got.stamp)
 	}
 }

@@ -163,18 +163,25 @@ start in gVisor fails the check, with the reason in the report.
   comes from the RuntimeClass's `scheduling` block, which admission merges
   into every pod (`plan --add-toleration` also patches the
   `runtime=gvisor:NoSchedule` toleration in, for clusters whose RuntimeClass
-  lacks `scheduling.tolerations`). It stamps the namespace with
-  `agentmoat.io/plan-hash`, emits a Kubernetes Event for each step it
-  actually mutates, and appends an audit line for every step (dry-run
-  included) to `~/.agentmoat/audit.jsonl`. It defaults to `--dry-run=true`.
-  Re-running an applied plan reports every step as `already-applied` and
-  exits 0 via the namespace annotation.
+  lacks `scheduling.tolerations`). It records itself on the namespace:
+  `agentmoat.io/apply-started` before its first patch there, and
+  `agentmoat.io/plan-hash` when every step is done. It emits a Kubernetes
+  Event for each step it actually mutates, and appends an audit line for
+  every step (dry-run included) to `~/.agentmoat/audit.jsonl`. It defaults
+  to `--dry-run=true`. Re-running an applied plan reports every step as
+  `already-applied` and exits 0 via the namespace annotation.
 - **`rollback`** walks the same plan in reverse, removes `runtimeClassName`,
-  and clears the namespace annotation. A toleration added by an opt-in
-  apply is deliberately left in place (a toleration without a matching taint
-  is harmless, and removing a specific toleration by JSON Patch index is
-  fragile). Rollback runs no preflight: moving pods back to runc needs no
-  gVisor node.
+  and clears the namespace annotations. It also undoes an apply that did not
+  finish (a step failed, or the process was stopped): `apply-started` says
+  that the plan was at work in the namespace, and rollback then un-patches
+  the workloads that have the class of the plan. In a namespace with no
+  annotation of the plan it changes nothing. The annotations hold one plan
+  for a namespace: a later apply of another plan replaces them, and the
+  older plan must be applied again before it can be rolled back. A
+  toleration added by an opt-in apply is deliberately left in place (a
+  toleration without a matching taint is harmless, and removing a specific
+  toleration by JSON Patch index is fragile). Rollback runs no preflight:
+  moving pods back to runc needs no gVisor node.
 - **`verify`** is read-only. For each step of the plan it checks that every
   live pod has the `runtimeClassName` and runs on a node that the
   RuntimeClass selects; `--in-pod-probe` also looks for gVisor markers in
@@ -325,6 +332,15 @@ elided fields are marked `...`.
 - **Idempotent.** Every `apply` writes the plan hash to the affected
   namespace as `agentmoat.io/plan-hash`. Re-running the same plan against
   the same cluster reports every step as `already-applied` and exits 0.
+- **Reversible, also in the middle.** `apply` writes
+  `agentmoat.io/apply-started` on a namespace before its first patch there,
+  and patches nothing when that write fails. So the cluster always has a
+  record that a plan changed a namespace, and `rollback` with the same plan
+  can undo an apply that failed on one step or was stopped. A plan with no
+  `planHash` cannot be recorded, so `apply` and `rollback` refuse it.
+  [`docs/exit-codes.md`](docs/exit-codes.md#rollback-after-each-way-that-apply-can-end)
+  has the table of what `rollback` does for each way that an `apply` can
+  end, and its limits.
 - **Auditable.** Every step appends one JSON line to
   `~/.agentmoat/audit.jsonl` (disable with `--no-audit`), including dry-run
   steps, which carry `dryRun: true`. Each step that actually mutates also
@@ -500,8 +516,9 @@ one-shot pod. With both, a GPU workload on supported hardware is
 unlisted driver is `incompatible`. See [`docs/gpu-nvproxy.md`](docs/gpu-nvproxy.md).
 
 **Does agentmoat install anything in-cluster?** No CRDs, no webhooks, no
-controllers. It patches pod templates and reads/writes one namespace
-annotation (`agentmoat.io/plan-hash`). The only in-cluster prerequisite is
+controllers. It patches pod templates and reads/writes two namespace
+annotations (`agentmoat.io/plan-hash` and `agentmoat.io/apply-started`). The
+only in-cluster prerequisite is
 a `RuntimeClass` named `gvisor` (or whatever `--runtime-class` was passed)
 that points at a real `runsc`-shipping node.
 

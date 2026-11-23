@@ -56,7 +56,16 @@ const (
 // PlanHashAnnotation is the namespace annotation key the applier writes to
 // record which MigrationPlan was last applied to that namespace. Used for
 // idempotency: re-applying an already-applied plan exits 0 without mutating.
+// It is written only when every step in the namespace is done.
 const PlanHashAnnotation = "agentmoat.io/plan-hash"
+
+// ApplyStartedAnnotation is the namespace annotation key that the applier
+// writes before its first patch in a namespace. Its value is the hash of the
+// plan. It is there for the rollback: an apply that did not finish (a step
+// failed, or the process was stopped) leaves no PlanHashAnnotation, and
+// without this mark a rollback could not tell that the plan changed
+// something. A complete apply removes it, and so does a complete rollback.
+const ApplyStartedAnnotation = "agentmoat.io/apply-started"
 
 // Compatibility is the per-workload verdict produced by the classifier.
 // The string values are stable: scripts and dashboards downstream may

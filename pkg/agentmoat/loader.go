@@ -83,8 +83,10 @@ func loadPlan(path string) (*schema.MigrationPlan, error) {
 	// corrupted) plan whose hash no longer matches its content would
 	// otherwise poison the namespace-annotation idempotency check: apply
 	// would stamp (or trust) a hash that does not describe the steps it
-	// ran. A plan with no planHash is allowed through: the applier never
-	// short-circuits on an empty hash, so there is nothing to poison.
+	// ran. A plan with no planHash is allowed through here, for `verify`,
+	// which only reads the steps. Apply and Rollback refuse it after this
+	// function (applier.CheckPlan): they record a plan on the cluster by
+	// its hash.
 	if plan.Metadata.PlanHash != "" {
 		recomputed, err := planner.ComputePlanHash(plan.Spec.Steps, plan.Spec.Options)
 		if err != nil {

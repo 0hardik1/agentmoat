@@ -47,6 +47,12 @@
 #                           device cgroup; see docs/gvisor-version.md).
 #   5. `agentmoat rollback` to clear the patches and restore the
 #                           pre-apply spec.
+#   5b. a partial apply     one workload of the plan is deleted, so its
+#                           patch fails and `apply` exits 3. The namespace
+#                           then has apply-started and no plan-hash, and
+#                           `rollback` with the same plan undoes the
+#                           patches that worked. This is the pipeline
+#                           case "apply failed, roll back".
 #   6. `agentmoat explain`  smoke: list mode, known topic, unknown topic
 #                           (exit non-zero, stderr lists topics).
 #   7. `agentmoat probe nvproxy`  dry-run creates nothing; the real run
@@ -134,6 +140,7 @@ E2E_REPLAY_VERIFY="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json"
 E2E_REPLAY_VERIFY_WAIT="$E2E_REPLAY_AGENT verify --plan $E2E_ARTIFACT_REL/plan.json --wait 3m"
 E2E_REPLAY_DEVICE_CGROUP="scripts/check-device-cgroup.sh --node <gvisor-worker>"
 E2E_REPLAY_ROLLBACK="$E2E_REPLAY_AGENT rollback --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
+E2E_REPLAY_PARTIAL=$'kubectl -n '"$NAMESPACE"$' delete deployment worker\n'"$E2E_REPLAY_AGENT apply --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"$'   # exit 3\n'"$E2E_REPLAY_AGENT rollback --plan $E2E_ARTIFACT_REL/plan.json --dry-run=false --no-audit"
 E2E_REPLAY_EXPLAIN="bin/agentmoat explain"
 E2E_REPLAY_EXPLAIN_NS="$E2E_REPLAY_AGENT explain namespace $NAMESPACE"
 E2E_REPLAY_EXPLAIN_WL="$E2E_REPLAY_AGENT explain workload ${NAMESPACE}/host-net"
@@ -574,6 +581,11 @@ wait_runtime_class statefulset cache "gvisor"
 NS_HASH=$("${KCTL[@]}" get namespace "$NAMESPACE" \
   -o jsonpath='{.metadata.annotations.agentmoat\.io/plan-hash}')
 assert_eq "namespace plan-hash annotation" "$PLAN_HASH" "$NS_HASH"
+# apply-started is on the namespace only while an apply is not complete. The
+# write of the stamp removes it.
+NS_STARTED=$("${KCTL[@]}" get namespace "$NAMESPACE" \
+  -o jsonpath='{.metadata.annotations.agentmoat\.io/apply-started}')
+assert_eq "namespace apply-started annotation after a complete apply" "" "$NS_STARTED"
 
 # The rolled workloads are Ready again: `verify --wait` above returned only
 # when they were. These loops are a second opinion from kubectl on that, and
@@ -786,6 +798,89 @@ if ! grep -q "wait of 6s timed out" "$WORK_DIR/verify-wait-rollback.stderr"; the
   fail "verify --wait (post-rollback): stderr does not say that the wait timed out: $(cat "$WORK_DIR/verify-wait-rollback.stderr")"
 fi
 e2e_step_pass "verify (post-rollback)" "$E2E_REPLAY_VERIFY"
+
+# -----------------------------------------------------------------------------
+# 6c. an apply that fails on one step, and the rollback after it.
+# -----------------------------------------------------------------------------
+#
+# The pipeline case: `apply` fails in the middle, and the next step of the
+# pipeline is `rollback` with the same plan. The rollback must undo the
+# patches that worked.
+#
+# To make one step fail on a real cluster, one workload of the plan is
+# deleted first; the patch of that step gets "not found". The namespace
+# stamp (plan-hash) is written only when every step is done, so after this
+# apply the namespace has no stamp. What it has is apply-started, which
+# `apply` wrote before its first patch. `rollback` reads it, and un-patches
+# each workload that has the class.
+#
+# The checks:
+#   - apply: exit 3, one step failed, the others applied.
+#   - the namespace: apply-started has the plan hash, plan-hash is not set.
+#   - rollback: exit 0, the applied steps are undone, the step of the
+#     deleted workload is already-applied.
+#   - the cluster: no workload of the plan has the class, and the namespace
+#     has none of the two annotations.
+
+e2e_step "apply with one step that fails, then rollback: the rollback undoes the steps that worked"
+PARTIAL_VICTIM="worker"
+"${KCTL[@]}" -n "$NAMESPACE" delete deployment "$PARTIAL_VICTIM" --wait=true >/dev/null
+
+PARTIAL_APPLY_EXIT=0
+"${AGENT[@]}" apply --plan "$WORK_DIR/plan.json" --dry-run=false --output json --no-audit \
+  >"$WORK_DIR/apply-partial.json" 2>"$WORK_DIR/apply-partial.stderr" || PARTIAL_APPLY_EXIT=$?
+assert_eq "partial apply exit code" 3 "$PARTIAL_APPLY_EXIT"
+assert_eq "partial apply summary.applied" "$((E2E_COMPAT - 1))" \
+  "$(jq -r '.spec.summary.applied' "$WORK_DIR/apply-partial.json")"
+assert_eq "partial apply summary.failed" 1 \
+  "$(jq -r '.spec.summary.failed' "$WORK_DIR/apply-partial.json")"
+assert_eq "partial apply: the step that failed" "$PARTIAL_VICTIM" \
+  "$(jq -r '[.spec.steps[] | select(.status == "failed") | .target.name] | join(",")' "$WORK_DIR/apply-partial.json")"
+wait_runtime_class deployment web "gvisor"
+
+assert_eq "namespace plan-hash after a partial apply" "" \
+  "$("${KCTL[@]}" get namespace "$NAMESPACE" -o jsonpath='{.metadata.annotations.agentmoat\.io/plan-hash}')"
+assert_eq "namespace apply-started after a partial apply" "$PLAN_HASH" \
+  "$("${KCTL[@]}" get namespace "$NAMESPACE" -o jsonpath='{.metadata.annotations.agentmoat\.io/apply-started}')"
+
+PARTIAL_RB_EXIT=0
+"${AGENT[@]}" rollback --plan "$WORK_DIR/plan.json" --dry-run=false --output json --no-audit \
+  >"$WORK_DIR/rollback-partial.json" 2>"$WORK_DIR/rollback-partial.stderr" || PARTIAL_RB_EXIT=$?
+assert_eq "rollback after a partial apply: exit code" 0 "$PARTIAL_RB_EXIT"
+assert_eq "rollback after a partial apply: summary.applied" "$((E2E_COMPAT - 1))" \
+  "$(jq -r '.spec.summary.applied' "$WORK_DIR/rollback-partial.json")"
+assert_eq "rollback after a partial apply: summary.alreadyApplied" 1 \
+  "$(jq -r '.spec.summary.alreadyApplied' "$WORK_DIR/rollback-partial.json")"
+assert_eq "rollback after a partial apply: summary.failed" 0 \
+  "$(jq -r '.spec.summary.failed' "$WORK_DIR/rollback-partial.json")"
+
+# No workload of the plan has the class now. Read every one of them: the
+# report says what rollback sent, and this says what the cluster has.
+for dep in "${E2E_COMPAT_DEPLOYMENTS[@]}"; do
+  if [[ "$dep" == "$PARTIAL_VICTIM" ]]; then
+    continue
+  fi
+  wait_runtime_class deployment "$dep" ""
+done
+for sts in "${E2E_COMPAT_STATEFULSETS[@]}"; do
+  wait_runtime_class statefulset "$sts" ""
+done
+assert_eq "namespace plan-hash after the rollback" "" \
+  "$("${KCTL[@]}" get namespace "$NAMESPACE" -o jsonpath='{.metadata.annotations.agentmoat\.io/plan-hash}')"
+assert_eq "namespace apply-started after the rollback" "" \
+  "$("${KCTL[@]}" get namespace "$NAMESPACE" -o jsonpath='{.metadata.annotations.agentmoat\.io/apply-started}')"
+
+# Put the deleted workload back, and let the two rollouts (the apply and
+# the rollback) end, so the steps below start from the state that the
+# setup made.
+"${KCTL[@]}" -n "$NAMESPACE" apply -f "$MANIFEST_DIR/workloads.yaml" >/dev/null
+for dep in "${E2E_COMPAT_DEPLOYMENTS[@]}"; do
+  "${KCTL[@]}" -n "$NAMESPACE" rollout status "deployment/$dep" --timeout=180s
+done
+for sts in "${E2E_COMPAT_STATEFULSETS[@]}"; do
+  "${KCTL[@]}" -n "$NAMESPACE" rollout status "statefulset/$sts" --timeout=180s
+done
+e2e_step_pass "partial apply, then rollback" "$E2E_REPLAY_PARTIAL"
 
 # -----------------------------------------------------------------------------
 # 7. explain smoke: list mode, valid topic, unknown topic.

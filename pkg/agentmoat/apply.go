@@ -47,6 +47,12 @@ func Apply(ctx context.Context, opts ApplyOptions) (*schema.ApplyResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("apply: loading plan: %w", err)
 	}
+	// A plan that the applier cannot record (no hash) is refused here,
+	// before the client and the preflight: the problem is in the file, so
+	// the answer must not need a cluster.
+	if err := applier.CheckPlan(plan); err != nil {
+		return nil, fmt.Errorf("apply: plan file %s: %w", opts.PlanPath, err)
+	}
 
 	client := opts.KubeClient
 	if client == nil {
@@ -105,7 +111,8 @@ func Apply(ctx context.Context, opts ApplyOptions) (*schema.ApplyResult, error) 
 }
 
 // Rollback runs Apply's inverse: removes runtimeClassName and clears the
-// namespace plan-hash annotation. See pkg/applier.Rollback for details.
+// namespace annotations of the plan. It also undoes an apply that did not
+// finish. See pkg/applier.Rollback for details.
 func Rollback(ctx context.Context, opts RollbackOptions) (*schema.RollbackResult, error) {
 	stderr := opts.Stderr
 	if stderr == nil {
@@ -115,6 +122,9 @@ func Rollback(ctx context.Context, opts RollbackOptions) (*schema.RollbackResult
 	plan, err := loadPlan(opts.PlanPath)
 	if err != nil {
 		return nil, fmt.Errorf("rollback: loading plan: %w", err)
+	}
+	if err := applier.CheckPlan(plan); err != nil {
+		return nil, fmt.Errorf("rollback: plan file %s: %w", opts.PlanPath, err)
 	}
 
 	client := opts.KubeClient
