@@ -1,0 +1,8 @@
+# The overlay that moves first. The test adds the component to it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namePrefix: staging-
+resources:
+  - ../base
+patches:
+  - path: replicas.yaml

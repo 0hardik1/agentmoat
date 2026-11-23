@@ -177,11 +177,13 @@ offline-smoke: build ## Run the checks that need no cluster (scan -f, the --fail
 	@# scripts/offline-smoke.sh runs ./bin/agentmoat against the manifest
 	@# fixtures in test/testdata/manifests and asserts exit codes and
 	@# output. It runs `patch` on a copy of the fixtures in
-	@# test/testdata/patch. It needs jq, and no cluster: every run has
-	@# KUBECONFIG set to a file that points at a dead server, and the
+	@# test/testdata/patch, and builds the Kustomize component that
+	@# `patch --kustomize` writes. It needs jq, and no cluster: every run
+	@# has KUBECONFIG set to a file that points at a dead server, and the
 	@# script fails if that file's context name shows up in any output.
-	@# CI runs it on every PR. kubectl, when present, is used only for a
-	@# local `kubectl kustomize` render, and git only for `git apply`.
+	@# CI runs it on every PR. kubectl and helm, when present, are used
+	@# only for local renders (`kubectl kustomize`, `helm template`), and
+	@# git only for `git apply`.
 	@./scripts/offline-smoke.sh
 	@# scripts/action-smoke.sh runs the script behind action.yml
 	@# (scripts/github-action.sh) the way the action does, and checks

@@ -1082,6 +1082,13 @@ type PatchMetadata struct {
 	// too (--include-review).
 	IncludeReview bool `json:"includeReview,omitempty" yaml:"includeReview,omitempty"`
 
+	// KustomizeDir is set when the change is written as a Kustomize
+	// component and not as an edit of the source files (--kustomize): the
+	// directory of the component, as it was given. The source files are
+	// then not changed. Files lists the files of the component, and each
+	// change has its PatchFile.
+	KustomizeDir string `json:"kustomizeDir,omitempty" yaml:"kustomizeDir,omitempty"`
+
 	// Source says what was read, as in a ScanReport of manifests: the
 	// number of inputs, the objects that are not workloads, and the signs
 	// that the input is not rendered (a kustomization file, a partial
@@ -1104,7 +1111,9 @@ type PatchSpec struct {
 	// reason, as a MigrationPlan does.
 	Excluded []ExcludedWorkload `json:"excluded" yaml:"excluded"`
 
-	// Files has one entry for each file with a change, sorted by path.
+	// Files has one entry for each file with a change, sorted by path:
+	// the source files, or with a Kustomize component the patch files and
+	// the list (kustomization.yaml).
 	Files []PatchFile `json:"files" yaml:"files"`
 }
 
@@ -1117,11 +1126,14 @@ type PatchSummary struct {
 	Selected int `json:"selected" yaml:"selected"`
 
 	// Patched is the number of selected workloads whose file has the new
-	// line (in a dry-run: would have).
+	// line (in a dry-run: would have). With a Kustomize component: whose
+	// patch file is in the component and in its list.
 	Patched int `json:"patched" yaml:"patched"`
 
 	// NotEdited is the number of selected workloads in a form that the
-	// patch does not edit (JSON, flow-style YAML, a YAML anchor).
+	// patch does not edit (JSON, flow-style YAML, a YAML anchor). With a
+	// Kustomize component: that can have no patch file (an object with no
+	// name of its own), or whose patch file is there with other content.
 	NotEdited int `json:"notEdited" yaml:"notEdited"`
 
 	// Failed is the number of selected workloads whose file could not be
@@ -1166,8 +1178,13 @@ type PatchChange struct {
 	Status PatchStatus `json:"status" yaml:"status"`
 
 	// Line is the 1-based line of the added line in the file after the
-	// change. Zero when Status is not "patched".
+	// change. Zero when Status is not "patched", and with a Kustomize
+	// component (the source file has no new line).
 	Line int `json:"line,omitempty" yaml:"line,omitempty"`
+
+	// PatchFile is the path of the Kustomize patch file for this workload.
+	// Set only with a Kustomize component, when the workload has one.
+	PatchFile string `json:"patchFile,omitempty" yaml:"patchFile,omitempty"`
 
 	// Reason says why the workload was not edited, or why the write
 	// failed. Empty when Status is "patched".
@@ -1179,9 +1196,19 @@ type PatchFile struct {
 	// Path is the path as it was given or found.
 	Path string `json:"path" yaml:"path"`
 
-	// Added is the number of lines that the change adds. A patch removes
-	// no line and changes no line.
+	// Added is the number of lines that the change adds. An edit of a
+	// source file removes no line and changes no line.
 	Added int `json:"added" yaml:"added"`
+
+	// Removed is the number of lines that the change removes. It is zero
+	// for a source file and for a new file. The one file where it can be
+	// more is the list of a Kustomize component that had no entry: its
+	// line `patches: []` is replaced.
+	Removed int `json:"removed,omitempty" yaml:"removed,omitempty"`
+
+	// Created is true when the file is new: a file of a Kustomize
+	// component. The diff is then from /dev/null.
+	Created bool `json:"created,omitempty" yaml:"created,omitempty"`
 
 	// Written is true when the file on disk has the change. Always false
 	// in a dry-run.

@@ -14,6 +14,12 @@
 // returns the result with the diff and changes nothing. readDryRun (in
 // tools_apply.go) reads the raw arguments, so a value that is not a boolean
 // is an error and not a write.
+//
+// With "kustomize_dir" the tool edits no source file: it writes the change
+// as a Kustomize component in that directory. Standard input stays
+// unavailable in this form too. The CLI reads it then (`-f -`), but the
+// standard input of this process is the JSON-RPC channel, so PatchOptions.
+// Stdin stays nil and a "-" path is an error and not a hang.
 package main
 
 import (
@@ -27,7 +33,7 @@ import (
 
 // patchManifestsDescription says what the tool changes, and the safety gate,
 // next to the schema.
-const patchManifestsDescription = "Add runtimeClassName to the manifest files of the workloads that can run in gVisor, so that the move goes through a pull request and the deploy pipeline of the repository ('git revert' is the rollback). Contacts no cluster. SAFETY: defaults to dry-run; you MUST pass \"dry_run\": false explicitly to write the files. It reads the manifests as scan_cluster does with manifest_paths, selects the workloads that are compatible and have no RuntimeClass (with include_review, also the ones that need review), and adds one line to the pod spec of each. Nothing else in a file changes (comments, key order, and quotes stay), and a second call changes nothing. Returns a PatchResult (apiVersion: agentmoat.io/v1alpha1, kind: PatchResult): spec.changes has the status of each selected workload (patched | not-edited | failed) with file and line, spec.excluded has the workloads that were not selected with the reason, and spec.files has the unified diff of each file. Not edited, and listed with the reason: JSON, flow-style YAML, and a pod spec behind a YAML anchor. Helm templates cannot be edited (set the chart value instead). With Kustomize it edits the files it is given and applies no overlay (metadata.source.unrendered lists the signs); afterwards, scan the rendered output with scan_cluster."
+const patchManifestsDescription = "Add runtimeClassName to the manifest files of the workloads that can run in gVisor, so that the move goes through a pull request and the deploy pipeline of the repository ('git revert' is the rollback). Contacts no cluster. SAFETY: defaults to dry-run; you MUST pass \"dry_run\": false explicitly to write the files. It reads the manifests as scan_cluster does with manifest_paths, selects the workloads that are compatible and have no RuntimeClass (with include_review, also the ones that need review), and adds one line to the pod spec of each. Nothing else in a file changes (comments, key order, and quotes stay), and a second call changes nothing. Returns a PatchResult (apiVersion: agentmoat.io/v1alpha1, kind: PatchResult): spec.changes has the status of each selected workload (patched | not-edited | failed) with file and line, spec.excluded has the workloads that were not selected with the reason, and spec.files has the unified diff of each file. Not edited, and listed with the reason: JSON, flow-style YAML, and a pod spec behind a YAML anchor. Helm templates cannot be edited (set the chart value instead). With Kustomize it edits the files it is given and applies no overlay (metadata.source.unrendered lists the signs); afterwards, scan the rendered output with scan_cluster. To move one Kustomize overlay only, pass kustomize_dir: the tool then edits no source file, and writes one strategic merge patch file for each selected workload and a kustomization.yaml of kind Component into that directory (each change has patchFile; spec.files has the new files). The directory must be new, empty, or the directory of an earlier call; a call only adds files and entries. Afterwards the directory must be added to 'components:' in the kustomization that must move, and manifest_paths must be only what that kustomization reads from its 'resources:' (a patch for an object that it does not read stops its build)."
 
 func registerPatchManifests(srv *server.MCPServer, deps Deps) {
 	tool := mcp.NewTool("patch_manifests",
@@ -47,6 +53,8 @@ func registerPatchManifests(srv *server.MCPServer, deps Deps) {
 		),
 		mcp.WithString("runtime_class_name",
 			mcp.Description("The RuntimeClass name to write. Default 'gvisor'.")),
+		mcp.WithString("kustomize_dir",
+			mcp.Description("Write the change as a Kustomize component in this directory, and edit no source file. The directory must be new, empty, or the directory of an earlier call. Empty (the default) means: edit the source files.")),
 		mcp.WithString("namespace",
 			mcp.Description("The namespace for objects that name none. It is not a filter, and it is not written to a file.")),
 		mcp.WithString("label_selector",
@@ -56,7 +64,8 @@ func registerPatchManifests(srv *server.MCPServer, deps Deps) {
 		mcp.WithString("facts_path",
 			mcp.Description("Path to a saved PreflightReport or ScanReport whose cluster facts the classifier uses, as for scan_cluster. GPU workloads are then classified against the real driver list.")),
 		// The tool writes files, so it is not read-only. Its change is one
-		// added line for each workload (nothing is removed or replaced), and
+		// added line for each workload, or with kustomize_dir new files and
+		// new entries in its own list (nothing is removed or replaced), and
 		// a second call with the same input changes nothing.
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -75,6 +84,7 @@ func registerPatchManifests(srv *server.MCPServer, deps Deps) {
 		}
 		result, err := agentmoat.Patch(ctx, agentmoat.PatchOptions{
 			ManifestPaths:    paths,
+			KustomizeDir:     req.GetString("kustomize_dir", ""),
 			Namespace:        req.GetString("namespace", ""),
 			LabelSelector:    req.GetString("label_selector", ""),
 			RulesYAMLPath:    req.GetString("rules_yaml_path", ""),

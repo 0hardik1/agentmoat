@@ -1,0 +1,71 @@
+# Four workloads that can run in the sandbox, in four forms, and a Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  labels:
+    app: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: "example.test/web:1"
+---
+# This object names a namespace. The kustomization of the base changes it.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly
+  namespace: batch
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: report
+              image: example.test/report:1
+---
+# A kind that agentmoat has no type for. It has a pod template.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: canary
+spec:
+  selector:
+    matchLabels:
+      app: canary
+  template:
+    metadata:
+      labels:
+        app: canary
+    spec:
+      containers:
+        - name: canary
+          image: example.test/canary:1
+---
+# Flow style. The edit in place does not edit this form.
+apiVersion: v1
+kind: Pod
+metadata: {name: once}
+spec: {containers: [{name: once, image: "example.test/once:1"}]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 80

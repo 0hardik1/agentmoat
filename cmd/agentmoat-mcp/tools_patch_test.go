@@ -202,6 +202,11 @@ func TestPatchManifestsHandler_Errors(t *testing.T) {
 		{"no paths", map[string]any{}, "manifest_paths"},
 		{"an empty list", map[string]any{"manifest_paths": []any{}}, "no manifest paths"},
 		{"standard input", map[string]any{"manifest_paths": []any{"-"}, "dry_run": false}, "standard input"},
+		// With a component directory the CLI reads standard input. This
+		// server cannot: its standard input is the protocol channel. The
+		// call must be an error and must not wait for input.
+		{"standard input with a component", map[string]any{"manifest_paths": []any{"-"}, "kustomize_dir": filepath.Join(dir, "g"), "dry_run": false}, "standard input"},
+		{"a component in a directory of manifests", map[string]any{"manifest_paths": []any{dir}, "kustomize_dir": dir, "dry_run": false}, "has files, and no kustomization.yaml that agentmoat wrote"},
 		{"a path that is not there", map[string]any{"manifest_paths": []any{"/no/such/manifests"}}, "/no/such/manifests"},
 		// A value that is not a boolean must not become a write.
 		{"dry_run is a string", map[string]any{"manifest_paths": []any{dir}, "dry_run": "false"}, "dry_run must be a boolean"},
@@ -216,5 +221,59 @@ func TestPatchManifestsHandler_Errors(t *testing.T) {
 	}
 	if got := readPatchFile(t, dir, "web.yaml"); got != patchWeb {
 		t.Errorf("a refused call changed the file:\n%s", got)
+	}
+}
+
+// wantKustomizeDryRun checks the result of a dry-run with kustomize_dir: one
+// workload with its patch file, and two new files that are not written (the
+// patch file and the list).
+func wantKustomizeDryRun(t *testing.T, dry schema.PatchResult, component, patchFile string) {
+	t.Helper()
+	if !dry.Metadata.DryRun || dry.Metadata.KustomizeDir != component {
+		t.Errorf("metadata = %+v", dry.Metadata)
+	}
+	if got, want := dry.Spec.Summary, (schema.PatchSummary{Total: 2, Selected: 1, Patched: 1, Excluded: 1, Files: 2}); got != want {
+		t.Errorf("summary = %+v, want %+v", got, want)
+	}
+	if len(dry.Spec.Changes) != 1 || dry.Spec.Changes[0].PatchFile != patchFile {
+		t.Errorf("changes = %+v", dry.Spec.Changes)
+	}
+	for _, f := range dry.Spec.Files {
+		if f.Written || !f.Created || !strings.HasPrefix(f.Diff, "--- /dev/null\n") {
+			t.Errorf("the file %s = %+v; want a new file that is not written", f.Path, f)
+		}
+	}
+}
+
+// TestPatchManifestsHandler_Kustomize: with kustomize_dir the tool edits no
+// source file. It has the same safety gate: no write without "dry_run":
+// false.
+func TestPatchManifestsHandler_Kustomize(t *testing.T) {
+	t.Parallel()
+	dir := writePatchFiles(t)
+	component := filepath.Join(t.TempDir(), "overlay", "gvisor")
+	patchFile := filepath.Join(component, "deployment.apps_web.yaml")
+
+	dry := callPatch(t, map[string]any{"manifest_paths": []any{dir}, "kustomize_dir": component})
+	wantKustomizeDryRun(t, dry, component, patchFile)
+	if _, err := os.Stat(component); !os.IsNotExist(err) {
+		t.Errorf("a dry-run made the directory: %v", err)
+	}
+
+	callPatch(t, map[string]any{"manifest_paths": []any{dir}, "kustomize_dir": component, "dry_run": false})
+	data, err := os.ReadFile(patchFile) // #nosec G304 -- a path under t.TempDir().
+	if err != nil || !strings.HasSuffix(string(data), "kind: Deployment\nmetadata:\n  name: web\nspec:\n  template:\n    spec:\n      runtimeClassName: gvisor\n") {
+		t.Errorf("the patch file: %v\n%s", err, data)
+	}
+	if _, err := os.Stat(filepath.Join(component, "kustomization.yaml")); err != nil {
+		t.Errorf("the list: %v", err)
+	}
+	if got := readPatchFile(t, dir, "web.yaml"); got != patchWeb {
+		t.Errorf("a source file changed:\n%s", got)
+	}
+
+	again := callPatch(t, map[string]any{"manifest_paths": []any{dir}, "kustomize_dir": component, "dry_run": false})
+	if again.Spec.Summary.Selected != 0 || len(again.Spec.Files) != 0 {
+		t.Errorf("second call: summary = %+v, want nothing selected", again.Spec.Summary)
 	}
 }

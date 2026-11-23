@@ -122,6 +122,39 @@ type ManifestOrigin struct {
 	TemplateSource string
 }
 
+// ManifestObject is how the input writes the object of one workload: the four
+// fields that name it, with the values that are in the text, and where its
+// pod spec is.
+//
+// A Workload has the names that a scan reports, and they are not always the
+// text: its Kind has the group for a kind that is not one of the six
+// ("Rollout.argoproj.io"), its Name can come from generateName, its
+// Namespace can be the default of the caller, and it has no apiVersion at
+// all. A caller that must name the object as another tool reads it needs the
+// text (`agentmoat patch --kustomize` writes a Kustomize patch, and Kustomize
+// finds the target of a patch by exactly these four fields).
+type ManifestObject struct {
+	// APIVersion and Kind are the two fields of the object. They are empty
+	// for an item of a typed list (a DeploymentList) that names none: the
+	// kind of such an item comes from the list.
+	APIVersion string
+	Kind       string
+
+	// Name is metadata.name. It is empty when the object has generateName
+	// only.
+	Name string
+
+	// Namespace is metadata.namespace. It is empty when the object names
+	// none; the default namespace of the caller is not put here.
+	Namespace string
+
+	// PodSpecPath is the keys from the top of the object to its pod spec:
+	// spec for a Pod, spec.jobTemplate.spec.template.spec for a CronJob (and
+	// for another kind with a job template), and spec.template.spec for
+	// each other kind.
+	PodSpecPath []string
+}
+
 // ManifestResult is what FromManifests found.
 type ManifestResult struct {
 	// Workloads is sorted by (namespace, kind, name), then by origin, so
@@ -131,6 +164,10 @@ type ManifestResult struct {
 	// Origins is parallel to Workloads: Origins[i] is where Workloads[i]
 	// came from.
 	Origins []ManifestOrigin
+
+	// Written is parallel to Workloads: Written[i] is how the input writes
+	// the object of Workloads[i]. See ManifestObject.
+	Written []ManifestObject
 
 	// Objects is the number of Kubernetes objects read, after lists were
 	// expanded. Zero means the input held no object at all.
@@ -296,6 +333,7 @@ func FromManifests(inputs []ManifestInput, opts ManifestOptions) (*ManifestResul
 type foundWorkload struct {
 	workload Workload
 	origin   ManifestOrigin
+	written  ManifestObject
 	owners   []metav1.OwnerReference
 }
 
@@ -489,7 +527,7 @@ func (c *manifestCollector) readObject(raw json.RawMessage, header objectHeader,
 		c.kustomizations[origin.File] = struct{}{}
 	}
 
-	workload, shape, err := decodeWorkload(raw, gk)
+	workload, shape, podSpecPath, err := decodeWorkload(raw, gk)
 	if err != nil {
 		c.problem(origin, gk.Kind, name, false, cleanJSONError(err))
 		return
@@ -521,7 +559,14 @@ func (c *manifestCollector) readObject(raw json.RawMessage, header objectHeader,
 	c.found = append(c.found, foundWorkload{
 		workload: workload,
 		origin:   origin,
-		owners:   header.Metadata.OwnerReferences,
+		written: ManifestObject{
+			APIVersion:  header.APIVersion,
+			Kind:        header.Kind,
+			Name:        header.Metadata.Name,
+			Namespace:   header.Metadata.Namespace,
+			PodSpecPath: podSpecPath,
+		},
+		owners: header.Metadata.OwnerReferences,
 	})
 }
 
@@ -562,9 +607,11 @@ func (c *manifestCollector) result(selector labels.Selector) *ManifestResult {
 
 	res.Workloads = make([]Workload, 0, len(kept))
 	res.Origins = make([]ManifestOrigin, 0, len(kept))
+	res.Written = make([]ManifestObject, 0, len(kept))
 	for _, f := range kept {
 		res.Workloads = append(res.Workloads, f.workload)
 		res.Origins = append(res.Origins, f.origin)
+		res.Written = append(res.Written, f.written)
 		if f.workload.Namespace == "" {
 			res.NoNamespace++
 		}
@@ -716,22 +763,40 @@ const (
 	shapePartial
 )
 
+// The keys from the top of an object to its pod spec (ManifestObject.
+// PodSpecPath). The functions that return one of them return a copy.
+var (
+	podSpecOfPod         = []string{"spec"}
+	podSpecOfTemplate    = []string{"spec", "template", "spec"}
+	podSpecOfJobTemplate = []string{"spec", "jobTemplate", "spec", "template", "spec"}
+)
+
 // decodeWorkload decodes one object and says what shape it has. The
 // Workload is filled for shapeWorkload and shapePartial (for the second,
-// only its Kind and what there is of the pod spec are of use).
-func decodeWorkload(raw []byte, gk schema.GroupKind) (Workload, objectShape, error) {
+// only its Kind and what there is of the pod spec are of use). The third
+// result is where the pod spec of the object is; nil for shapeOther.
+func decodeWorkload(raw []byte, gk schema.GroupKind) (Workload, objectShape, []string, error) {
 	if decode := typedDecoders[gk]; decode != nil {
 		w, err := decode(raw)
 		if err != nil {
-			return Workload{}, shapeOther, err
+			return Workload{}, shapeOther, nil, err
+		}
+		// The six kinds have their pod spec at a fixed place: it is the
+		// place that the Go type of the kind reads.
+		path := podSpecOfTemplate
+		switch gk.Kind {
+		case "Pod":
+			path = podSpecOfPod
+		case "CronJob":
+			path = podSpecOfJobTemplate
 		}
 		if len(w.PodSpec.Containers) == 0 {
-			return w, shapePartial, nil
+			return w, shapePartial, append([]string(nil), path...), nil
 		}
-		return w, shapeWorkload, nil
+		return w, shapeWorkload, append([]string(nil), path...), nil
 	}
-	w, shape := workloadFromPodTemplate(raw, gk)
-	return w, shape, nil
+	w, shape, path := workloadFromPodTemplate(raw, gk)
+	return w, shape, append([]string(nil), path...), nil
 }
 
 // podTemplateProbe finds a pod template in an object of a kind this package
@@ -762,17 +827,17 @@ type podTemplateProbe struct {
 // A template with no containers that sets runtimeClassName is partial: no
 // field of that name exists on the look-alike templates, and a patch that
 // puts an Argo Rollout in a sandbox has exactly this shape.
-func workloadFromPodTemplate(raw []byte, gk schema.GroupKind) (Workload, objectShape) {
+func workloadFromPodTemplate(raw []byte, gk schema.GroupKind) (Workload, objectShape, []string) {
 	var probe podTemplateProbe
 	if err := json.Unmarshal(raw, &probe); err != nil {
-		return Workload{}, shapeOther
+		return Workload{}, shapeOther, nil
 	}
-	template := probe.Spec.Template
+	template, path := probe.Spec.Template, podSpecOfTemplate
 	if template == nil && probe.Spec.JobTemplate != nil {
-		template = probe.Spec.JobTemplate.Spec.Template
+		template, path = probe.Spec.JobTemplate.Spec.Template, podSpecOfJobTemplate
 	}
 	if template == nil {
-		return Workload{}, shapeOther
+		return Workload{}, shapeOther, nil
 	}
 	spec := template.Spec
 	w := Workload{
@@ -784,11 +849,11 @@ func workloadFromPodTemplate(raw []byte, gk schema.GroupKind) (Workload, objectS
 	}
 	switch {
 	case len(spec.Containers) > 0:
-		return w, shapeWorkload
+		return w, shapeWorkload, path
 	case spec.RuntimeClassName != nil && *spec.RuntimeClassName != "":
-		return w, shapePartial
+		return w, shapePartial, path
 	default:
-		return Workload{}, shapeOther
+		return Workload{}, shapeOther, nil
 	}
 }
 

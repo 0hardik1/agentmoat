@@ -1059,3 +1059,122 @@ func TestSplitDocuments(t *testing.T) {
 		}
 	}
 }
+
+// TestFromManifests_Written: the result keeps how the input writes each
+// object, with no default and no change. `patch --kustomize` names the target
+// of a Kustomize patch with these values, and Kustomize matches them exactly.
+func TestFromManifests_Written(t *testing.T) {
+	t.Parallel()
+	const text = `apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web, namespace: shop}
+spec:
+  template:
+    spec:
+      containers: [{name: c, image: busybox}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: once}
+spec:
+  containers: [{name: c, image: busybox}]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: nightly}
+spec:
+  schedule: "0 0 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers: [{name: c, image: busybox}]
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata: {name: canary}
+spec:
+  template:
+    spec:
+      containers: [{name: c, image: busybox}]
+---
+# A kind with a job template that is not a CronJob.
+apiVersion: example.test/v1
+kind: Schedule
+metadata: {name: later}
+spec:
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers: [{name: c, image: busybox}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {generateName: run-}
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers: [{name: c, image: busybox}]
+---
+# A typed list: its items name no kind and no apiVersion.
+apiVersion: apps/v1
+kind: StatefulSetList
+items:
+  - metadata: {name: db}
+    spec:
+      template:
+        spec:
+          containers: [{name: c, image: busybox}]
+`
+	res, err := FromManifests([]ManifestInput{{Name: "all.yaml", Data: []byte(text)}}, ManifestOptions{DefaultNamespace: "from-flag"})
+	if err != nil {
+		t.Fatalf("FromManifests: %v", err)
+	}
+	if len(res.Written) != len(res.Workloads) {
+		t.Fatalf("Written has %d entries for %d workloads", len(res.Written), len(res.Workloads))
+	}
+	template := []string{"spec", "template", "spec"}
+	jobTemplate := []string{"spec", "jobTemplate", "spec", "template", "spec"}
+	want := map[string]ManifestObject{
+		"Deployment/web":              {APIVersion: "apps/v1", Kind: "Deployment", Name: "web", Namespace: "shop", PodSpecPath: template},
+		"Pod/once":                    {APIVersion: "v1", Kind: "Pod", Name: "once", PodSpecPath: []string{"spec"}},
+		"CronJob/nightly":             {APIVersion: "batch/v1", Kind: "CronJob", Name: "nightly", PodSpecPath: jobTemplate},
+		"Rollout.argoproj.io/canary":  {APIVersion: "argoproj.io/v1alpha1", Kind: "Rollout", Name: "canary", PodSpecPath: template},
+		"Schedule.example.test/later": {APIVersion: "example.test/v1", Kind: "Schedule", Name: "later", PodSpecPath: jobTemplate},
+		// The workload has the name "run-" (from generateName) and the
+		// namespace of the flag. The text has no name and no namespace.
+		"Job/run-": {APIVersion: "batch/v1", Kind: "Job", PodSpecPath: template},
+		// The workload has the kind of the list. The item names none.
+		"StatefulSet/db": {Name: "db", PodSpecPath: template},
+	}
+	for i, w := range res.Workloads {
+		key := w.Kind + "/" + w.Name
+		wantObject, ok := want[key]
+		if !ok {
+			t.Errorf("a workload that the test does not expect: %s", key)
+			continue
+		}
+		if !reflect.DeepEqual(res.Written[i], wantObject) {
+			t.Errorf("%s: Written = %+v, want %+v", key, res.Written[i], wantObject)
+		}
+		delete(want, key)
+	}
+	for key := range want {
+		t.Errorf("no workload %s in the result", key)
+	}
+
+	// A caller can change a path that it got: each object has its own.
+	res.Written[0].PodSpecPath[0] = "changed"
+	again, err := FromManifests([]ManifestInput{{Name: "all.yaml", Data: []byte(text)}}, ManifestOptions{})
+	if err != nil {
+		t.Fatalf("FromManifests: %v", err)
+	}
+	for _, o := range again.Written {
+		if o.PodSpecPath[0] != "spec" {
+			t.Errorf("a path is shared between results: %v", o.PodSpecPath)
+		}
+	}
+}

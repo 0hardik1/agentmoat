@@ -41,7 +41,7 @@ invocation more than twice, prefer extending a target.
 | `make check-device-cgroup` | Checks that every runsc sandbox on a node is confined to a device cgroup (gVisor 20261116.0 and newer): `/dev/null` opens, `/dev/kmsg` is refused. `NODE=<kind node>` runs it through `docker exec`; `make e2e` runs it on the kind worker. |
 | `make kind-up`    | Builds the gVisor-enabled kind worker image and creates the local cluster. Idempotent; an existing cluster is reused as is, so run `make kind-down` first after a gVisor pin bump. |
 | `make e2e`        | Builds, brings up kind, runs scan/plan/apply/rollback end-to-end against a real `runsc` runtime, tears down. Honors `KEEP_CLUSTER=1`. |
-| `make offline-smoke` | Builds, then runs `scan -f`, the `--fail-on` gate, the Markdown and SARIF outputs, and `patch` on the manifest fixtures in `test/testdata/manifests` with no cluster. Then it runs the script of the GitHub Action (`scripts/action-smoke.sh`) with a model of the runner. Needs `jq`, `curl`, and `tar`. CI runs it on every PR. Run it after changes to the manifest scanner, the gate, `pkg/patcher`, `pkg/output`, `action.yml`, or `scripts/github-action.sh`. |
+| `make offline-smoke` | Builds, then runs `scan -f`, the `--fail-on` gate, the Markdown and SARIF outputs, and `patch` on the manifest fixtures in `test/testdata/manifests` and `test/testdata/patch` with no cluster. For `patch --kustomize` it builds the component with `kubectl kustomize` (and `helm template`) when the tools are installed. Then it runs the script of the GitHub Action (`scripts/action-smoke.sh`) with a model of the runner. Needs `jq`, `curl`, and `tar`. CI runs it on every PR. Run it after changes to the manifest scanner, the gate, `pkg/patcher`, `pkg/output`, `action.yml`, or `scripts/github-action.sh`. |
 | `make kind-down`  | Tear down the kind cluster from `make kind-up`. |
 
 CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
@@ -64,7 +64,10 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   (`readManifestSet`), selects workloads with the rule of the planner, calls
   `pkg/patcher` for each file, and writes the files (`writeManifest`: the
   file must be as it was read, then a temporary file and a rename).
-  `PatchExitCode` is the exit code.
+  `PatchExitCode` is the exit code. `patch_kustomize.go` is the form with
+  `--kustomize <dir>`: it reads the directory (`readKustomizeDir`, which
+  refuses a directory with files of a person), plans the patch files and
+  the list, and writes the patch files first and the list last.
 - `pkg/scanner/`: returns canonical `[]scanner.Workload` from one of two
   sources. `Enumerate` lists a cluster through `client-go`. `FromManifests`
   decodes YAML or JSON text with no cluster (`ReadManifestPaths` reads the
@@ -73,7 +76,10 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   its position (`ManifestOrigin`: file, document, and the number of the
   object in the document); `pkg/patcher` finds the object again by that
   position, so keep the reading order of `readValue` and the order in
-  `patcher.collectObjects` the same.
+  `patcher.collectObjects` the same. Each one also has its identity as the
+  file has it (`ManifestResult.Written`, a `ManifestObject`: apiVersion,
+  kind, name, namespace, and the path of the pod spec), which is not the
+  same as the names in a report; the Kustomize patches use it.
 - `pkg/classifier/`: pure-function rule engine. `Classify(w, registry)`
   returns a `Verdict`; `ClassifyWithFacts` adds `schema.ClusterFacts` so a
   rule's `Refine` hook can move its severity (`gpu-passthrough` in
@@ -104,7 +110,13 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   text is never encoded again from objects. `check.go` proves each edit
   before it is used (the new text decodes to the old objects plus the
   class, and the scanner finds the class on each target). `diff.go` makes
-  the unified diff from the added line numbers.
+  the unified diff from the added line numbers, and the diff of a file that
+  is new or longer (`FileDiff`). `kustomize.go` is the form that edits no
+  source: the text of one strategic merge patch for an object
+  (`KustomizePatch`), its file name, and the `kustomization.yaml` of kind
+  `Component` (`ComponentAdd`). The rules for how Kustomize finds the target
+  of a patch are in its header; `scripts/offline-smoke.sh` builds real trees
+  to keep them true.
 - `pkg/applier/`: the only package that mutates the cluster. Strategic
   merge patch with `runtimeClassName`, the two namespace annotations
   (`idempotency.go`: `plan-hash` when an apply is complete, `apply-started`
@@ -145,7 +157,8 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   the runner, and `.github/workflows/action-test.yml` runs it on real
   runners when the action changes.
 - `examples/ci/`: the pipeline files that users copy (the GitHub pull
-  request check, the GitHub migration pipeline, GitLab CI). `docs/ci-cd.md`
+  request check, the GitHub migration pipeline, the GitHub workflow that
+  runs `patch` and opens a pull request, GitLab CI). `docs/ci-cd.md`
   describes them and says which parts a test proves.
 - `test/e2e/`: e2e harness invoked by `scripts/e2e.sh`.
 
@@ -243,6 +256,14 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
     terminal, and does no more: in a GitHub step log a line of the table or
     of the diff can still be a runner command, so a pipeline sends the
     Markdown to the job summary, or prints inside a `stop-commands` block.
+    With `--kustomize <dir>` the rule is: no source file changes, and a run
+    only adds. It writes patch files that are not there, and entries at the
+    end of its own list (`kustomization.yaml`, kind `Component`, with the
+    marker line first). It changes no file that is there, and it refuses a
+    directory that has files of a person before it writes. It does not edit
+    the kustomization of a person, and it does not run Kustomize: it cannot
+    know which kustomization will use the component, so no output of it
+    says that a build passes.
 
 ## Conventions (mirror the existing code)
 

@@ -696,10 +696,86 @@ func TestPatchResultEmptyShape(t *testing.T) {
 			t.Errorf("the empty result lacks %s:\n%s", want, data)
 		}
 	}
-	for _, key := range []string{`"includeReview"`, `"source"`} {
+	for _, key := range []string{`"includeReview"`, `"source"`, `"kustomizeDir"`} {
 		if strings.Contains(string(data), key) {
 			t.Errorf("the empty result has the key %s:\n%s", key, data)
 		}
+	}
+
+	// The fields of a Kustomize component are not in the result of an edit
+	// in place: a reader of the old shape sees no new key.
+	inPlace, err := json.Marshal(PatchSpec{
+		Changes: []PatchChange{{Status: PatchStatusPatched, Line: 9}},
+		Files:   []PatchFile{{Path: "web.yaml", Added: 1, Written: true}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, key := range []string{`"patchFile"`, `"created"`, `"removed"`} {
+		if strings.Contains(string(inPlace), key) {
+			t.Errorf("the result of an edit in place has the key %s:\n%s", key, inPlace)
+		}
+	}
+}
+
+// TestPatchResultKustomizeRoundTrip pins the fields that a result has when
+// the change is a Kustomize component (`patch --kustomize`).
+func TestPatchResultKustomizeRoundTrip(t *testing.T) {
+	t.Parallel()
+	r := NewPatchResult()
+	r.Metadata = PatchMetadata{
+		GeneratedAt:      "2026-11-22T12:00:00Z",
+		AgentmoatVersion: "test",
+		RuntimeClassName: "gvisor",
+		KustomizeDir:     "overlays/prod/gvisor",
+	}
+	r.Spec = PatchSpec{
+		Summary: PatchSummary{Total: 1, Selected: 1, Patched: 1, Files: 2},
+		Changes: []PatchChange{{
+			Target:        WorkloadRef{Kind: "Deployment", Namespace: "shop", Name: "web"},
+			Compatibility: CompatibilityCompatible,
+			Origin:        &Origin{File: "base/web.yaml", Line: 1},
+			Status:        PatchStatusPatched,
+			PatchFile:     "overlays/prod/gvisor/deployment.apps_web.yaml",
+		}},
+		Excluded: []ExcludedWorkload{},
+		Files: []PatchFile{
+			{Path: "overlays/prod/gvisor/deployment.apps_web.yaml", Added: 12, Written: true, Created: true, Diff: "--- /dev/null\n"},
+			{Path: "overlays/prod/gvisor/kustomization.yaml", Added: 1, Removed: 1, Written: true, Diff: "--- a/overlays/prod/gvisor/kustomization.yaml\n"},
+		},
+	}
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, want := range []string{
+		`"kustomizeDir":"overlays/prod/gvisor"`,
+		`"status":"patched","patchFile":"overlays/prod/gvisor/deployment.apps_web.yaml"`,
+		`"added":12,"created":true,"written":true`,
+		`"added":1,"removed":1,"written":true`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("JSON lacks %s:\n%s", want, data)
+		}
+	}
+	var fromJSON PatchResult
+	if err := json.Unmarshal(data, &fromJSON); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromJSON) {
+		t.Errorf("JSON round trip changed the result:\n got %+v\nwant %+v", fromJSON, *r)
+	}
+	yamlData, err := yaml.Marshal(r)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	var fromYAML PatchResult
+	if err := yaml.Unmarshal(yamlData, &fromYAML); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(*r, fromYAML) {
+		t.Errorf("YAML round trip changed the result:\n got %+v\nwant %+v", fromYAML, *r)
 	}
 }
 

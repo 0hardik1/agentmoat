@@ -1,0 +1,19 @@
+# Host networking: this workload cannot run in the sandbox, so it gets no
+# patch.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cni
+spec:
+  selector:
+    matchLabels:
+      app: cni
+  template:
+    metadata:
+      labels:
+        app: cni
+    spec:
+      hostNetwork: true
+      containers:
+        - name: cni
+          image: example.test/cni:1

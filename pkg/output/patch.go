@@ -13,6 +13,13 @@
 // block for the diff, in which nothing is read as Markdown. The size has a
 // limit too: the diff is cut after mdMaxDiffLines lines, and a long line or
 // reason is cut.
+//
+// A result has one of two forms. The edit in place changes the source files.
+// With a Kustomize component (PatchMetadata.KustomizeDir) no source file
+// changes: the files of the result are new patch files and their list, the
+// place of a change is its patch file, and the report says the one thing
+// that the command cannot do for the reader: add the directory to the
+// kustomization that must move.
 package output
 
 import (
@@ -69,7 +76,11 @@ func renderPatchResultTable(res *schema.PatchResult, w io.Writer, useColor bool)
 	p := &linePrinter{w: w}
 
 	p.line(s.Bold.Render("agentmoat patch"))
-	p.line(s.Muted.Render(fmt.Sprintf("runtime-class: %s   dry-run: %v", res.Metadata.RuntimeClassName, res.Metadata.DryRun)))
+	meta := fmt.Sprintf("runtime-class: %s   dry-run: %v", res.Metadata.RuntimeClassName, res.Metadata.DryRun)
+	if dir := res.Metadata.KustomizeDir; dir != "" {
+		meta += "   kustomize component: " + termLine(dir)
+	}
+	p.line(s.Muted.Render(meta))
 
 	p.linef("%s  %d workloads", s.Bold.Render("SUMMARY"), sum.Total)
 	items := []barItem{
@@ -90,6 +101,7 @@ func renderPatchResultTable(res *schema.PatchResult, w io.Writer, useColor bool)
 	renderPatchChanges(p, s, res, &tr)
 	renderPatchExcluded(p, s, res.Spec.Excluded, &tr)
 	renderPatchSourceNotes(p, s, res.Metadata.Source)
+	renderPatchNextStep(p, s, res)
 	if p.err != nil {
 		return p.err
 	}
@@ -105,7 +117,11 @@ func renderPatchResultTable(res *schema.PatchResult, w io.Writer, useColor bool)
 // renderPatchChanges prints one row for each selected workload.
 func renderPatchChanges(p *linePrinter, s *Styles, res *schema.PatchResult, tr *trackingTruncator) {
 	if len(res.Spec.Changes) == 0 {
-		p.line(s.Muted.Render("(nothing to change: no workload is compatible and without a RuntimeClass)"))
+		why := "(nothing to change: no workload is compatible and without a RuntimeClass)"
+		if res.Metadata.KustomizeDir != "" {
+			why = "(nothing to change: no workload is compatible, without a RuntimeClass, and without its patch in the component)"
+		}
+		p.line(s.Muted.Render(why))
 		return
 	}
 	headers := []string{"NAMESPACE", "KIND", "NAME", "STATUS", "WHERE", "NOTE"}
@@ -125,8 +141,12 @@ func renderPatchChanges(p *linePrinter, s *Styles, res *schema.PatchResult, tr *
 
 // patchWhere is the place of a change: the file and the line of the added
 // line for a patched workload, and the file and the line where the object
-// starts for the others.
+// starts for the others. With a Kustomize component, the place of a patched
+// workload is its patch file.
 func patchWhere(c schema.PatchChange) string {
+	if c.PatchFile != "" {
+		return termLine(c.PatchFile)
+	}
 	if c.Origin == nil {
 		return ""
 	}
@@ -189,6 +209,27 @@ func renderPatchSourceNotes(p *linePrinter, s *Styles, src *schema.ReportSource)
 		p.line("    " + sign)
 	}
 	p.line(s.Muted.Render("    after the edit, scan the rendered objects with the gate: kustomize build <dir> | agentmoat scan -f - --fail-on sandboxed"))
+}
+
+// componentNextStep is what the reader of a Kustomize result must do, and the
+// one rule for the input. The command cannot do the first for the reader (it
+// does not edit a kustomization of a person), and it cannot check the second
+// (it does not know which kustomization will use the component).
+const (
+	componentNextStepUse   = "add the directory %s to `components:` in the kustomization that must move"
+	componentNextStepInput = "give patch only what that kustomization reads from its `resources:`: " +
+		"a patch for an object that it does not read stops its build"
+)
+
+// renderPatchNextStep prints the next step after a run that made, or would
+// make, patch files in a Kustomize component.
+func renderPatchNextStep(p *linePrinter, s *Styles, res *schema.PatchResult) {
+	dir := res.Metadata.KustomizeDir
+	if dir == "" || res.Spec.Summary.Patched == 0 {
+		return
+	}
+	p.linef("%s to use the component, "+componentNextStepUse, s.Info.Render(symbolArrow), termLine(dir))
+	p.line(s.Muted.Render("    " + componentNextStepInput))
 }
 
 // renderPatchDiffs prints the diff of each file, with the colors of `git
@@ -271,7 +312,7 @@ func writePatchResultMarkdown(d *mdDoc, res *schema.PatchResult) {
 	// could not do.
 	d.linef("%s", patchHeadline(res))
 	d.blank()
-	chips := []string{mdChip("RuntimeClass", res.Metadata.RuntimeClassName)}
+	chips := []string{mdChip("RuntimeClass", res.Metadata.RuntimeClassName), mdChip("Kustomize component", res.Metadata.KustomizeDir)}
 	if res.Metadata.IncludeReview {
 		chips = append(chips, "Workloads that need review: included")
 	}
@@ -289,6 +330,10 @@ func writePatchResultMarkdown(d *mdDoc, res *schema.PatchResult) {
 		}},
 	)
 
+	if dir := res.Metadata.KustomizeDir; dir != "" && sum.Patched > 0 {
+		d.linef("**To use the component:** "+componentNextStepUse+". G"+componentNextStepInput[1:]+".", mdCode(dir))
+		d.blank()
+	}
 	writePatchSourceMarkdown(d, res.Metadata.Source)
 
 	var attention, patched []schema.PatchChange
@@ -335,6 +380,9 @@ func patchHeadline(res *schema.PatchResult) string {
 			written++
 		}
 	}
+	if res.Metadata.KustomizeDir != "" {
+		return componentHeadline(res, written)
+	}
 	problems := sum.NotEdited + sum.Failed
 	switch {
 	case sum.Selected == 0:
@@ -352,6 +400,36 @@ func patchHeadline(res *schema.PatchResult) string {
 			"Pass `--dry-run=false` to write them.", lines, sum.Files)
 	}
 	return fmt.Sprintf("✅ **%d line(s) added to %d file(s).** Each selected workload now asks for the RuntimeClass.", lines, sum.Files)
+}
+
+// componentHeadline is patchHeadline for a Kustomize component. The counts
+// are files and not lines: each file of a component is new, or is the list.
+// A workload can fail after its patch file was written (when the list could
+// not be), so no sentence here says "no file was changed" for a real run.
+func componentHeadline(res *schema.PatchResult, written int) string {
+	sum := res.Spec.Summary
+	dir := mdCode(res.Metadata.KustomizeDir)
+	problems := sum.NotEdited + sum.Failed
+	switch {
+	case sum.Selected == 0:
+		return "➖ **Nothing to change.** No workload is compatible, without a RuntimeClass, and without its patch in the Kustomize component " + dir + "."
+	case problems > 0 && sum.Patched == 0 && written == 0:
+		return fmt.Sprintf("❌ **None of the %d selected workload(s) could get a patch.** No file was changed.", sum.Selected)
+	case problems > 0 && sum.Patched == 0:
+		return fmt.Sprintf("❌ **None of the %d selected workload(s) got a patch that a build uses.** %d of %d file(s) were written in the Kustomize component %s.",
+			sum.Selected, written, sum.Files, dir)
+	case problems > 0 && res.Metadata.DryRun:
+		return fmt.Sprintf("⚠️ **Dry run: %d of %d selected workload(s) cannot get a patch.** No file was changed. "+
+			"For the others, %d file(s) would be written in the Kustomize component %s.", problems, sum.Selected, sum.Files, dir)
+	case problems > 0:
+		return fmt.Sprintf("⚠️ **%d of %d selected workload(s) did not get a patch.** %d of %d file(s) were written in the Kustomize component %s.",
+			problems, sum.Selected, written, sum.Files, dir)
+	case res.Metadata.DryRun:
+		return fmt.Sprintf("➖ **Dry run.** No file was changed. %d file(s) would be written in the Kustomize component %s, and no source file changes. "+
+			"Pass `--dry-run=false` to write them.", sum.Files, dir)
+	}
+	return fmt.Sprintf("✅ **%d file(s) written in the Kustomize component %s.** No source file changed. "+
+		"The component has a patch for each selected workload.", sum.Files, dir)
 }
 
 // writePatchSourceMarkdown says when the input is not rendered, or has an

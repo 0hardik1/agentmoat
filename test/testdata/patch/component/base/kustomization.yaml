@@ -1,0 +1,10 @@
+# The base that the two overlays share. It gives each object a name prefix
+# and a namespace, so the names that an overlay gets from it are not the
+# names in the files.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namePrefix: b-
+namespace: team
+resources:
+  - workloads.yaml
+  - cni.yaml

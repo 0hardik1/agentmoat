@@ -23,6 +23,10 @@
 //
 // A second run finds the class on the workloads and changes nothing.
 //
+// With KustomizeDir, steps 3 and 4 are different: no source file is edited,
+// and the change is written as a Kustomize component in that directory. See
+// patch_kustomize.go.
+//
 // Invariants, the same as for a file scan: no Kubernetes client is built
 // and no kubeconfig is read (a test keeps this honest), and input that
 // cannot be read is an error and not a skip.
@@ -50,7 +54,19 @@ import (
 type PatchOptions struct {
 	// ManifestPaths are the files and directories to read and edit, as for
 	// `scan -f`. Standard input ("-") is refused: it has no file to edit.
+	// With KustomizeDir, no input is edited, so standard input is read.
 	ManifestPaths []string
+
+	// KustomizeDir, when it is set, is the directory of a Kustomize
+	// component. The change is written there, as one patch file for each
+	// selected workload and a kustomization.yaml that lists them, and no
+	// source file is edited. See patch_kustomize.go for the rules of the
+	// directory.
+	KustomizeDir string
+
+	// Stdin is what the path "-" reads. Nil means that "-" is an error
+	// (the MCP server: its standard input is the protocol channel).
+	Stdin io.Reader
 
 	// Namespace is the default for objects that name no namespace. It is
 	// not a filter, and it is not written to a file.
@@ -101,13 +117,14 @@ func Patch(_ context.Context, opts PatchOptions) (*schema.PatchResult, error) {
 		return nil, fmt.Errorf("patch: no manifest paths: give the files or directories to edit")
 	}
 	for _, p := range opts.ManifestPaths {
-		if p == scanner.StdinPath {
+		if p == scanner.StdinPath && opts.KustomizeDir == "" {
 			return nil, fmt.Errorf("patch: standard input (the path \"-\") has no file to edit: give the files or directories")
 		}
 	}
 
 	scanOpts := ScanOptions{
 		ManifestPaths: opts.ManifestPaths,
+		Stdin:         opts.Stdin,
 		LabelSelector: opts.LabelSelector,
 		RulesYAMLPath: opts.RulesYAMLPath,
 		FactsPath:     opts.FactsPath,
@@ -134,10 +151,26 @@ func Patch(_ context.Context, opts PatchOptions) (*schema.PatchResult, error) {
 		stderr: stderr,
 		byFile: map[string][]int{},
 	}
+	if opts.KustomizeDir != "" {
+		// The directory is checked before a workload is selected: the
+		// selection needs to know which patches are there, and a directory
+		// that a run must not write into is an error with nothing changed.
+		if run.kustomize, err = readKustomizeDir(opts.KustomizeDir); err != nil {
+			return nil, fmt.Errorf("patch: %w", err)
+		}
+	}
 	run.selectWorkloads()
-	run.editFiles()
-	if !opts.DryRun {
-		run.writeFiles()
+	switch {
+	case run.kustomize != nil:
+		run.planComponent()
+		if !opts.DryRun {
+			run.writeComponent()
+		}
+	default:
+		run.editFiles()
+		if !opts.DryRun {
+			run.writeFiles()
+		}
 	}
 	res := run.result()
 	run.describe(res)
@@ -182,6 +215,18 @@ type patchRun struct {
 	// targets is parallel to changes: where each selected workload is.
 	targets []scanner.ManifestOrigin
 
+	// objects is parallel to changes: how the input writes each selected
+	// workload. The Kustomize form names the target of a patch with it.
+	objects []scanner.ManifestObject
+
+	// kustomize is the state of the Kustomize form; nil for the edit in
+	// place.
+	kustomize *kustomizeRun
+
+	// already is the number of workloads that are excluded because the
+	// component has their patch.
+	already int
+
 	// byFile maps a file to the indexes (in changes) of its workloads.
 	byFile map[string][]int
 
@@ -215,6 +260,22 @@ func (r *patchRun) selectWorkloads() {
 			})
 			continue
 		}
+		written := r.set.found.Written[i]
+		if r.kustomize != nil {
+			// The source files never get the class in this form, so the
+			// sign that a workload is done is in the component. Such a
+			// workload is excluded, as a workload with the class is for
+			// the edit in place: a second run then has nothing to do.
+			if path, ok := r.kustomize.has(written, r.class); ok {
+				r.already++
+				r.excluded = append(r.excluded, schema.ExcludedWorkload{
+					Target:        ref,
+					Compatibility: result.Compatibility,
+					Reason:        fmt.Sprintf("the component has the patch for it already (%s)", path),
+				})
+				continue
+			}
+		}
 		r.byFile[origin.File] = append(r.byFile[origin.File], len(r.changes))
 		r.changes = append(r.changes, schema.PatchChange{
 			Target:        ref,
@@ -222,6 +283,7 @@ func (r *patchRun) selectWorkloads() {
 			Origin:        originOf(origin),
 		})
 		r.targets = append(r.targets, origin)
+		r.objects = append(r.objects, written)
 	}
 }
 
@@ -320,32 +382,14 @@ func writeManifest(path string, old, data []byte) error {
 		return fmt.Errorf("%s changed after it was read; run the command again", target)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(target), ".agentmoat-patch-*")
+	tmpName, err := writeTemp(filepath.Dir(target), data, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	keep := false
-	defer func() {
-		if !keep {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
 	if err := os.Rename(tmpName, target); err != nil {
+		_ = os.Remove(tmpName)
 		return err
 	}
-	keep = true
 	return nil
 }
 
@@ -358,27 +402,15 @@ func (r *patchRun) result() *schema.PatchResult {
 		DryRun:           r.opts.DryRun,
 		RuntimeClassName: r.class,
 		IncludeReview:    r.opts.IncludeReview,
+		KustomizeDir:     r.opts.KustomizeDir,
 		Source:           r.set.source,
 	}
 
-	paths := make([]string, 0, len(r.files))
-	for path := range r.files {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	files := make([]schema.PatchFile, 0, len(paths))
-	for _, path := range paths {
-		edit := r.files[path]
-		f := schema.PatchFile{
-			Path:    path,
-			Added:   len(edit.added),
-			Written: edit.wrote,
-			Diff:    patcher.UnifiedDiff(path, edit.text, edit.added),
-		}
-		if edit.err != nil {
-			f.Error = edit.err.Error()
-		}
-		files = append(files, f)
+	var files []schema.PatchFile
+	if r.kustomize != nil {
+		files = r.kustomize.patchFiles()
+	} else {
+		files = r.editedFiles()
 	}
 
 	summary := schema.PatchSummary{
@@ -402,9 +434,34 @@ func (r *patchRun) result() *schema.PatchResult {
 		Summary:  summary,
 		Changes:  nonNil(r.changes),
 		Excluded: nonNil(r.excluded),
-		Files:    files,
+		Files:    nonNil(files),
 	}
 	return res
+}
+
+// editedFiles returns the source files that the edit in place changes, with
+// the diff of each, sorted by path.
+func (r *patchRun) editedFiles() []schema.PatchFile {
+	paths := make([]string, 0, len(r.files))
+	for path := range r.files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	files := make([]schema.PatchFile, 0, len(paths))
+	for _, path := range paths {
+		edit := r.files[path]
+		f := schema.PatchFile{
+			Path:    path,
+			Added:   len(edit.added),
+			Written: edit.wrote,
+			Diff:    patcher.UnifiedDiff(path, edit.text, edit.added),
+		}
+		if edit.err != nil {
+			f.Error = edit.err.Error()
+		}
+		files = append(files, f)
+	}
+	return files
 }
 
 // nonNil returns an empty slice for a nil one, so that the JSON has [] and
@@ -432,6 +489,11 @@ func (r *patchRun) describe(res *schema.PatchResult) {
 			"kustomize build <dir> | agentmoat scan -f - --fail-on sandboxed\n", len(signs))
 	}
 
+	if r.kustomize != nil {
+		r.describeComponent(res)
+		return
+	}
+
 	lines := 0
 	for _, f := range res.Spec.Files {
 		lines += f.Added
@@ -443,18 +505,54 @@ func (r *patchRun) describe(res *schema.PatchResult) {
 		_, _ = fmt.Fprintf(r.stderr, "patch: dry-run: %d line(s) would be added to %d file(s). To write them, run again with --dry-run=false\n",
 			lines, s.Files)
 	default:
-		written := 0
-		for _, f := range res.Spec.Files {
-			if f.Written {
-				written++
-			}
-		}
-		_, _ = fmt.Fprintf(r.stderr, "patch: %d of %d file(s) written\n", written, s.Files)
+		_, _ = fmt.Fprintf(r.stderr, "patch: %d of %d file(s) written\n", writtenFiles(res), s.Files)
 	}
 	if n := s.NotEdited; n > 0 {
 		_, _ = fmt.Fprintf(r.stderr, "patch: %d selected workload(s) are in a form that is not edited; the report has the reason for each\n", n)
 	}
 	if n := s.Failed; n > 0 {
 		_, _ = fmt.Fprintf(r.stderr, "patch: %d selected workload(s) are in a file that could not be written\n", n)
+	}
+}
+
+// writtenFiles counts the files of a result that are on disk with the
+// change.
+func writtenFiles(res *schema.PatchResult) int {
+	written := 0
+	for _, f := range res.Spec.Files {
+		if f.Written {
+			written++
+		}
+	}
+	return written
+}
+
+// describeComponent is the end of describe for the Kustomize form.
+func (r *patchRun) describeComponent(res *schema.PatchResult) {
+	s, dir := res.Spec.Summary, r.opts.KustomizeDir
+	switch {
+	case s.Selected == 0 && r.already > 0:
+		_, _ = fmt.Fprintf(r.stderr, "patch: nothing to change: the component %s has the patch for each of the %d workload(s) that can move\n", dir, r.already)
+	case s.Selected == 0:
+		_, _ = fmt.Fprintln(r.stderr, "patch: nothing to change: no workload is compatible and without a RuntimeClass")
+	case r.opts.DryRun:
+		_, _ = fmt.Fprintf(r.stderr, "patch: dry-run: %d file(s) would be written in %s (the patch files and their list); no source file changes. "+
+			"To write them, run again with --dry-run=false\n", s.Files, dir)
+	default:
+		_, _ = fmt.Fprintf(r.stderr, "patch: %d of %d file(s) written in %s; no source file changed\n", writtenFiles(res), s.Files, dir)
+	}
+	if n := s.NotEdited; n > 0 {
+		_, _ = fmt.Fprintf(r.stderr, "patch: %d selected workload(s) got no patch file; the report has the reason for each\n", n)
+	}
+	if n := s.Failed; n > 0 {
+		_, _ = fmt.Fprintf(r.stderr, "patch: %d selected workload(s) have a patch that could not be written\n", n)
+	}
+	if s.Patched > 0 {
+		// The two things that this command cannot do for the user. The
+		// second one is the common way to a build that fails: the paths
+		// name more than the kustomization reads.
+		_, _ = fmt.Fprintf(r.stderr, "patch: to use the component, add the directory %s to `components:` in the kustomization that must move. "+
+			"Give this command only what that kustomization reads from its `resources:`: "+
+			"a patch for an object that it does not read stops its build\n", dir)
 	}
 }

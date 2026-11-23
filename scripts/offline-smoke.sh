@@ -28,6 +28,13 @@
 #        git reads the diff. Also the forms that are not edited (exit 3),
 #        a Helm template (exit 1), and a Kustomize tree (the base is edited,
 #        and the render of the overlay has the class).
+#     9. `patch --kustomize`, the move of one Kustomize overlay: no source
+#        file changes; the files that the run writes are a component that
+#        `kubectl kustomize` builds; the overlay that uses it has the class
+#        and the other overlay of the same base does not; a second run
+#        changes nothing. Also the ways to give the input (the files of the
+#        base, the output of the base, a plain directory, the output of a
+#        Helm chart), and the two inputs that Kustomize refuses at the build.
 #
 # The canary
 #
@@ -38,9 +45,10 @@
 #   kubeconfig would not do: its context name is empty, so a leak into a
 #   report would not show.)
 #
-# Requirements: the binary (run `make build`), and jq. kubectl and git are
-# optional; the checks that render with `kubectl kustomize` and the check
-# that applies a diff with `git apply` are skipped without them.
+# Requirements: the binary (run `make build`), and jq. kubectl, git, and
+# helm are optional; the checks that render with `kubectl kustomize` or
+# `helm template` and the check that applies a diff with `git apply` are
+# skipped without them.
 #
 # Exit codes
 #
@@ -473,6 +481,7 @@ expect_same kustomize/base/web.yaml "$REPO_ROOT/test/testdata/patch/kustomize/ba
 
 run patch -f - < /dev/null
 expect_rc 1 "standard input is refused: it has no file to edit"
+expect_text "$ERR" "--kustomize <dir>" "the error names the form that reads standard input"
 
 # Kustomize: the base is a file that a person edits, so patch edits it. The
 # overlay patch is a partial object and is never a target.
@@ -495,6 +504,216 @@ if command -v kubectl >/dev/null 2>&1; then
     "rendered: the Deployment of the overlay has the class"
 else
   printf '  %s %s\n' "$(_am_muted "-")" "skipped: kubectl is not installed (the render of the patched Kustomize tree)"
+fi
+
+popd > /dev/null
+
+# -----------------------------------------------------------------------------
+section "9. patch --kustomize: one overlay first"
+# -----------------------------------------------------------------------------
+
+# The tree: a base with five workloads (four can run in the sandbox, in four
+# forms), and two overlays of it, staging and prod. The base gives each
+# object a name prefix and a namespace, so the names that an overlay gets
+# are not the names in the files. Only staging must move.
+COMPONENT_FIXTURE="$REPO_ROOT/test/testdata/patch/component"
+KZ_DIR="$WORK_DIR/component"
+mkdir -p "$KZ_DIR"
+cp -R "$COMPONENT_FIXTURE" "$KZ_DIR/tree"
+pushd "$KZ_DIR" > /dev/null
+
+# use_component <kustomization directory> <path>: what the user does by hand
+# after a run: add the directory to `components:`.
+use_component() {
+  printf 'components:\n  - %s\n' "$2" >> "$1/kustomization.yaml"
+}
+
+# rendered_with_class <kustomization directory>: the names of the workloads
+# that have the class in the build of the directory, sorted, joined with ",".
+rendered_with_class() {
+  kubectl kustomize "$1" 2>> "$ALL_OUTPUT" > "$WORK_DIR/rendered.yaml" || { echo "<the build failed>"; return 0; }
+  "$AGENTMOAT_BIN" scan -f "$WORK_DIR/rendered.yaml" --fail-on none -o json -q 2>> "$ALL_OUTPUT" \
+    | jq -r '[.spec.workloads[] | select(.runtimeClassName == "gvisor") | .name] | sort | join(",")'
+}
+
+# expect_build_fails <kustomization directory> <text> <label>: `kubectl
+# kustomize` stops, and its message has the text.
+expect_build_fails() {
+  local msg
+  if msg="$(kubectl kustomize "$1" 2>&1 > /dev/null)"; then
+    fail "$3" "the build passed"
+  elif [[ "$msg" == *"$2"* ]]; then
+    pass "$3"
+  else
+    fail "$3" "the build failed, and its message does not have '$2': ${msg:0:300}"
+  fi
+}
+
+# The dry-run is the default here too. It makes no directory.
+run patch -f tree/base --kustomize tree/staging/gvisor -o json
+expect_rc 0 "patch --kustomize (dry-run, the default) exits 0"
+expect_jq '.metadata | "\(.dryRun) \(.kustomizeDir)"' "true tree/staging/gvisor" "the result says that it is a dry-run, and names the component directory"
+expect_jq '.spec.summary | "\(.total) \(.selected) \(.patched) \(.notEdited) \(.excluded) \(.files)"' "5 4 4 0 1 5" \
+  "4 of 5 workloads get a patch file (also the flow-style Pod); 5 files: 4 patches and the list"
+expect_jq '.spec.files | map(.created and (.written | not) and (.diff | startswith("--- /dev/null\n"))) | all' "true" \
+  "each file is new and not written, and its diff is from /dev/null"
+expect_text "$ERR" 'to `components:` in the kustomization that must move' "stderr says what to do with the directory"
+if [[ -e tree/staging/gvisor ]]; then
+  fail "the dry-run made no directory" "tree/staging/gvisor is there"
+else
+  pass "the dry-run made no directory"
+fi
+jq -r '.spec.files[].diff' "$OUT" > component.diff
+
+run patch -f tree/base --kustomize tree/staging/gvisor --dry-run=false -o json
+expect_rc 0 "patch --kustomize --dry-run=false exits 0"
+expect_jq '.spec.files | map(.written) | all' "true" "the 5 files are written"
+expect_jq '.spec.changes | map(.patchFile | sub("tree/staging/gvisor/"; "")) | sort | join(" ")' \
+  "cronjob.batch_batch_nightly.yaml deployment.apps_web.yaml pod_once.yaml rollout.argoproj.io_canary.yaml" \
+  "each change names its patch file: the kind, the namespace when the object has one, and the name"
+expect_eq "$(find tree/staging/gvisor -type f | wc -l | tr -d ' ')" "5" "the directory has the 5 files and no other file"
+expect_text tree/staging/gvisor/cronjob.batch_batch_nightly.yaml "  namespace: batch" "the patch of the CronJob has the namespace of the file"
+if grep -q "namespace" tree/staging/gvisor/deployment.apps_web.yaml; then
+  fail "the patch of the Deployment names no namespace" "it has one"
+else
+  pass "the patch of the Deployment names no namespace: the file has none"
+fi
+if diff -r "$COMPONENT_FIXTURE/base" tree/base >> "$ALL_OUTPUT" 2>&1; then
+  pass "no source file changed: the base is as it was"
+else
+  fail "no source file changed" "tree/base is different from the fixture"
+fi
+
+if command -v git >/dev/null 2>&1; then
+  # The diff of the dry-run is what a reviewer approves. git makes the same
+  # files from it.
+  mkdir -p apply
+  if (cd apply && git apply ../component.diff) >> "$ALL_OUTPUT" 2>&1 \
+    && diff -r apply/tree/staging/gvisor tree/staging/gvisor >> "$ALL_OUTPUT" 2>&1; then
+    pass "git apply of the dry-run diff gives the files that the real run wrote"
+  else
+    fail "git apply of the dry-run diff gives the files that the real run wrote" "git apply failed, or the files are different"
+  fi
+else
+  printf '  %s %s\n' "$(_am_muted "-")" "skipped: git is not installed (the git apply check)"
+fi
+
+cp -R tree/staging/gvisor once
+run patch -f tree/base --kustomize tree/staging/gvisor --dry-run=false -o json
+expect_rc 0 "a second run exits 0"
+expect_jq '.spec.summary | "\(.selected) \(.excluded) \(.files)"' "0 5 0" "a second run selects nothing: the component has the patches"
+if diff -r once tree/staging/gvisor >> "$ALL_OUTPUT" 2>&1; then
+  pass "a second run changed no file"
+else
+  fail "a second run changed no file" "the directory is different"
+fi
+
+run patch -f tree/base --kustomize tree/prod/gvisor -o markdown
+expect_rc 0 "patch --kustomize -o markdown works"
+expect_text "$OUT" '**Dry run.** No file was changed. 5 file(s) would be written in the Kustomize component `tree/prod/gvisor`' \
+  "markdown: the first lines say what would be written, and where"
+expect_text "$OUT" "**To use the component:**" "markdown: the report says what to do with the directory"
+
+# A directory of a person is refused, and nothing is written into it.
+run patch -f tree/base --kustomize tree/staging --dry-run=false
+expect_rc 1 "the directory of another kustomization is refused"
+expect_empty "$OUT" "no report on stdout"
+expect_text "$ERR" "does not start with the line" "the error says why: the kustomization.yaml there is not one of agentmoat"
+expect_same tree/staging/kustomization.yaml "$COMPONENT_FIXTURE/staging/kustomization.yaml" "the kustomization of the overlay is as it was"
+
+if command -v kubectl >/dev/null 2>&1; then
+  # `kubectl kustomize` is a local build. It contacts no cluster.
+
+  # Input 1: the files of the base. The names in the patches are the names
+  # in the files, and Kustomize finds the objects although the base gave
+  # them a prefix and another namespace.
+  expect_eq "$(rendered_with_class tree/staging)" "" "before the overlay uses the component, its build has no class"
+  use_component tree/staging gvisor
+  expect_eq "$(rendered_with_class tree/staging)" "staging-b-canary,staging-b-nightly,staging-b-once,staging-b-web" \
+    "staging: the four workloads have the class; the DaemonSet with host networking has none"
+  expect_eq "$(rendered_with_class tree/prod)" "" "prod uses the same base and has no class: only one overlay moved"
+  kubectl kustomize tree/staging > staging.yaml 2>> "$ALL_OUTPUT"
+  run scan -f staging.yaml --fail-on sandboxed -o json
+  expect_rc 0 "staging, rendered: the gate passes"
+  expect_jq '.spec.summary | "\(.total) \(.sandboxed)"' "5 4" "staging, rendered: 4 of 5 workloads are in the sandbox"
+  expect_text staging.yaml "  replicas: 3" "staging, rendered: the patch of the overlay itself still works"
+
+  # Input 2: the output of the base, on standard input. The names in the
+  # patches are then the names that the overlay reads.
+  kubectl kustomize tree/base > base-rendered.yaml 2>> "$ALL_OUTPUT"
+  run patch -f - --kustomize tree/prod/gvisor --dry-run=false -o json < base-rendered.yaml
+  expect_rc 0 "patch -f - --kustomize reads the output of the base from standard input"
+  expect_jq '.spec.summary | "\(.patched) \(.files)"' "4 5" "4 workloads get a patch file"
+  expect_text tree/prod/gvisor/deployment.apps_team_b-web.yaml "  name: b-web" "the patch has the name that the base gives the object"
+  use_component tree/prod gvisor
+  expect_eq "$(rendered_with_class tree/prod)" "prod-b-canary,prod-b-nightly,prod-b-once,prod-b-web" \
+    "prod: with patches made from the output of the base, the four workloads have the class"
+
+  # Input 3: a directory with a kustomization and no overlay. It uses the
+  # component itself.
+  cp -R "$REPO_ROOT/test/testdata/patch/kustomize/base" plain
+  run patch -f plain --kustomize plain/gvisor --dry-run=false -o json
+  expect_rc 0 "a plain kustomization: exit 0"
+  use_component plain gvisor
+  expect_eq "$(rendered_with_class plain)" "web" "a plain kustomization that uses the component has the class"
+  expect_same plain/web.yaml "$REPO_ROOT/test/testdata/patch/kustomize/base/web.yaml" "its source file is as it was"
+
+  # What Kustomize refuses. patch cannot know which kustomization will use
+  # the component, so it cannot check these two. The build stops with a
+  # message that names the patch: the error is not silent.
+  #
+  # (a) The input has more than the kustomization reads.
+  cp -R "$COMPONENT_FIXTURE" more
+  run patch -f more/base -f more/other --kustomize more/staging/gvisor --dry-run=false -o json
+  expect_rc 0 "input with one object more than the overlay reads: patch exits 0"
+  use_component more/staging gvisor
+  expect_build_fails more/staging "stray" "the build of that overlay stops, and names the object that it does not read"
+  # (b) The input is the output of the kustomization that uses the component.
+  cp -R "$COMPONENT_FIXTURE" same
+  kubectl kustomize same/staging > same-rendered.yaml 2>> "$ALL_OUTPUT"
+  run patch -f same-rendered.yaml --kustomize same/staging/gvisor --dry-run=false -o json
+  expect_rc 0 "input that is the output of the same overlay: patch exits 0"
+  use_component same/staging gvisor
+  expect_build_fails same/staging "staging-b-" "the build of that overlay stops: it reads the objects before it gives them its prefix"
+
+  if command -v helm >/dev/null 2>&1; then
+    # A Helm chart: a template cannot be edited, and its output can be the
+    # input. The patches name the rendered objects, so they are for a
+    # kustomization that reads the rendered output. `helm template` is a
+    # local render. It contacts no cluster.
+    mkdir -p charts/web/templates deploy
+    printf 'apiVersion: v2\nname: web\nversion: 0.1.0\n' > charts/web/Chart.yaml
+    cat > charts/web/templates/deployment.yaml <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-web
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      containers:
+        - name: web
+          image: example.test/web:1
+EOF
+    helm template shop charts/web --namespace team > deploy/rendered.yaml 2>> "$ALL_OUTPUT"
+    run patch -f - --kustomize deploy/gvisor --dry-run=false -o json < deploy/rendered.yaml
+    expect_rc 0 "Helm: patch -f - --kustomize reads the output of helm template"
+    expect_jq '.spec.changes | map("\(.status) \(.patchFile) \(.origin.file)") | join(",")' \
+      "patched deploy/gvisor/deployment.apps_team_shop-web.yaml web/templates/deployment.yaml" \
+      "Helm: the patch names the rendered object, and the change names the template that made it"
+    printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - rendered.yaml\n' > deploy/kustomization.yaml
+    use_component deploy gvisor
+    expect_eq "$(rendered_with_class deploy)" "shop-web" "Helm: a kustomization that reads the rendered output and uses the component has the class"
+  else
+    printf '  %s %s\n' "$(_am_muted "-")" "skipped: helm is not installed (the component for the output of a chart)"
+  fi
+else
+  printf '  %s %s\n' "$(_am_muted "-")" "skipped: kubectl is not installed (the builds of the component)"
 fi
 
 popd > /dev/null

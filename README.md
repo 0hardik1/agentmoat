@@ -128,6 +128,19 @@ Review the diff in a pull request, let your pipeline deploy it, and use
 `git revert` as the rollback. See
 [`docs/ci-cd.md`](docs/ci-cd.md#3-the-move-through-the-repository).
 
+With Kustomize, an edit of a base changes each overlay that uses the base.
+To move one overlay first, `--kustomize <dir>` edits no source file. It
+writes the change into the directory as a Kustomize component (one patch
+file for each workload), and you add the directory to `components:` of the
+overlay:
+
+```bash
+./bin/agentmoat patch -f ./base --kustomize ./overlays/staging/gvisor --dry-run=false
+kustomize build ./overlays/staging | ./bin/agentmoat scan -f - --fail-on sandboxed
+```
+
+See [Kustomize](docs/ci-cd.md#kustomize) for the rule about the input.
+
 A pipeline that moves the workloads runs `verify` as the next command after
 `apply`, with a wait time, and rolls back when it fails:
 
@@ -209,6 +222,11 @@ way that a run can end.
   it lists what it does not edit (JSON, flow-style YAML, a pod spec behind
   a YAML anchor) with the reason. It reads no cluster and defaults to
   `--dry-run=true`, which prints the diff. A second run changes nothing.
+  With `--kustomize <dir>` it edits no source file: it writes one strategic
+  merge patch file for each selected workload, and a `kustomization.yaml` of
+  kind `Component` that lists them, so that one Kustomize overlay can move
+  before the others. A run only adds files and entries there, and it refuses
+  a directory that has files of a person.
 - **`apply`** is the only stage that mutates the cluster. It runs the
   preflight first and refuses to touch anything when the cluster cannot host
   the plan (exit `5`, every step `skipped`, `--skip-preflight` to override).
@@ -463,7 +481,7 @@ make kind-down
 | `agentmoat preflight`| Check that the RuntimeClass steers pods onto a Ready `runsc` node. RO. Exit 5 when not. |
 | `agentmoat probe nvproxy` | Read the nvproxy supported-driver list from `runsc` on a gVisor node via a one-shot pod. Default dry-run. |
 | `agentmoat plan`     | Produce a deterministic `MigrationPlan` from a scan. RO.      |
-| `agentmoat patch`    | Add `runtimeClassName` to manifest files (`-f`), for a move through a pull request. No cluster. Default dry-run (prints the diff). |
+| `agentmoat patch`    | Add `runtimeClassName` to manifest files (`-f`), for a move through a pull request. With `--kustomize <dir>`: write the change as a Kustomize component, and edit no source file. No cluster. Default dry-run (prints the diff). |
 | `agentmoat apply`    | Patch workloads per the plan. Default dry-run. Idempotent.    |
 | `agentmoat rollback` | Reverse a previously applied plan. Default dry-run.           |
 | `agentmoat verify`   | Confirm live pods match the plan's `runtimeClassName`. With `--wait`, wait for the rollout and for Ready pods. RO. |
@@ -492,7 +510,8 @@ make kind-down
 | `--runtime-class`          | plan/patch   | `gvisor`    | RuntimeClass name to patch onto migrated workloads, or to write into the files. |
 | `--add-toleration`         | `plan`       | `false`     | Also patch the `runtime=gvisor:NoSchedule` toleration into each pod template. Changes the plan hash. |
 | `--filename / -f`          | `scan`       | (cluster)   | Scan manifests and no cluster: a file, a directory, or `-` for stdin. Repeatable. |
-| `--filename / -f`          | `patch`      | required    | The manifests to edit: a file or a directory. Repeatable. Not stdin.    |
+| `--filename / -f`          | `patch`      | required    | The manifests to edit: a file or a directory. Repeatable. With `--kustomize`, also `-` for stdin. |
+| `--kustomize`              | `patch`      | (edit the files) | A directory. Write the change there as a Kustomize component (patch files and their list), and edit no source file. |
 | `--dry-run`                | `patch`      | `true`      | Show the diff and write no file.                                        |
 | `--fail-on`                | `scan`       | `incompatible` | When to exit 2: `incompatible`, `sandboxed` (only workloads that ask for the gVisor RuntimeClass), or `none`. |
 | `--runtime-class`          | scan/preflight | `gvisor`  | RuntimeClass to inspect for cluster facts / the preflight. For `scan`, also the class that `--fail-on sandboxed` looks for. |

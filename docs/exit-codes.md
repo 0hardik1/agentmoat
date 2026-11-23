@@ -56,18 +56,26 @@ Input with objects but no workloads (config only) is exit `0` with a note.
 ## Patch exit codes
 
 `agentmoat patch` adds `runtimeClassName` to manifest files. It reads no
-cluster, so its codes are about the files only.
+cluster, so its codes are about the files only. The codes are the same for
+the two forms: the edit of the source files, and `--kustomize <dir>`, which
+writes patch files into a Kustomize component and edits no source file.
 
 | Exit | When |
 | --- | --- |
 | `0` | Each selected workload is patched. Also when no workload was selected: nothing is compatible and without a RuntimeClass, which is the result of a second run. |
-| `3` | Some selected workloads are patched, and one or more are not: the workload is in a form that `patch` does not edit (JSON, flow-style YAML, a pod spec behind a YAML anchor), or its file could not be written. The files of the patched workloads are written. The report has the reason for each one that is not. |
-| `1` | No selected workload could be patched. Also each error before the edit: no `-f`, standard input, a manifest that does not parse, a Helm template, a class name that is not a valid name. No file is written. |
+| `3` | Some selected workloads are patched, and one or more are not: the workload is in a form that `patch` does not edit (JSON, flow-style YAML, a pod spec behind a YAML anchor), or its file could not be written. With `--kustomize`: the object is one that a Kustomize patch cannot name (`generateName` and no name, or an item of a typed list), a patch file with other content is there, or a file of the component could not be written. The files of the patched workloads are written. The report has the reason for each one that is not. |
+| `1` | No selected workload could be patched. Also each error before the edit: no `-f`, standard input without `--kustomize`, a manifest that does not parse, a Helm template, a class name that is not a valid name, and a `--kustomize` directory that has files of a person (other files, or a `kustomization.yaml` that agentmoat did not write). No file is written, with one exception for `--kustomize`: when the patch files were written and their list could not be written, the patch files stay. No build uses them, and the next run adds them to the list. |
 
 A dry-run (the default) writes no file and has the exit code that the run
 with `--dry-run=false` has for the same files, unless a write fails. So a
 pipeline can use the dry-run as the check, and a reader of the code knows
 before the write that some workloads need an edit by hand.
+
+Exit `0` with `--kustomize` says that the component has a patch for each
+selected workload. It does not say that a kustomization uses the component,
+or that its build passes: `patch` does not run Kustomize. A patch for an
+object that the kustomization does not read stops its build. See
+[Kustomize](ci-cd.md#kustomize).
 
 A workload that is excluded (incompatible, needs review, has a RuntimeClass)
 never changes the exit code. To make a pipeline fail on an incompatible

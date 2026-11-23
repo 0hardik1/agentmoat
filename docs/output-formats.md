@@ -80,6 +80,25 @@ reason for each, the patched workloads with the file and the line of the new
 line, the diff of all files in one `diff` block, and the excluded workloads
 (collapsed).
 
+With `--kustomize <dir>` no source file changes, so the headline is about
+the files of the component (the patch files and their list):
+
+| First line | Meaning | Exit code |
+| --- | --- | --- |
+| ➖ **Dry run.** | No file was changed. The line has the number of files that a run with `--dry-run=false` writes, and the directory. | 0 |
+| ✅ **N file(s) written in the Kustomize component `<dir>`.** | The component has a patch for each selected workload. No source file changed. | 0 |
+| ➖ **Nothing to change.** | No workload is compatible, without a RuntimeClass, and without its patch in the component. | 0 |
+| ⚠️ **K of N selected workload(s) did not get a patch.** (or, in a dry run, "cannot get a patch") | An object that a patch cannot name, a patch file with other content, or a file that could not be written. | 3 |
+| ❌ **None of the N selected workload(s) could get a patch.** | No file was changed. | 1 |
+| ❌ **None of the N selected workload(s) got a patch that a build uses.** | Files were written, but the list of the component could not be written. | 1 |
+
+The next paragraph of that report is **To use the component:** it names the
+directory to add to `components:`, and the rule for the input. `patch` does
+not run Kustomize, so no line of this report says that a build passes. In
+the JSON, `metadata.kustomizeDir` is the directory, each change has
+`patchFile`, and each entry of `spec.files` is a file of the component with
+`created` (the file is new) and its diff from `/dev/null`.
+
 The diff in the report is for a reader. It shows 400 lines at most, a line
 is cut at 240 characters, and control characters are replaced. To apply a
 diff with a tool, take it from the JSON output (`.spec.files[].diff`), which

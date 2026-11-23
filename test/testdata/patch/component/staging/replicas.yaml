@@ -1,0 +1,8 @@
+# A patch of the overlay itself. It stays, and the component does not
+# change what it does.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 3

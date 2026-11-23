@@ -40,7 +40,7 @@ byte-identical: same Go struct, same `json:` tags, same APIVersion
 | `probe_nvproxy`     | `agentmoat.Probe`             | YES      | Creates and deletes one pod on a gVisor node to read the `runsc` nvproxy driver list (a second pod when that `runsc` needs its sidecar binaries). Defaults to dry-run; `"dry_run": false` runs it. Returns a `PreflightReport` with `spec.facts.gpu.nvproxy`. |
 | `assess_workload`   | `agentmoat.AssessWorkload`    | no       | Returns a `WorkloadResult` for one named workload. Accepts `facts_path`. |
 | `propose_plan`      | `agentmoat.Plan`              | no       | Same scan in -> same `planHash`. Accepts `scan_report_path` to reuse a saved scan, `facts_path` for the facts, `add_toleration` for the pod toleration. |
-| `patch_manifests`   | `agentmoat.Patch`             | YES (files) | Adds `runtimeClassName` to the manifest files of the workloads that can run in gVisor (the `patch` command), so that the move goes through a pull request. Contacts no cluster. Defaults to dry-run and returns a `PatchResult` with the unified diff of each file; `"dry_run": false` writes the files. |
+| `patch_manifests`   | `agentmoat.Patch`             | YES (files) | Adds `runtimeClassName` to the manifest files of the workloads that can run in gVisor (the `patch` command), so that the move goes through a pull request. Contacts no cluster. Defaults to dry-run and returns a `PatchResult` with the unified diff of each file; `"dry_run": false` writes the files. With `kustomize_dir` it edits no source file and writes the change into that directory as a Kustomize component (the `--kustomize` form). |
 | `apply_plan`        | `agentmoat.Apply`             | YES      | Defaults to dry-run. Must set `"dry_run": false` explicitly to mutate. Runs the preflight first; `skip_preflight` bypasses it. |
 | `rollback_plan`     | `agentmoat.Rollback`          | YES      | Same dry-run gate as `apply_plan`.                                   |
 | `verify_migration`  | `agentmoat.Verify`            | no       | Set `in_pod_probe=true` to also exec a /proc-and-uname probe. Set `wait` (a duration such as `"2m"`) directly after `apply_plan`: the tool then looks again until every step is ok and its pods stay Ready, and the report has `metadata.wait`. The call does not return before that, so keep `wait` below the time limit that your client has for a tool call. |
@@ -75,6 +75,19 @@ behind a YAML anchor) with the reason; make those edits by hand. Then call
 `scan_cluster` with the same `manifest_paths` to check the result. The tool
 does not commit and does not open a pull request. See
 [`ci-cd.md`](ci-cd.md#3-the-move-through-the-repository).
+
+With Kustomize, when one overlay must move and not each overlay of the base,
+pass `kustomize_dir` (for example `overlays/staging/gvisor`). The tool then
+edits no source file. It writes one patch file for each selected workload
+and a `kustomization.yaml` of kind `Component` into that directory; each
+change has `patchFile`. Two things are left for the agent or the person: add
+the directory to `components:` in the kustomization that must move, and
+build that kustomization. `manifest_paths` must be what that kustomization
+reads from its `resources:` and nothing more, because a patch for an object
+that it does not read stops its build, and the tool does not run Kustomize.
+The CLI reads standard input in this form; the tool does not (its standard
+input is the protocol channel), so pass rendered output as a file. See
+[Kustomize](ci-cd.md#kustomize).
 
 **GPU workloads.** `gpu-passthrough` is refined from cluster facts (card,
 driver, MIG). The driver list lives only in the `runsc` binary, so the flow

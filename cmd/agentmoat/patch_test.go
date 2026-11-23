@@ -63,7 +63,7 @@ func TestPatchHelp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("patch --help: %v", err)
 	}
-	for _, want := range []string{"--filename", "--dry-run", "--include-review", "--runtime-class", "writes no file", "git revert"} {
+	for _, want := range []string{"--filename", "--dry-run", "--include-review", "--runtime-class", "--kustomize", "writes no file", "git revert", "components:"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("the help lacks %q", want)
 		}
@@ -151,6 +151,9 @@ func TestPatch_RefusesBadInput(t *testing.T) {
 	}{
 		{"no -f", []string{"patch"}, "-f <file or directory>"},
 		{"standard input", []string{"patch", "-f", "-"}, "standard input"},
+		{"standard input names the other form", []string{"patch", "-f", "-"}, "--kustomize <dir>"},
+		{"a component with no directory", []string{"patch", "-f", root, "--kustomize", ""}, "--kustomize needs a directory"},
+		{"a component in a directory of manifests", []string{"patch", "-f", root, "--kustomize", root, "--dry-run=false"}, "has files, and no kustomization.yaml that agentmoat wrote"},
 		{"two namespaces", []string{"patch", "-f", root, "-n", "a", "-n", "b"}, "one namespace"},
 		{"a class name that is not a name", []string{"patch", "-f", root, "--runtime-class", "Not A Name", "--dry-run=false"}, "not a valid RuntimeClass name"},
 		// A format that patch cannot render fails before a file is read:
@@ -205,4 +208,85 @@ func TestPatch_IncludeReviewAndRuntimeClass(t *testing.T) {
 	if with.Spec.Summary.Patched != 1 || with.Metadata.RuntimeClassName != "sandbox" || !with.Metadata.IncludeReview {
 		t.Errorf("with --include-review: result = %+v", with)
 	}
+}
+
+// TestPatch_KustomizeDryRunIsTheDefault: with --kustomize the default is a
+// dry-run too. It makes no directory, and the table says what to do with the
+// directory.
+func TestPatch_KustomizeDryRunIsTheDefault(t *testing.T) {
+	root := writeScanFiles(t, map[string]string{"web.yaml": plainWeb, "flow.yaml": flowPod})
+	dir := filepath.Join(t.TempDir(), "overlay", "gvisor")
+
+	dry := patchJSON(t, 0, "-f", root, "--kustomize", dir)
+	if !dry.Metadata.DryRun || dry.Metadata.KustomizeDir != dir || dry.Spec.Summary.Patched != 2 || len(dry.Spec.Files) != 3 {
+		t.Errorf("the dry-run: %+v, %+v", dry.Metadata, dry.Spec.Summary)
+	}
+
+	stdout, _, code, err := runScanCmd(nil, "patch", "-f", root, "--kustomize", dir, "--no-color")
+	if err != nil || code != 0 || !strings.Contains(stdout, "to use the component, add the directory") || !strings.Contains(stdout, "--- /dev/null") {
+		t.Errorf("the table: code %d, err %v\n%s", code, err, stdout)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the default (dry-run) made the directory: %v", err)
+	}
+}
+
+// TestPatch_Kustomize: with --kustomize and --dry-run=false the command
+// writes a Kustomize component and edits no source file. A second run
+// changes nothing.
+func TestPatch_Kustomize(t *testing.T) {
+	root := writeScanFiles(t, map[string]string{"web.yaml": plainWeb, "flow.yaml": flowPod})
+	dir := filepath.Join(t.TempDir(), "overlay", "gvisor")
+
+	res := patchJSON(t, 0, "-f", root, "--kustomize", dir, "--dry-run=false")
+	for _, f := range res.Spec.Files {
+		if !f.Written || !f.Created {
+			t.Errorf("the file %s = %+v", f.Path, f)
+		}
+	}
+	list := mustRead(t, filepath.Join(dir, "kustomization.yaml"))
+	if !strings.HasSuffix(list, "kind: Component\npatches:\n- path: deployment.apps_shop_web.yaml\n- path: pod_shop_flow.yaml\n") {
+		t.Errorf("the list:\n%s", list)
+	}
+	if got := mustRead(t, filepath.Join(dir, "pod_shop_flow.yaml")); !strings.HasSuffix(got, "spec:\n  runtimeClassName: gvisor\n") {
+		t.Errorf("the patch of the flow-style pod:\n%s", got)
+	}
+	// No source file changed: that is what the flag is for.
+	if mustRead(t, filepath.Join(root, "web.yaml")) != plainWeb || mustRead(t, filepath.Join(root, "flow.yaml")) != flowPod {
+		t.Errorf("a source file changed")
+	}
+
+	again := patchJSON(t, 0, "-f", root, "--kustomize", dir, "--dry-run=false")
+	if again.Spec.Summary.Selected != 0 || len(again.Spec.Files) != 0 {
+		t.Errorf("the second run: %+v", again.Spec.Summary)
+	}
+}
+
+// TestPatch_KustomizeFromStandardInput: with --kustomize no input is edited,
+// so the rendered output of a tool can be the input.
+func TestPatch_KustomizeFromStandardInput(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "gvisor")
+	stdout, stderr, code, err := runScanCmd(strings.NewReader(plainWeb), "patch", "-f", "-", "--kustomize", dir, "--dry-run=false", "-o", "json")
+	if err != nil || code != 0 {
+		t.Fatalf("code %d, err %v\n%s", code, err, stderr)
+	}
+	if !strings.Contains(stdout, `"patchFile": "`+filepath.Join(dir, "deployment.apps_shop_web.yaml")+`"`) {
+		t.Errorf("stdout:\n%s", stdout)
+	}
+	if got := mustRead(t, filepath.Join(dir, "deployment.apps_shop_web.yaml")); !strings.Contains(got, "  name: web\n  namespace: shop\n") {
+		t.Errorf("the patch file:\n%s", got)
+	}
+}
+
+// TestPatch_KustomizeExitCodes: the exit codes are the ones of the edit in
+// place. An object that Kustomize cannot name makes the run partial.
+func TestPatch_KustomizeExitCodes(t *testing.T) {
+	const job = "apiVersion: batch/v1\nkind: Job\nmetadata: {generateName: run-, namespace: shop}\nspec:\n  template:\n    spec:\n      restartPolicy: Never\n      containers:\n        - {name: c, image: example.test/c:1}\n"
+	partial := writeScanFiles(t, map[string]string{"web.yaml": plainWeb, "job.yaml": job})
+	res := patchJSON(t, 3, "-f", partial, "--kustomize", filepath.Join(t.TempDir(), "g"))
+	if res.Spec.Summary.Patched != 1 || res.Spec.Summary.NotEdited != 1 {
+		t.Errorf("summary = %+v", res.Spec.Summary)
+	}
+	none := writeScanFiles(t, map[string]string{"job.yaml": job})
+	patchJSON(t, 1, "-f", none, "--kustomize", filepath.Join(t.TempDir(), "g"))
 }

@@ -1,0 +1,238 @@
+# ---------------------------------------------------------------------------
+# agentmoat: write the move to gVisor into the repository, as a pull request
+# (GitHub Actions)
+# ---------------------------------------------------------------------------
+#
+# Copy this file to .github/workflows/agentmoat-patch.yml, and read section 3
+# of docs/ci-cd.md before the first run.
+#
+# Use this file when the repository is the source of truth for the cluster
+# (plain manifests, Kustomize, Argo CD, Flux). When a pipeline job deploys to
+# the cluster and the manifests are not the source, use github-migration.yml.
+#
+# What it does, when a person starts it:
+#
+#   1. Runs `agentmoat patch` on the manifests of the branch. For each
+#      workload that can run in the sandbox and has no RuntimeClass, the
+#      command adds one line, `runtimeClassName: gvisor`, to the pod spec.
+#      It reads no cluster, and it needs no secret of yours.
+#   2. Writes the report, with the diff, to the job summary.
+#   3. When a file changed: commits the change to a new branch and opens a
+#      pull request.
+#
+# A person reviews and merges the pull request. Your deploy pipeline or your
+# deploy tool deploys it. The rollback is `git revert`.
+#
+# With the input `kustomize_dir` (Kustomize, when one overlay must move
+# first), step 1 edits no source file. It writes the change into that
+# directory as a Kustomize component: one patch file for each workload, and
+# the list of the files. The pull request then has only the new directory,
+# and NO KUSTOMIZATION USES IT YET. A merge of that pull request moves
+# nothing. A person must add the directory to `components:` of the overlay,
+# as a commit in the same pull request. The workflow does not do that: it
+# does not know which kustomization you want to move. The text of the pull
+# request says so.
+#
+# What you must set up:
+#
+#   1. The repository setting "Allow GitHub Actions to create and approve
+#      pull requests" (Settings > Actions > General > Workflow permissions).
+#      Without it, the last step cannot open the pull request. In a new
+#      repository of a personal account the setting is off. A repository of
+#      an organization gets the setting of the organization.
+#   2. The pull request check (github-pr-check.yml) as a REQUIRED status
+#      check of the branch that the pull request goes to. Read the next
+#      paragraph for the reason.
+#
+# The check on the pull request of this workflow:
+#
+#   The last step opens the pull request with the GITHUB_TOKEN of the run.
+#   For such a pull request GitHub makes the `pull_request` runs, and holds
+#   them until a person approves them. Before that approval the check did
+#   not run, and a check that did not run is not a pass. When the check is
+#   not a required status check, the pull request can be merged before the
+#   check ran.
+#
+#   To let the check start with no approval, give the last step a token of a
+#   GitHub App installation, or a personal access token, in place of
+#   `github.token` (the GH_TOKEN variable, and the token of the checkout
+#   step for the push).
+#
+# The `permissions:` block gives the GITHUB_TOKEN of the run two write
+# scopes: `contents` for the push of the branch, and `pull-requests` for the
+# pull request. No other job of your repository gets them from this file.
+#
+# This project did not run this file: its CI has no repository to open a
+# pull request in. The `agentmoat patch` command is the one that
+# `make offline-smoke` runs on fixtures. The git and gh commands, the
+# `permissions:` keys, and the repository setting are from the GitHub
+# documentation and were not run here. Run the workflow one time on a test
+# repository before you use it.
+# ---------------------------------------------------------------------------
+
+name: agentmoat patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: The directory (or file) with the manifests to read
+        required: true
+        default: k8s
+        type: string
+      kustomize_dir:
+        description: >-
+          Optional. A directory for a Kustomize component, for example
+          overlays/staging/gvisor. With it, no source file changes: the patch
+          files go into this directory, and a person then adds the directory
+          to `components:` of the overlay.
+        required: false
+        default: ""
+        type: string
+      include_review:
+        description: Also patch the workloads that need review
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One run at a time: two runs would open two pull requests with the same
+# change.
+concurrency:
+  group: agentmoat-patch
+  cancel-in-progress: false
+
+env:
+  # The release to use. Change this line to update. `patch` is in the
+  # releases from v0.4.0.
+  AGENTMOAT_VERSION: v0.4.0
+
+jobs:
+  patch:
+    name: Patch the manifests
+    runs-on: ubuntu-latest
+    env:
+      # The inputs go through the environment. An expression in the text of
+      # a `run:` line would be pasted into the shell code.
+      MANIFEST_PATH: ${{ inputs.path }}
+      KUSTOMIZE_DIR: ${{ inputs.kustomize_dir }}
+      INCLUDE_REVIEW: ${{ inputs.include_review }}
+      PATCH_BRANCH: agentmoat/patch-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The archive is checked against the checksums file of the release.
+      # `--ignore-missing` skips the lines for the other archives;
+      # sha256sum still fails when it checked no file at all. The download
+      # goes to the temporary directory of the runner, not to the checkout:
+      # a file in the checkout could get into the commit.
+      - name: Install agentmoat
+        working-directory: ${{ runner.temp }}
+        run: |
+          base="https://github.com/0hardik1/agentmoat/releases/download/${AGENTMOAT_VERSION}"
+          curl -fsSLO "$base/agentmoat_linux_amd64.tar.gz"
+          curl -fsSLO "$base/checksums.txt"
+          sha256sum --check --ignore-missing checksums.txt
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf agentmoat_linux_amd64.tar.gz -C "$RUNNER_TEMP/bin" agentmoat
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # The report is Markdown, and it goes to the job summary for each
+      # result. It does not go to the step log: the report has lines of your
+      # manifest files (the diff), and the runner reads a line of the log
+      # that starts with "::" as a command. The progress lines of the
+      # command (stderr) are printed in a block in which the runner runs no
+      # command. The line that closes the block is printed for each result
+      # of the line before it: a block that stays open would turn commands
+      # off for the later steps.
+      #
+      # Exit codes of `patch` (docs/exit-codes.md):
+      #   0  each selected workload is patched, or there was nothing to do
+      #   3  some are patched; the report lists what a person must do by hand
+      #   1  an error, or no selected workload could be patched: stop
+      - name: Patch
+        run: |
+          args=(patch --filename "$MANIFEST_PATH" --dry-run=false --output markdown)
+          if [ -n "$KUSTOMIZE_DIR" ]; then args+=(--kustomize "$KUSTOMIZE_DIR"); fi
+          if [ "$INCLUDE_REVIEW" = "true" ]; then args+=(--include-review); fi
+
+          rc=0
+          agentmoat "${args[@]}" > "$RUNNER_TEMP/patch.md" 2> "$RUNNER_TEMP/patch.log" || rc=$?
+          cat "$RUNNER_TEMP/patch.md" >> "$GITHUB_STEP_SUMMARY"
+
+          token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "::stop-commands::$token"
+          cat "$RUNNER_TEMP/patch.log" || true
+          echo "::$token::"
+
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+            echo "agentmoat patch failed with exit code $rc. No pull request." >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
+
+      # `git status --porcelain` lists each changed file and each new file.
+      # No output means that the command changed nothing: the workloads
+      # have the class already, or no workload can move.
+      #
+      # The text of the pull request is short and fixed. The report stays in
+      # the job summary of this run: it can be long, and it has text from
+      # the manifests.
+      #
+      # The two forms have different texts, because they are different
+      # changes. The edit of the source files moves the workloads when the
+      # pull request is merged. A Kustomize component moves nothing until a
+      # kustomization uses it, and before that commit the pull request check
+      # has nothing of this change to look at: a pass then is not a result.
+      #
+      # The pull request goes to the branch that the run started on (the
+      # branch that you select when you start the workflow).
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No file changed, so there is no pull request." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ -n "$KUSTOMIZE_DIR" ]; then
+            title="Add a Kustomize component for the gVisor sandbox"
+            {
+              echo "This pull request adds a Kustomize component: one patch file for each workload that agentmoat found compatible, and the list of the files. No source file changes."
+              echo
+              echo "**This change moves nothing until a kustomization uses the component.**"
+              echo
+              echo "- To do: add the new directory to \`components:\` in the kustomization of the overlay that must move, as a commit in this pull request."
+              echo "- After that commit, wait for the agentmoat check. The check says something about this change only when it renders that overlay (the \`kustomize\` input of the action). Before that commit, a check that passes checked nothing of this change."
+              echo "- If the check waits for an approval, approve the run: a check that did not run is not a pass."
+              echo "- Made by \`agentmoat patch --kustomize\`. The report, with the reason for each workload that was left out, is in the job summary of the run: $RUN_URL"
+              echo "- The rollback is \`git revert\` of the merge. You can also remove the directory from \`components:\`."
+            } > "$RUNNER_TEMP/body.md"
+          else
+            title="Run workloads in the gVisor sandbox"
+            {
+              echo "This pull request puts workloads in the gVisor sandbox: it adds \`runtimeClassName\` for each workload that agentmoat found compatible."
+              echo
+              echo "- Made by \`agentmoat patch\`. The report, with the reason for each workload that was left out, is in the job summary of the run: $RUN_URL"
+              echo "- Read the diff. It must have added lines only."
+              echo "- Wait for the agentmoat check of this pull request. If the check waits for an approval, approve the run: a check that did not run is not a pass."
+              echo "- The rollback is \`git revert\` of the merge."
+            } > "$RUNNER_TEMP/body.md"
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --create "$PATCH_BRANCH"
+          git add --all
+          git commit --message "chore: $title (agentmoat patch)"
+          git push origin "$PATCH_BRANCH"
+
+          gh pr create \
+            --base "$GITHUB_REF_NAME" \
+            --head "$PATCH_BRANCH" \
+            --title "$title" \
+            --body-file "$RUNNER_TEMP/body.md"

@@ -1,0 +1,18 @@
+# A workload that no kustomization of this tree reads. A patch for it in a
+# component stops the build of the kustomization that uses the component.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stray
+spec:
+  selector:
+    matchLabels:
+      app: stray
+  template:
+    metadata:
+      labels:
+        app: stray
+    spec:
+      containers:
+        - name: stray
+          image: example.test/stray:1

@@ -128,3 +128,87 @@ func diffNames(path string) (oldName, newName string) {
 	clean := filepath.ToSlash(filepath.Clean(path))
 	return "a/" + clean, "b/" + clean
 }
+
+// FileDiff returns the unified diff from oldText to newText for a file that
+// the Kustomize form writes (kustomize.go). Such a file is new, or is a
+// generated file with a small change, so a simple method is sufficient: the
+// lines that the two texts share at the start and at the end are context,
+// and everything between them is one hunk. The diff is correct for any two
+// texts; for texts with more than one change it is not the shortest one.
+//
+// exists says if the file is on disk now. When it is not, the diff makes a
+// new file, in the form of git (`--- /dev/null`). It returns "" when the
+// file is there and has the new text already.
+func FileDiff(path string, oldText, newText []byte, exists bool) string {
+	if exists && bytes.Equal(oldText, newText) {
+		return ""
+	}
+	oldName, newName := diffNames(path)
+	var oldLines [][]byte
+	if exists {
+		oldLines = splitLines(oldText)
+	} else {
+		oldName = "/dev/null"
+	}
+	newLines := splitLines(newText)
+
+	// The shared lines at the start, and at the end of what is left.
+	prefix := 0
+	for prefix < len(oldLines) && prefix < len(newLines) && bytes.Equal(oldLines[prefix], newLines[prefix]) {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(oldLines)-prefix && suffix < len(newLines)-prefix &&
+		bytes.Equal(oldLines[len(oldLines)-1-suffix], newLines[len(newLines)-1-suffix]) {
+		suffix++
+	}
+	before, after := min(prefix, contextLines), min(suffix, contextLines)
+	removed := oldLines[prefix : len(oldLines)-suffix]
+	added := newLines[prefix : len(newLines)-suffix]
+
+	// A range with no lines has the number of the line before it as its
+	// start (0 for a new file): the rule of the unified format.
+	oldCount, newCount := before+len(removed)+after, before+len(added)+after
+	oldStart, newStart := prefix-before+1, prefix-before+1
+	if oldCount == 0 {
+		oldStart--
+	}
+	if newCount == 0 {
+		newStart--
+	}
+
+	var out strings.Builder
+	fmt.Fprintf(&out, "--- %s\n+++ %s\n@@ -%d,%d +%d,%d @@\n", oldName, newName, oldStart, oldCount, newStart, newCount)
+	write := func(marker byte, lines [][]byte) {
+		for _, line := range lines {
+			out.WriteByte(marker)
+			out.Write(line)
+			if !bytes.HasSuffix(line, []byte("\n")) {
+				out.WriteString("\n" + noNewline)
+			}
+		}
+	}
+	write(' ', newLines[prefix-before:prefix])
+	write('-', removed)
+	write('+', added)
+	write(' ', newLines[len(newLines)-suffix:len(newLines)-suffix+after])
+	return out.String()
+}
+
+// DiffStat counts the lines that a unified diff of one file adds and
+// removes. The two header lines (`--- ` and `+++ `) are not counted.
+func DiffStat(diff string) (added, removed int) {
+	lines := strings.Split(diff, "\n")
+	if len(lines) < 2 {
+		return 0, 0
+	}
+	for _, line := range lines[2:] {
+		switch {
+		case strings.HasPrefix(line, "+"):
+			added++
+		case strings.HasPrefix(line, "-"):
+			removed++
+		}
+	}
+	return added, removed
+}
