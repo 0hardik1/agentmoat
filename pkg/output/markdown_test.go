@@ -1155,6 +1155,40 @@ func TestPreflightMarkdown_GPUFacts(t *testing.T) {
 	}
 }
 
+// TestPreflightMarkdown_SandboxFacts: the sandbox co-location facts are in
+// the Markdown form too, and absent until some pod runs sandboxed.
+func TestPreflightMarkdown_SandboxFacts(t *testing.T) {
+	t.Parallel()
+	report := schema.NewPreflightReport()
+	report.Metadata.RuntimeClassName = "gvisor"
+	report.Spec.Summary = schema.PreflightSummary{Ready: true}
+	report.Spec.Facts.Sandbox = &schema.SandboxFacts{Checked: true, Nodes: []schema.SandboxNode{
+		{Name: "gv-1", RuntimeClasses: []string{"gvisor"}, SandboxedPods: 3, RuncDaemonSetPods: 4},
+		{Name: "ns-1", RuntimeClasses: []string{"confidential-sandbox", "isolated-sandbox"}, SandboxedPods: 2,
+			SandboxedPodsWithAWSCredentials: []string{"agents/a"}, RuncWorkloadPods: []string{"web/frontend"}, RuncDaemonSetPods: 2},
+	}}
+
+	out := renderMarkdown(t, report, nil)
+	for _, want := range []string{
+		"- Sandbox nodes: 2 run sandboxed pods, 1 of them also run runc workload pods.",
+		"  - `gv-1` (`gvisor`): 3 sandboxed (0 with AWS credentials), 0 runc workload pod(s), 4 runc DaemonSet pod(s)",
+		"  - `ns-1` (`confidential-sandbox`, `isolated-sandbox`): 2 sandboxed (1 with AWS credentials), 1 runc workload pod(s), 2 runc DaemonSet pod(s)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the output lacks %q:\n%s", want, out)
+		}
+	}
+
+	report.Spec.Facts.Sandbox = &schema.SandboxFacts{Checked: false, Reason: "forbidden"}
+	if out := renderMarkdown(t, report, nil); !strings.Contains(out, "- Sandbox nodes: not checked (`forbidden`).") {
+		t.Errorf("unchecked facts must say so:\n%s", out)
+	}
+	report.Spec.Facts.Sandbox = nil
+	if out := renderMarkdown(t, report, nil); strings.Contains(out, "Sandbox nodes") {
+		t.Errorf("no sandboxed pods must mean no sandbox line:\n%s", out)
+	}
+}
+
 // TestPipelineMarkdown_HostileText: the same rule for the other documents.
 // An error string from an API server, a warning, and a finding are text
 // that this tool did not write.

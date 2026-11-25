@@ -76,6 +76,23 @@ const (
 	// probed runsc.
 	FindingGPUNvproxyReady = "gpu-nvproxy-ready"
 
+	// Sandbox co-location findings (sandbox.go). None of them blocks.
+
+	// FindingSandboxNodeRuncColocation (warn): nodes that run sandboxed
+	// pods (the target RuntimeClass or an EKS Nitro Sandbox class) also
+	// run runc workload pods, so one runc escape reaches the sandboxed
+	// pods' credentials.
+	FindingSandboxNodeRuncColocation = "sandbox-node-runc-colocation"
+
+	// FindingSandboxPodAWSCredentials (info): sandboxed pods carry EKS Pod
+	// Identity or IRSA credentials, which the node can obtain; review the
+	// roles for least privilege.
+	FindingSandboxPodAWSCredentials = "sandbox-pod-aws-credentials" //nolint:gosec // G101: a finding ID, not a credential
+
+	// FindingSandboxColocationUnchecked (info): the pods on the candidate
+	// nodes could not be listed.
+	FindingSandboxColocationUnchecked = "sandbox-colocation-unchecked"
+
 	// Probe findings, produced by pkg/probe around the Evaluate output.
 
 	// FindingNvproxyProbeDryRun (info): the probe pod was described, not
@@ -103,6 +120,7 @@ func Evaluate(facts *schema.ClusterFacts) []schema.PreflightFinding {
 	out = append(out, taintFindings(facts)...)
 	out = append(out, platformFindings(facts)...)
 	out = append(out, gpuFindings(facts)...)
+	out = append(out, sandboxFindings(facts)...)
 	SortFindings(out)
 	return out
 }

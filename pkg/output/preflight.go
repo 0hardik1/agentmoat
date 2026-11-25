@@ -119,7 +119,40 @@ func renderClusterFacts(s *Styles, facts schema.ClusterFacts, w io.Writer) error
 			return err
 		}
 	}
-	return renderGPUFacts(s, facts.GPU, w)
+	if err := renderGPUFacts(s, facts.GPU, w); err != nil {
+		return err
+	}
+	return renderSandboxFacts(s, facts.Sandbox, w)
+}
+
+// renderSandboxFacts prints the co-location line and one muted line per
+// node that runs sandboxed pods. Silent until some pod runs sandboxed.
+func renderSandboxFacts(s *Styles, sb *schema.SandboxFacts, w io.Writer) error {
+	if sb == nil {
+		return nil
+	}
+	if !sb.Checked {
+		_, err := fmt.Fprintln(w, "  Sandbox nodes: not checked ("+sb.Reason+")")
+		return err
+	}
+	shared := 0
+	for _, n := range sb.Nodes {
+		if len(n.RuncWorkloadPods) > 0 {
+			shared++
+		}
+	}
+	if _, err := fmt.Fprintf(w, "  Sandbox nodes: %d  shared-with-runc-workloads=%d\n", len(sb.Nodes), shared); err != nil {
+		return err
+	}
+	for _, n := range sb.Nodes {
+		line := fmt.Sprintf("%s  classes=%s  sandboxed=%d (aws-credentials %d)  runc-workloads=%d  runc-daemonsets=%d",
+			n.Name, strings.Join(n.RuntimeClasses, ","), n.SandboxedPods, len(n.SandboxedPodsWithAWSCredentials),
+			len(n.RuncWorkloadPods), n.RuncDaemonSetPods)
+		if _, err := fmt.Fprintln(w, "    "+s.Muted.Render(line)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // renderGPUFacts prints the GPU line and one muted line per (card, driver,

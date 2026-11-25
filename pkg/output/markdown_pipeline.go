@@ -414,7 +414,47 @@ func writePreflightReportMarkdown(d *mdDoc, report *schema.PreflightReport) {
 	d.linef("- Nodes: %d total, %d Ready, %d match the nodeSelector, %d match and are Ready.",
 		n.Total, n.Ready, n.MatchingSelector, n.MatchingAndReady)
 	writeGPUFactsMarkdown(d, facts.GPU)
+	writeSandboxFactsMarkdown(d, facts.Sandbox)
 	d.blank()
+}
+
+// writeSandboxFactsMarkdown writes the sandbox co-location facts: one line
+// with the counts, then one line for each node that runs sandboxed pods. It
+// writes nothing until some pod runs sandboxed. Node names, RuntimeClass
+// names and the reason are text from the cluster, so they go in code spans.
+func writeSandboxFactsMarkdown(d *mdDoc, sb *schema.SandboxFacts) {
+	if sb == nil {
+		return
+	}
+	if !sb.Checked {
+		d.linef("- Sandbox nodes: not checked (%s).", mdCode(sb.Reason))
+		return
+	}
+	shared := 0
+	for _, n := range sb.Nodes {
+		if len(n.RuncWorkloadPods) > 0 {
+			shared++
+		}
+	}
+	d.linef("- Sandbox nodes: %d run sandboxed pods, %d of them also run runc workload pods.", len(sb.Nodes), shared)
+	nodes := sb.Nodes
+	leftOut := 0
+	if len(nodes) > mdMaxRows {
+		leftOut = len(nodes) - mdMaxRows
+		nodes = nodes[:mdMaxRows]
+	}
+	for _, n := range nodes {
+		classes := make([]string, 0, len(n.RuntimeClasses))
+		for _, rc := range n.RuntimeClasses {
+			classes = append(classes, mdCode(rc))
+		}
+		d.linef("  - %s (%s): %d sandboxed (%d with AWS credentials), %d runc workload pod(s), %d runc DaemonSet pod(s)",
+			mdCode(n.Name), strings.Join(classes, ", "), n.SandboxedPods, len(n.SandboxedPodsWithAWSCredentials),
+			len(n.RuncWorkloadPods), n.RuncDaemonSetPods)
+	}
+	if leftOut > 0 {
+		d.linef("  - _%d more not shown. The JSON output has all of them._", leftOut)
+	}
 }
 
 // writeGPUFactsMarkdown writes the GPU facts: the node counts, the result of

@@ -61,6 +61,14 @@ Out-of-bounds write via `PACKET_RX_RING`. Sentry does not implement
   applies. Report at https://gvisor.dev/.
 - **Side channels and timing attacks.** Sentry shares the host CPU; cache
   side-channel attacks against other tenants are not mitigated.
+- **A compromised node.** gVisor protects the host from the pod, not the
+  pod from the host. Root on the node can read a sandboxed pod's projected
+  service account token and exchange it for the pod's IAM role, exactly as
+  on a `runc` node. The usual way to get node root is a container escape
+  from a plain `runc` pod on the same node, so keep `runc` workloads off
+  gVisor nodes; `agentmoat preflight` flags them as
+  `sandbox-node-runc-colocation`. The same holds for EKS Nitro Sandboxes:
+  see [gVisor and EKS Nitro Sandboxes](gvisor-vs-nitro-sandboxes.md).
 
 ## How agentmoat helps
 
@@ -88,3 +96,5 @@ Out-of-bounds write via `PACKET_RX_RING`. Sentry does not implement
   the syscall-surface reduction possible.
 - [Compatibility checklist](compatibility-checklist.md): the workloads
   whose threat-mitigation gains agentmoat declines to capture (and why).
+- [gVisor and EKS Nitro Sandboxes](gvisor-vs-nitro-sandboxes.md): what
+  each isolates, who can reach a pod's credentials, and when to prefer which.

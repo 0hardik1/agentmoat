@@ -83,6 +83,21 @@ const (
 	NvidiaMIGResourcePrefix = "nvidia.com/mig-"
 )
 
+// Sandbox runtimes the co-location check recognizes besides the target
+// RuntimeClass. Amazon EKS Nitro Sandboxes run a pod in its own Firecracker
+// microVM when it names one of these RuntimeClasses; nodes built from the
+// EKS AL2023 pod-isolation AMI carry NitroSandboxNodeLabel, and every pod
+// that names no sandbox RuntimeClass keeps running under runc on the same
+// node. Sources: the EKS user guide, "Nitro Sandboxes" pages, and
+// awslabs/amazon-eks-ami templates/al2023/runtime/pod-isolation.
+const (
+	NitroSandboxNodeLabel      = "eks.amazonaws.com/nitro-sandbox"
+	NitroSandboxNodeLabelValue = "true"
+
+	NitroIsolatedSandboxRuntimeClass     = "isolated-sandbox"
+	NitroConfidentialSandboxRuntimeClass = "confidential-sandbox"
+)
+
 // SupportStatus is the three-way answer to "does gVisor nvproxy support
 // this?". Unknown means the facts needed to decide were not available
 // (no GFD label, or the driver list has not been probed yet).
@@ -223,6 +238,56 @@ type ClusterFacts struct {
 	// classifier reads this to gate features that need a minimum runsc
 	// release, such as systemd-init.
 	Runsc *RunscFacts `json:"runsc,omitempty" yaml:"runsc,omitempty"`
+
+	// Sandbox describes nodes where sandboxed pods (the target
+	// RuntimeClass, or an EKS Nitro Sandbox RuntimeClass) run next to
+	// runc pods. A runc container escape gives node root, and node root
+	// can reach the credentials of every pod on the node whatever its
+	// runtime, so co-location undoes much of what the sandbox buys. Nil
+	// when no sandboxed pod runs anywhere, so clusters that have not
+	// migrated yet render exactly as before.
+	Sandbox *SandboxFacts `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+}
+
+// SandboxFacts is the co-location inventory.
+type SandboxFacts struct {
+	// Checked is false when the pods on the candidate nodes could not be
+	// listed (RBAC); Reason then says why and Nodes is empty.
+	Checked bool   `json:"checked"          yaml:"checked"`
+	Reason  string `json:"reason,omitempty" yaml:"reason,omitempty"`
+
+	// Nodes lists every node that runs at least one sandboxed pod, sorted
+	// by name.
+	Nodes []SandboxNode `json:"nodes,omitempty" yaml:"nodes,omitempty"`
+}
+
+// SandboxNode is one node that hosts sandboxed pods, and what shares it.
+// Only pods that are not finished (phase other than Succeeded or Failed)
+// are counted.
+type SandboxNode struct {
+	Name string `json:"name" yaml:"name"`
+
+	// RuntimeClasses lists the sandbox RuntimeClasses its pods use, sorted
+	// ("gvisor", "isolated-sandbox", "confidential-sandbox").
+	RuntimeClasses []string `json:"runtimeClasses" yaml:"runtimeClasses"`
+
+	// SandboxedPods counts pods that name a sandbox RuntimeClass.
+	SandboxedPods int `json:"sandboxedPods" yaml:"sandboxedPods"`
+
+	// SandboxedPodsWithAWSCredentials lists, as namespace/name and sorted,
+	// the sandboxed pods that EKS Pod Identity or IRSA gives AWS
+	// credentials. Their roles are reachable from the node.
+	SandboxedPodsWithAWSCredentials []string `json:"sandboxedPodsWithAWSCredentials,omitempty" yaml:"sandboxedPodsWithAWSCredentials,omitempty"`
+
+	// RuncWorkloadPods lists, as namespace/name and sorted, the pods
+	// under runc (no sandbox RuntimeClass) that a DaemonSet does not own.
+	// These are the ones a dedicated, tainted node pool keeps away.
+	RuncWorkloadPods []string `json:"runcWorkloadPods,omitempty" yaml:"runcWorkloadPods,omitempty"`
+
+	// RuncDaemonSetPods counts runc pods a DaemonSet owns (CNI,
+	// kube-proxy, the Pod Identity agent, log shippers). Most clusters
+	// cannot avoid them, so they are reported but not flagged.
+	RuncDaemonSetPods int `json:"runcDaemonSetPods" yaml:"runcDaemonSetPods"`
 }
 
 // RunscFacts is what the probe pod read about the runsc binary itself,

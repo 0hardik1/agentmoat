@@ -33,16 +33,18 @@ RuntimeClass and the nodes make the merge land somewhere real. The shipped
 
 ## What it reads
 
-Two cluster-scoped, read-only calls:
+Two cluster-scoped, read-only calls, plus one pod list per sandbox node:
 
 | Read | Used for |
 | --- | --- |
 | `get runtimeclasses/<name>` (`node.k8s.io`) | handler, `scheduling.nodeSelector`, `scheduling.tolerations`, `overhead.podFixed` |
-| `list nodes` | Ready condition, labels (selector match, EKS Auto Mode, Karpenter), taints, `nodeInfo.osImage` (Bottlerocket), GPU Feature Discovery labels and `nvidia.com/*` capacity (GPU facts) |
+| `list nodes` | Ready condition, labels (selector match, EKS Auto Mode, Karpenter, EKS Nitro Sandbox), taints, `nodeInfo.osImage` (Bottlerocket), GPU Feature Discovery labels and `nvidia.com/*` capacity (GPU facts) |
+| `list pods` with `fieldSelector=spec.nodeName=<node>`, all namespaces | Only for nodes that match the RuntimeClass nodeSelector or carry `eks.amazonaws.com/nitro-sandbox=true`: which pods run sandboxed, which run under `runc`, and which sandboxed pods carry AWS credentials (sandbox facts) |
 
-Both are in [`deploy/clusterrole-readonly.yaml`](../deploy/clusterrole-readonly.yaml)
+All three are in [`deploy/clusterrole-readonly.yaml`](../deploy/clusterrole-readonly.yaml)
 and [`deploy/clusterrole-apply.yaml`](../deploy/clusterrole-apply.yaml).
-Nothing is written.
+Nothing is written. A denied or failed pod list never fails the preflight:
+it becomes the `sandbox-colocation-unchecked` info finding.
 
 ## Findings
 
@@ -65,12 +67,19 @@ carries them under `spec.findings[].id`. Only `error` findings block.
 | `gpu-driver-unsupported` | warn | The probed `runsc` does not list the host driver on nodes whose card is supported. | Install a listed driver version, or move to a `runsc` release that lists yours. |
 | `gpu-driver-unconfirmed` | info | Supported card, but the driver has not been checked against `runsc`. | Run `agentmoat probe nvproxy --dry-run=false`. |
 | `gpu-nvproxy-ready` | info | Card and driver both supported by the probed `runsc`. | None. |
+| `sandbox-node-runc-colocation` | warn | Nodes that run sandboxed pods (the target RuntimeClass, or the EKS Nitro Sandbox classes `isolated-sandbox` and `confidential-sandbox`) also run `runc` pods that no DaemonSet owns. A container escape from one of them is node root, and node root can reach the credentials of every pod on the node. | Taint the sandbox nodes and tolerate the taint only from sandboxed pods (the shipped RuntimeClass already tolerates `runtime=gvisor:NoSchedule`), then move the listed pods off. See [`gvisor-vs-nitro-sandboxes.md`](gvisor-vs-nitro-sandboxes.md). |
+| `sandbox-pod-aws-credentials` | info | Sandboxed pods get AWS credentials from EKS Pod Identity or IRSA (detected from the environment the EKS webhooks inject). The sandbox does not hide them from the node. agentmoat does not read IAM, so role breadth is not checked. | One least-privilege role per sandboxed workload; restrict who can create pods that name a sandbox RuntimeClass. |
+| `sandbox-colocation-unchecked` | info | The pods on the sandbox nodes could not be listed. | Grant `list` on `pods`. |
 | `nvproxy-probe-dry-run` | info | `probe nvproxy` described its pod and created nothing. | Re-run with `--dry-run=false`. |
 | `nvproxy-probe-skipped` | warn | The preflight has an error finding, so there was no node to run the probe pod on. | Fix the error findings first. |
 | `nvproxy-probe-failed` | warn | The probe pod did not complete or its output did not parse. | The message names the cause (image pull, timeout, `runsc` path). |
 
-GPU and probe findings never block. They refine the `gpu-passthrough`
-verdict and appear as plan warnings; see [`gpu-nvproxy.md`](gpu-nvproxy.md).
+GPU, probe and sandbox findings never block. The sandbox facts (under
+`spec.facts.sandbox`) and findings appear only once some pod runs sandboxed,
+so a cluster that has not migrated yet reports exactly what it did before.
+GPU findings also refine the `gpu-passthrough` verdict (see
+[`gpu-nvproxy.md`](gpu-nvproxy.md)), and warn findings of every kind appear
+as plan warnings.
 
 "Candidate nodes" are the nodes matching the RuntimeClass nodeSelector when
 there are any, else every node in the cluster (so a RuntimeClass-less Auto

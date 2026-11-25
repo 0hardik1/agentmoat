@@ -22,6 +22,8 @@ import (
 )
 
 // Collect reads the RuntimeClass and the node list and returns the facts.
+// When nodes can host sandboxed pods it also lists the pods on those nodes
+// (sandbox.go); a failure there is recorded in the facts, never returned.
 //
 // A missing RuntimeClass is a fact (Found=false), not an error: the
 // preflight's job is to report it. Any other API error is returned wrapped
@@ -61,6 +63,7 @@ func Collect(ctx context.Context, client kubernetes.Interface, runtimeClassName 
 	fillNodeFacts(facts, nodes.Items, tolerations)
 	facts.GPU = collectGPU(nodes.Items, selectorOf(facts))
 	RefreshGPUSupport(facts)
+	collectSandbox(ctx, client, facts, nodes.Items)
 	return facts, nil
 }
 

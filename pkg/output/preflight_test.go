@@ -263,6 +263,36 @@ func TestRenderPreflightReportTable_GPUAndProbe(t *testing.T) {
 	}
 }
 
+func TestRenderPreflightReportTable_SandboxFacts(t *testing.T) {
+	t.Parallel()
+	r := samplePreflightReport()
+	r.Spec.Facts.Sandbox = &schema.SandboxFacts{Checked: true, Nodes: []schema.SandboxNode{
+		{Name: "gv-1", RuntimeClasses: []string{"gvisor"}, SandboxedPods: 3, RuncDaemonSetPods: 4},
+		{Name: "ns-1", RuntimeClasses: []string{"confidential-sandbox", "isolated-sandbox"}, SandboxedPods: 2,
+			SandboxedPodsWithAWSCredentials: []string{"agents/a"}, RuncWorkloadPods: []string{"web/frontend"}, RuncDaemonSetPods: 2},
+	}}
+	out := renderToString(t, r)
+	for _, want := range []string{
+		"Sandbox nodes: 2  shared-with-runc-workloads=1",
+		"gv-1  classes=gvisor  sandboxed=3 (aws-credentials 0)  runc-workloads=0  runc-daemonsets=4",
+		"ns-1  classes=confidential-sandbox,isolated-sandbox  sandboxed=2 (aws-credentials 1)  runc-workloads=1  runc-daemonsets=2",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\nfull output:\n%s", want, out)
+		}
+	}
+
+	r.Spec.Facts.Sandbox = &schema.SandboxFacts{Checked: false, Reason: "listing pods on node gv-1: forbidden"}
+	if out := renderToString(t, r); !strings.Contains(out, "Sandbox nodes: not checked (listing pods on node gv-1: forbidden)") {
+		t.Errorf("unchecked output wrong:\n%s", out)
+	}
+
+	r.Spec.Facts.Sandbox = nil
+	if out := renderToString(t, r); strings.Contains(out, "Sandbox nodes") {
+		t.Errorf("nil sandbox facts must render nothing:\n%s", out)
+	}
+}
+
 func TestDescribeProbe(t *testing.T) {
 	cases := map[string]*schema.ProbeMetadata{
 		"dry-run (not scheduled: preflight not ready)": {DryRun: true},
