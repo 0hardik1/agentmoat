@@ -13,8 +13,9 @@
 #          seccomp-blocked-syscalls warning names it
 #        * seccomp-clean (RuntimeDefault, only sleeps) loaded a filter and
 #          has no blocked syscall
-#        * seccomp-unconfined loaded no filter, has no blocked syscall, and
-#          the seccomp-unconfined finding names it
+#        * seccomp-unconfined loaded one filter fewer than seccomp-clean
+#          (its app container has none; the pause container has one), has
+#          no blocked syscall, and the seccomp-unconfined finding names it
 #        * every trial read a runsc release of 20261123.1 or newer
 #        * no trial or reader pod is left behind
 #
@@ -126,7 +127,12 @@ check_eq "seccomp-blocked: unshare denied" true \
 check_eq "seccomp-blocked: a filter was loaded" true "$(wl seccomp-blocked '.filtersLoaded > 0')"
 check_eq "seccomp-clean: a filter was loaded" true "$(wl seccomp-clean '.filtersLoaded > 0')"
 check_eq "seccomp-clean: nothing blocked" 0 "$(wl seccomp-clean '.blocked // [] | length')"
-check_eq "seccomp-unconfined: no filter loaded" 0 "$(wl seccomp-unconfined '.filtersLoaded')"
+# filtersLoaded counts every container of the sandbox, the pause container
+# included, and containerd gives the pause container a filter of its own. So
+# the Unconfined workload loads one filter fewer than the clean one: its app
+# container adds none.
+check_eq "seccomp-unconfined: its app container loaded no filter" \
+  "$(( $(wl seccomp-clean '.filtersLoaded') - 1 ))" "$(wl seccomp-unconfined '.filtersLoaded')"
 check_eq "seccomp-unconfined: nothing blocked" 0 "$(wl seccomp-unconfined '.blocked // [] | length')"
 
 check_eq "seccomp-blocked-syscalls names seccomp-blocked" true \
