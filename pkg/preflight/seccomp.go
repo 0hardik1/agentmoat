@@ -76,44 +76,18 @@ func seccompFindings(f *schema.ClusterFacts) []schema.PreflightFinding {
 		if names := unconfinedNames(w.Profiles); len(names) > 0 {
 			unconfined = append(unconfined, fmt.Sprintf("%s (%s)", ref, strings.Join(names, ", ")))
 		}
-		switch w.Status {
-		case schema.SeccompTrialFailed:
-			out = append(out, schema.PreflightFinding{
-				ID: FindingSeccompProbeFailed, Severity: schema.SeverityWarn,
-				Message:     fmt.Sprintf("seccomp trial of %s did not complete: %s", ref, w.Reason),
-				Remediation: "fix the cause above and re-run 'agentmoat probe seccomp'; the trial pod was deleted",
-			})
-			continue
-		case schema.SeccompTrialSkipped:
-			out = append(out, schema.PreflightFinding{
-				ID: FindingSeccompProbeSkipped, Severity: schema.SeverityWarn,
-				Message:     fmt.Sprintf("seccomp trial of %s not run: %s", ref, w.Reason),
-				Remediation: "fix the cause above and re-run 'agentmoat probe seccomp'",
-			})
-			continue
-		case schema.SeccompTrialRan:
-		default:
+		if w.Status != schema.SeccompTrialRan {
+			if fd, ok := trialStatusFinding(w, ref); ok {
+				out = append(out, fd)
+			}
 			continue
 		}
 		ran++
 		if before, ok := runscBefore(w.RunscVersion, schema.OCISeccompDefaultRelease); ok && before {
 			oldRunsc[w.RunscVersion] = append(oldRunsc[w.RunscVersion], ref)
 		}
-		if len(w.Blocked) > 0 {
-			out = append(out, blockedFinding(w, ref))
-			continue
-		}
-		if filtered := filteredContainers(w.Profiles); len(filtered) > 0 && w.FiltersLoaded == 0 {
-			why := "the Sentry installed no seccomp filter"
-			if w.FiltersIgnored > 0 {
-				why = "runsc ignored the profile because oci-seccomp was off"
-			}
-			out = append(out, schema.PreflightFinding{
-				ID: FindingSeccompFilterNotLoaded, Severity: schema.SeverityWarn,
-				Message: fmt.Sprintf("%s asks for a seccomp profile (%s) but %s during its trial on node %s, so the trial says nothing about what the profile blocks",
-					ref, strings.Join(filtered, ", "), why, w.Node),
-				Remediation: fmt.Sprintf("check that the audit RuntimeClass's handler on node %s runs runsc with oci-seccomp = \"true\" (kind/runsc-seccomp-audit.toml, packer/files/runsc-seccomp-audit.toml)", w.Node),
-			})
+		if fd, ok := ranTrialFinding(w, ref); ok {
+			out = append(out, fd)
 			continue
 		}
 		clean++
@@ -148,6 +122,49 @@ func blockedFinding(w *schema.SeccompWorkload, ref string) schema.PreflightFindi
 		Remediation: "check whether the workload needs these calls; if it does, allow them in a Localhost profile, or keep the workload on a runsc older than " +
 			schema.OCISeccompDefaultRelease + " only as a stopgap; see docs/preflight.md#seccomp-probe",
 	}
+}
+
+// trialStatusFinding is the finding for a trial that did not run: failed
+// or skipped. A dry-run entry has none (the probe adds one for the run).
+func trialStatusFinding(w *schema.SeccompWorkload, ref string) (schema.PreflightFinding, bool) {
+	switch w.Status {
+	case schema.SeccompTrialFailed:
+		return schema.PreflightFinding{
+			ID: FindingSeccompProbeFailed, Severity: schema.SeverityWarn,
+			Message:     fmt.Sprintf("seccomp trial of %s did not complete: %s", ref, w.Reason),
+			Remediation: "fix the cause above and re-run 'agentmoat probe seccomp'; the trial pod was deleted",
+		}, true
+	case schema.SeccompTrialSkipped:
+		return schema.PreflightFinding{
+			ID: FindingSeccompProbeSkipped, Severity: schema.SeverityWarn,
+			Message:     fmt.Sprintf("seccomp trial of %s not run: %s", ref, w.Reason),
+			Remediation: "fix the cause above and re-run 'agentmoat probe seccomp'",
+		}, true
+	}
+	return schema.PreflightFinding{}, false
+}
+
+// ranTrialFinding is the warning for a trial that ran, if any: a blocked
+// syscall, or a profile that asked for a filter the Sentry did not load.
+// No finding means the trial was clean.
+func ranTrialFinding(w *schema.SeccompWorkload, ref string) (schema.PreflightFinding, bool) {
+	if len(w.Blocked) > 0 {
+		return blockedFinding(w, ref), true
+	}
+	filtered := filteredContainers(w.Profiles)
+	if len(filtered) == 0 || w.FiltersLoaded > 0 {
+		return schema.PreflightFinding{}, false
+	}
+	why := "the Sentry installed no seccomp filter"
+	if w.FiltersIgnored > 0 {
+		why = "runsc ignored the profile because oci-seccomp was off"
+	}
+	return schema.PreflightFinding{
+		ID: FindingSeccompFilterNotLoaded, Severity: schema.SeverityWarn,
+		Message: fmt.Sprintf("%s asks for a seccomp profile (%s) but %s during its trial on node %s, so the trial says nothing about what the profile blocks",
+			ref, strings.Join(filtered, ", "), why, w.Node),
+		Remediation: fmt.Sprintf("check that the audit RuntimeClass's handler on node %s runs runsc with oci-seccomp = \"true\" (kind/runsc-seccomp-audit.toml, packer/files/runsc-seccomp-audit.toml)", w.Node),
+	}, true
 }
 
 func runscFindings(old map[string][]string) []schema.PreflightFinding {
