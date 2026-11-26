@@ -103,9 +103,9 @@ Flags:
                       carries JSON-RPC framing; only stderr is gated.
 
 Surface:
-  Tools     scan_cluster, preflight_cluster, probe_nvproxy, assess_workload,
-            propose_plan, patch_manifests, apply_plan, rollback_plan,
-            verify_migration, explain
+  Tools     scan_cluster, preflight_cluster, probe_nvproxy, probe_seccomp,
+            assess_workload, propose_plan, patch_manifests, apply_plan,
+            rollback_plan, verify_migration, explain
   Resources agentmoat://compatibility-rules, agentmoat://known-gotchas
   Prompts   audit-cluster-for-agentic-workloads`
 }

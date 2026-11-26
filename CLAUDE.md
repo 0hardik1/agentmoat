@@ -50,7 +50,7 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
 ## Repository layout (where to look)
 
 - `cmd/agentmoat/` and `cmd/agentmoat-mcp/`: thin shells. CLI uses Cobra;
-  the MCP binary serves 10 tools over stdio (Phase 4, shipped). Add new
+  the MCP binary serves 11 tools over stdio (Phase 4, shipped). Add new
   subcommands here as `<verb>.go` next to the existing files; global flags
   live in `root.go`.
 - `pkg/agentmoat/`: orchestrator. One public function per verb
@@ -104,6 +104,13 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   pod. When that `runsc` needs its sidecars (gVisor 20261019.0 and newer), a
   second pod also mounts `gvisor-bin/` read-only. Dry-run by default. Output
   is a `PreflightReport`; `scan --facts` reads it. See `docs/gpu-nvproxy.md`.
+- `pkg/seccompprobe/`: the seccomp probe (`probe seccomp`). Runs each
+  migrated workload once as a trial pod on the `gvisor-seccomp-audit`
+  RuntimeClass (runsc with oci-seccomp on and the Sentry debug log on),
+  deletes it, then reads the blocked syscalls from the node's log with a
+  runc reader pod (read-only hostPath, uid 65534). Dry-run by default.
+  Output is a `PreflightReport` with `spec.facts.seccomp`; the findings are
+  in `pkg/preflight/seccomp.go`. See `docs/preflight.md#seccomp-probe`.
 - `pkg/planner/`: pure function from `ScanReport` to `MigrationPlan`.
   Same scan in, same plan and same SHA-256 `planHash` out. Don't break
   determinism. A step is a change: a workload that already has a
@@ -323,8 +330,9 @@ CI (`.github/workflows/ci.yml`) gates on `make lint`, `make test`, and
   of manifest files with no plan) and `explain`
   (embedded docs plus `explain namespace` / `explain workload` deep scans)
   are wired in `cmd/agentmoat/` and exercised by `make e2e`.
-- **Phase 4** (MCP server): shipped. `cmd/agentmoat-mcp/` serves 10 tools
+- **Phase 4** (MCP server): shipped. `cmd/agentmoat-mcp/` serves 11 tools
   over stdio (`scan_cluster`, `preflight_cluster`, `probe_nvproxy`,
+  `probe_seccomp`,
   `assess_workload`, `propose_plan`, `patch_manifests`, `apply_plan`,
   `rollback_plan`, `verify_migration`, `explain`). See
   [`docs/mcp-integration.md`](docs/mcp-integration.md).
@@ -340,7 +348,8 @@ When the phase shifts, update this section.
   cluster).
 - **Do** ask before mutating a real cluster from any command other than
   `apply --dry-run=false`, `rollback --dry-run=false`, and
-  `probe nvproxy --dry-run=false`. The dry-run default is load-bearing.
+  `probe nvproxy --dry-run=false`, and `probe seccomp --dry-run=false`.
+  The dry-run default is load-bearing.
 - **Don't** push to `origin` without being asked. Local branches and
   commits are fine; pushing publishes them.
 - **Don't** add a new top-level dependency casually. `go.mod` is short

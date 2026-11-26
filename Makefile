@@ -55,7 +55,7 @@ GORELEASER_VERSION ?= v2.20.3
 
 # Declare every target as phony. None of these targets produce a file at the
 # literal name of the target, so Make should always run the recipe.
-.PHONY: help build test lint tidy clean version release-snapshot check-gvisor-version check-gvisor-latest check-device-cgroup kind-build kind-up kind-down e2e scan mcp-smoke offline-smoke
+.PHONY: help build test lint tidy clean version release-snapshot check-gvisor-version check-gvisor-latest check-device-cgroup check-oci-seccomp seccomp-probe-smoke kind-build kind-up kind-down e2e scan mcp-smoke offline-smoke
 
 help: ## Print this help message (default target).
 	@# The awk pattern below scans this Makefile for lines of the form
@@ -96,6 +96,15 @@ check-device-cgroup: ## On a gVisor node (or a kind node with NODE=<name>), chec
 	@# devices it needs. make e2e runs this against the kind worker; on an EKS
 	@# node, run ./scripts/check-device-cgroup.sh as root (for example over SSM).
 	@./scripts/check-device-cgroup.sh $(if $(NODE),--node $(NODE))
+
+check-oci-seccomp: ## Check that a RuntimeDefault pod on gVisor is really filtered (current kubeconfig context; CONTEXT=<name> to pick one).
+	@# runsc 20261123.1 and newer load the pod's OCI seccomp filter inside the
+	@# sandbox. Runs a RuntimeDefault pod and an Unconfined control on the
+	@# gvisor RuntimeClass and compares unshare(2). Works on kind and on EKS.
+	@./scripts/check-oci-seccomp.sh $(if $(CONTEXT),--context $(CONTEXT))
+
+seccomp-probe-smoke: build ## Run `agentmoat probe seccomp --dry-run=false` on three test workloads and check its report (needs the audit RuntimeClass).
+	@KUBE_CONTEXT=$(CONTEXT) ./scripts/seccomp-probe-smoke.sh
 
 lint: ## Run golangci-lint against the whole module.
 	@# Configuration lives in .golangci.yml at the repo root. Run this before

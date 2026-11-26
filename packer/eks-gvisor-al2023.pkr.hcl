@@ -13,10 +13,10 @@
 // Build:
 //   packer init   .
 //   packer validate .
-//   packer build  -var 'k8s_version=1.37' -var 'gvisor_version=20261116.0' .
+//   packer build  -var 'k8s_version=1.37' -var 'gvisor_version=20261123.1' .
 //
 // gVisor download URLs use the point-release tag ${yyyymmdd}.${rc} (e.g.
-// 20261116.0), not the `runsc --version` prefix "release-". See
+// 20261123.1), not the `runsc --version` prefix "release-". See
 // https://gvisor.dev/docs/user_guide/install/ and scripts/check-gvisor-version.sh.
 //
 // The resulting AMI:
@@ -53,8 +53,8 @@ variable "k8s_version" {
 
 variable "gvisor_version" {
   type        = string
-  default     = "20261116.0"
-  description = "gVisor point-release tag for download URLs (yyyymmdd.N, e.g. 20261116.0). Must match kind/scripts GVISOR_VERSION. runsc --version prints a release- prefix; omit that here. See https://gvisor.dev/docs/user_guide/install/."
+  default     = "20261123.1"
+  description = "gVisor point-release tag for download URLs (yyyymmdd.N, e.g. 20261123.1). Must match kind/scripts GVISOR_VERSION. runsc --version prints a release- prefix; omit that here. See https://gvisor.dev/docs/user_guide/install/."
 }
 
 variable "region" {
@@ -187,6 +187,11 @@ build {
     destination = "/tmp/runsc.toml"
   }
 
+  provisioner "file" {
+    source      = "files/runsc-seccomp-audit.toml"
+    destination = "/tmp/runsc-seccomp-audit.toml"
+  }
+
   // 2b. Move them into place. We use a drop-in dir (config.d) and a single
   // 'imports' line in the main config.toml. This survives AL2023 nodeadm
   // re-templating; editing the main config.toml directly does not.
@@ -197,8 +202,9 @@ build {
       "sudo mkdir -p /etc/containerd/config.d",
       "sudo mv /tmp/gvisor-runtime.toml /etc/containerd/config.d/gvisor.toml",
       "sudo mv /tmp/runsc.toml /etc/containerd/runsc.toml",
-      "sudo chown root:root /etc/containerd/config.d/gvisor.toml /etc/containerd/runsc.toml",
-      "sudo chmod 0644 /etc/containerd/config.d/gvisor.toml /etc/containerd/runsc.toml",
+      "sudo mv /tmp/runsc-seccomp-audit.toml /etc/containerd/runsc-seccomp-audit.toml",
+      "sudo chown root:root /etc/containerd/config.d/gvisor.toml /etc/containerd/runsc.toml /etc/containerd/runsc-seccomp-audit.toml",
+      "sudo chmod 0644 /etc/containerd/config.d/gvisor.toml /etc/containerd/runsc.toml /etc/containerd/runsc-seccomp-audit.toml",
 
       // Idempotent insert of the imports line. We grep with a fixed string so
       // a re-run does not append again.

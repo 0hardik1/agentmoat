@@ -17,7 +17,7 @@
 //
 // Safety
 //
-//	The mutating tools (apply_plan, rollback_plan, probe_nvproxy) refuse to
+//	The mutating tools (apply_plan, rollback_plan, probe_nvproxy, probe_seccomp) refuse to
 //	mutate the cluster unless the caller explicitly sets `"dry_run": false`.
 //	Omitting the field, or sending `"dry_run": true`, runs the orchestrator
 //	in dry-run mode and returns the would-be patches without applying them.

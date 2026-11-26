@@ -207,6 +207,12 @@ way that a run can end.
   nowhere else, and it decides whether GPU workloads can move. Dry-run by
   default like `apply`; save the report and hand it to `scan --facts`. See
   [`docs/gpu-nvproxy.md`](docs/gpu-nvproxy.md).
+- **`probe seccomp`** runs each migrated workload once, as a short trial
+  pod on gVisor with the workload's own seccomp profile, and reports the
+  syscalls that profile refused inside the sandbox. From gVisor
+  `20261123.1`, runsc enforces the pod's OCI seccomp filter by default, so a
+  `RuntimeDefault` workload can now get `EPERM` on a call that used to work.
+  Dry-run by default. See [`docs/preflight.md`](docs/preflight.md#seccomp-probe).
 - **`plan`** is a pure function from a `ScanReport` to a `MigrationPlan`.
   Same scan in, same plan and same SHA-256 `planHash` out. The plan orders
   steps by risk (stateless first, no host-network first, etc.) and excludes
@@ -307,6 +313,7 @@ they appear in `--output json`, in `--rules` overrides, and in the
 | `perf-events`       | warn     | `CAP_PERFMON` or `CAP_SYS_ADMIN`                                       |
 | `systemd-init`      | warn     | systemd as PID 1 (`command`/`args` of `/sbin/init` or `/usr/lib/systemd/systemd`, a UBI init image, or `agentmoat.io/runs-systemd=true`); refined to `error` when the probed runsc predates `release-20260831.0` |
 | `network-throughput`| info     | Image hint: nginx, envoy, haproxy, traefik (expect 20-40% overhead)    |
+| `seccomp-unconfined`| info     | A container's seccompProfile is `Unconfined`; from gVisor 20261123.1 that opts it out of the OCI filter runsc enforces in the sandbox |
 | `syscall-heavy`     | info     | Image hint: redis, memcached (expect higher latency)                   |
 
 Any `error` rule firing makes the workload `incompatible` and excludes it from
@@ -412,8 +419,9 @@ elided fields are marked `...`.
 - **Dry-run by default.** `apply` and `rollback` default to `--dry-run=true`:
   the patches are computed and surfaced in the `StepResult.patch` field, but
   nothing is sent to the API server. Mutating requires explicit
-  `--dry-run=false`. `probe nvproxy`, the only other verb that creates
-  anything (one pod at a time, deleted afterwards), follows the same rule.
+  `--dry-run=false`. `probe nvproxy` and `probe seccomp`, the only other
+  verbs that create anything (short-lived pods, deleted afterwards), follow
+  the same rule.
 - **Idempotent.** Every `apply` writes the plan hash to the affected
   namespace as `agentmoat.io/plan-hash`. Re-running the same plan against
   the same cluster reports every step as `already-applied` and exits 0.
@@ -494,6 +502,7 @@ make kind-down
 | `agentmoat scan`     | Classify workloads for gVisor compatibility: a cluster, or manifests with `-f` (no cluster). RO. |
 | `agentmoat preflight`| Check that the RuntimeClass steers pods onto a Ready `runsc` node. RO. Exit 5 when not. |
 | `agentmoat probe nvproxy` | Read the nvproxy supported-driver list from `runsc` on a gVisor node via a one-shot pod. Default dry-run. |
+| `agentmoat probe seccomp` | Run each migrated workload once on gVisor with its own seccomp profile and report the syscalls the filter refused. Default dry-run. |
 | `agentmoat plan`     | Produce a deterministic `MigrationPlan` from a scan. RO.      |
 | `agentmoat patch`    | Add `runtimeClassName` to manifest files (`-f`), for a move through a pull request. With `--kustomize <dir>`: write the change as a Kustomize component, and edit no source file. No cluster. Default dry-run (prints the diff). |
 | `agentmoat apply`    | Patch workloads per the plan. Default dry-run. Idempotent.    |
@@ -630,7 +639,7 @@ image.
 Phase 0 (foundation), Phase 1 (read-only scan + classifier), Phase 2
 (planner + applier + rollback, with idempotency and audit), Phase 3
 (`agentmoat verify` with optional `--in-pod-probe`, plus `agentmoat
-explain`), and Phase 4 (the `agentmoat-mcp` MCP server: 10 tools over
+explain`), and Phase 4 (the `agentmoat-mcp` MCP server: 11 tools over
 stdio, see [`docs/mcp-integration.md`](docs/mcp-integration.md)) are all
 shipped and exercised end-to-end against a real gVisor kind cluster.
 `agentmoat preflight`, the apply gate, `agentmoat probe nvproxy`, the scan

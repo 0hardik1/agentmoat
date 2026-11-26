@@ -38,6 +38,7 @@ will differ. Use them when ordering the rollout.
 | Rule ID | What it detects | Expected impact |
 | --- | --- | --- |
 | `network-throughput` | Image hints: nginx, envoy, haproxy, traefik | ~20-40% throughput overhead under Sentry's network stack. |
+| `seccomp-unconfined` | `securityContext.seccompProfile.type: Unconfined` on the pod or a container (the container's own setting wins) | From gVisor release 20261123.1, runsc enforces the container's OCI seccomp filter inside the sandbox. `Unconfined` gives that container no filter, so it keeps only the Sentry as its boundary. Unset is not flagged: on containerd it already means no filter, and the plan has a warning for `Unconfined` only. To see what `RuntimeDefault` would refuse, run `agentmoat probe seccomp`. See [`explanations/seccomp-unconfined.md`](explanations/seccomp-unconfined.md). |
 | `syscall-heavy` | Image hints: redis, memcached | Higher latency; benchmark before migration. |
 
 ## Detection notes

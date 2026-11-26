@@ -1,6 +1,6 @@
 // Package classifier: built-in rule set.
 //
-// The 15 rules registered in this file are the standard gVisor
+// The 16 rules registered in this file are the standard gVisor
 // compatibility checks, covering both the cases where gVisor is the wrong
 // answer and the performance trade-offs to weigh. The upstream source for
 // most rules is the gVisor user
@@ -23,8 +23,11 @@
 //  11. perf-events          (warn)  CAP_PERFMON / CAP_SYS_ADMIN usage.
 //  12. privileged           (error) container in privileged mode.
 //  13. raw-socket           (error) CAP_NET_RAW or operator-declared usage.
-//  14. syscall-heavy        (info)  syscall-bound image (redis, memcached).
-//  15. systemd-init         (warn)  systemd as PID 1; refined by the
+//  14. seccomp-unconfined   (info)  a container's seccomp profile is
+//     Unconfined, which opts it out of the OCI seccomp filter that runsc
+//     enforces from 20261123.1 (seccomp.go).
+//  15. syscall-heavy        (info)  syscall-bound image (redis, memcached).
+//  16. systemd-init         (warn)  systemd as PID 1; refined by the
 //     installed runsc release (systemd_init.go).
 //
 // Each rule's Match closure is intentionally small and reads only the
@@ -40,7 +43,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// RegisterBuiltins adds the 15 standard rules to the given Registry. Call
+// RegisterBuiltins adds the 16 standard rules to the given Registry. Call
 // it once after NewRegistry() during CLI startup, before loading any YAML
 // overrides. The rules are split into three group functions (one per
 // severity) so each stays under the project's cyclomatic-complexity budget.
@@ -155,8 +158,8 @@ func registerWarnRules(r *Registry) {
 	})
 }
 
-// registerInfoRules adds the 2 advisory-class rules (overhead hints; never
-// block migration).
+// registerInfoRules adds the 3 advisory-class rules (two overhead hints and
+// the seccomp-unconfined notice; none blocks migration).
 func registerInfoRules(r *Registry) {
 	r.Register(Rule{
 		ID:             "network-throughput",
@@ -175,6 +178,13 @@ func registerInfoRules(r *Registry) {
 		Match: func(w scanner.Workload) bool {
 			return imageContainsAny(w.ImageRefs, "redis", "memcached")
 		},
+	})
+	r.Register(Rule{
+		ID:             RuleSeccompUnconfined,
+		Severity:       SeverityInfo,
+		Description:    "A container's seccomp profile is Unconfined; from gVisor 20261123.1 runsc enforces the container's OCI seccomp filter inside the sandbox, and Unconfined opts this workload out of that second layer.",
+		RemediationURL: "https://kubernetes.io/docs/tutorials/security/seccomp/",
+		Match:          matchSeccompUnconfined,
 	})
 }
 

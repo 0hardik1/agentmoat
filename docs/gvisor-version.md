@@ -14,10 +14,10 @@ The same `yyyymmdd.N` tag appears in three load-bearing files:
 | `kind/Dockerfile.gvisor-node` | `ARG GVISOR_VERSION=...` |
 | `scripts/build-gvisor-node.sh` | `GVISOR_VERSION="${GVISOR_VERSION:-...}"` |
 
-The current pin is `20261116.0`. `make check-gvisor-version` fails when the
+The current pin is `20261123.1`. `make check-gvisor-version` fails when the
 three disagree.
 
-gVisor tags look like `release-20261116.0` on GitHub and in `runsc --version`.
+gVisor tags look like `release-20261123.1` on GitHub and in `runsc --version`.
 The download URLs drop the `release-` prefix, so the pin is written without it.
 
 ## Why a pin, and not the apt repository or `latest`
@@ -87,6 +87,24 @@ fails to read on both (the device is not passed through), and only
 `20261116.0` refuses a host process in the sandbox's cgroup a device off
 the list. `scripts/check-device-cgroup.sh` (`make check-device-cgroup`)
 checks the confinement on a node, and `make e2e` runs it on the kind worker.
+
+From `20261123.1`, runsc's `--oci-seccomp` flag defaults to true
+(`runsc/config/flags.go`; it is false at `20261123.0`). runsc now loads the
+container's OCI seccomp filter inside the sandbox, and the Sentry applies it
+to the application's syscalls. Before, runsc skipped the filter unless the
+flag was set and logged "Seccomp spec is being ignored because oci-seccomp
+is disabled", so a pod with `seccompProfile: RuntimeDefault` ran with no
+filter. This adds a layer, and it can break a workload that makes a call its
+profile does not allow: containerd's default profile allows `unshare`,
+`mount` and `bpf` only with `CAP_SYS_ADMIN`. Checked against runsc
+`20261123.1` with containerd's default profile: the filter is installed
+(`Seccomp: 2` in `/proc/self/status`) and `unshare -U` fails with `EPERM`;
+with `--oci-seccomp=false` the same pod has no filter and `unshare` works.
+`agentmoat probe seccomp` reports what each workload's profile refuses
+before the move, and `make check-oci-seccomp` checks the enforcement on a
+node group (see [`preflight.md`](preflight.md#seccomp-probe)). Both images
+also register a second containerd handler, `gvisor-seccomp-audit`, for the
+probe's trials.
 
 The kind image extracts the tarball in a separate build stage, because
 `kindest/node` has no `bzip2`. The Packer template installs `bzip2` with

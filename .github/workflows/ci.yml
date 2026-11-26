@@ -28,6 +28,13 @@
 #     checksum exist in the bucket for both archs. It does NOT fail on drift
 #     (a newer release); that is the weekly gvisor-drift.yml workflow's job,
 #     so a PR never turns red because gVisor shipped that morning.
+#   * `kind-seccomp`: brings up the gVisor kind cluster (make kind-up) and
+#     runs the two checks that need a real runsc: scripts/check-oci-seccomp.sh
+#     (a RuntimeDefault pod is really filtered inside the sandbox, against an
+#     Unconfined control) and scripts/seccomp-probe-smoke.sh (`agentmoat
+#     probe seccomp --dry-run=false` reports the syscall the filter refused).
+#     runsc enforces the OCI filter from release 20261123.1, so this job is
+#     what fails if a pin or a node config loses that.
 #
 # Caching:
 #   * actions/setup-go@v7 transparently caches the module cache (~/go/pkg/mod)
@@ -168,3 +175,50 @@ jobs:
 
       - name: Verify pinned gVisor release
         run: make check-gvisor-version
+
+  # -------------------------- kind-seccomp --------------------------------
+  # The gVisor kind cluster from `make kind-up`: a stock control-plane and a
+  # worker with the pinned runsc and two containerd handlers (gvisor, and
+  # gvisor-seccomp-audit for the probe's trials). Then the two seccomp
+  # checks. This is a kind cluster, not EKS: it shows what the pinned runsc
+  # does with containerd's default profile; on an EKS node group, run
+  # `make check-oci-seccomp` against that cluster.
+  kind-seccomp:
+    name: gVisor seccomp on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # kind v0.29.0 is the release kindest/node:v1.32.5 (the node image
+      # scripts/build-gvisor-node.sh builds on) was published for.
+      - name: Install kind
+        run: |
+          go install sigs.k8s.io/kind@v0.29.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Bring up the gVisor kind cluster
+        run: make kind-up
+
+      - name: Apply the RuntimeClasses
+        run: kubectl apply -f deploy/runtimeclass.yaml -f deploy/runtimeclass-seccomp-audit.yaml
+
+      - name: A RuntimeDefault pod is filtered inside the sandbox
+        run: make check-oci-seccomp
+
+      - name: probe seccomp reports the refused syscall
+        run: make seccomp-probe-smoke
+
+      - name: Node state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          docker exec agentmoat-e2e-worker sh -c '/usr/local/bin/runsc --version; ls -la /var/log/runsc/seccomp-audit || true; cat /etc/containerd/runsc-seccomp-audit.toml' || true
+          docker exec agentmoat-e2e-worker journalctl -u containerd --no-pager -n 200 || true

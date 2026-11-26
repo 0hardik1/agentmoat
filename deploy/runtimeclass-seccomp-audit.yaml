@@ -1,0 +1,39 @@
+# agentmoat: RuntimeClass for `agentmoat probe seccomp` trial pods.
+#
+# Apply once per cluster, next to deploy/runtimeclass.yaml:
+#   kubectl apply -f deploy/runtimeclass-seccomp-audit.yaml
+#
+# The handler `gvisor-seccomp-audit` is a second containerd registration of
+# the same runsc, with the config in /etc/containerd/runsc-seccomp-audit.toml:
+# oci-seccomp on and the Sentry's debug log in /var/log/runsc/seccomp-audit/
+# (see packer/files/runsc-seccomp-audit.toml for why). The agentmoat Packer
+# AMI and the kind node image register it; on other nodes, add the same two
+# blocks to the containerd config before you apply this.
+#
+# Do not set this class on a workload yourself. It is for short trial pods:
+# the debug log makes every syscall slower and writes to the node's disk.
+# The probe sets it on the trial pods it creates and deletes.
+#
+# The scheduling block is the same as the gvisor RuntimeClass, so a trial
+# lands on the nodes where the migrated workload will run.
+
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor-seccomp-audit
+  labels:
+    app.kubernetes.io/name: agentmoat
+    app.kubernetes.io/component: seccomp-probe
+handler: gvisor-seccomp-audit
+scheduling:
+  nodeSelector:
+    runtime: gvisor
+  tolerations:
+    - key: runtime
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+overhead:
+  podFixed:
+    memory: "140Mi"
+    cpu: "250m"

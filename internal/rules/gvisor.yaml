@@ -101,6 +101,12 @@ overrides:
     remediationUrl: "https://gvisor.dev/docs/architecture_guide/performance/"
     source: "https://gvisor.dev/docs/architecture_guide/performance/"
 
+  - id: seccomp-unconfined
+    severity: info
+    description: "A container's seccomp profile is Unconfined; from gVisor 20261123.1 runsc enforces the container's OCI seccomp filter inside the sandbox, and Unconfined opts this workload out of that second layer."
+    remediationUrl: "https://kubernetes.io/docs/tutorials/security/seccomp/"
+    source: "https://github.com/google/gvisor/blob/release-20261123.1/runsc/config/flags.go"
+
   - id: syscall-heavy
     severity: info
     description: "Workload appears syscall-heavy (image hint: redis, memcached); expect higher latency under Sentry; benchmark before migration."

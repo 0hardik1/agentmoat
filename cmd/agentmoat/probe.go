@@ -1,5 +1,5 @@
-// agentmoat probe: one-shot diagnostic pods. Today there is one probe,
-// `probe nvproxy`.
+// agentmoat probe: one-shot diagnostic pods: `probe nvproxy` and
+// `probe seccomp` (probe_seccomp.go).
 //
 // nvproxy is how gVisor runs CUDA workloads: the Sentry forwards the NVIDIA
 // driver ioctls to the host driver, and it only does so for host driver
@@ -64,9 +64,13 @@ the probe finishes.
 Probes:
 
     nvproxy    read the runsc version and the NVIDIA driver versions its
-               nvproxy supports, from a gVisor node`,
+               nvproxy supports, from a gVisor node
+    seccomp    run a trial of each migrated workload in a gVisor sandbox
+               with its own seccomp profile and report the syscalls the
+               profile refused (gVisor 20261123.1 enforces it by default)`,
 	}
 	cmd.AddCommand(newProbeNvproxyCmd())
+	cmd.AddCommand(newProbeSeccompCmd())
 	return cmd
 }
 

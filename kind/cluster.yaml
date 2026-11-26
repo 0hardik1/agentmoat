@@ -28,6 +28,12 @@
 # registration is benign on the control-plane node (no pod ever requests
 # the gvisor handler there because of the RuntimeClass nodeSelector).
 #
+# The second handler, `gvisor-seccomp-audit`, is the same sandbox with the
+# config in kind/runsc-seccomp-audit.toml: oci-seccomp on and the Sentry's
+# debug log on disk. Only `agentmoat probe seccomp` uses it, through
+# deploy/runtimeclass-seccomp-audit.yaml. It gets no pod_annotations line,
+# so a pod cannot turn its logging off with a dev.gvisor.* annotation.
+#
 # To build the worker image: `make kind-build` or
 # `scripts/build-gvisor-node.sh`. Both honor IMG_TAG and GVISOR_VERSION.
 
@@ -42,6 +48,11 @@ containerdConfigPatches:
     [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor.options]
       TypeUrl    = "io.containerd.runsc.v1.options"
       ConfigPath = "/etc/containerd/runsc.toml"
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-seccomp-audit]
+      runtime_type = "io.containerd.runsc.v1"
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-seccomp-audit.options]
+      TypeUrl    = "io.containerd.runsc.v1.options"
+      ConfigPath = "/etc/containerd/runsc-seccomp-audit.toml"
 
 nodes:
   - role: control-plane

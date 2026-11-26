@@ -302,6 +302,9 @@ func renderEvidence(s *Styles, e *schema.Evidence, w io.Writer) error {
 	for _, h := range e.Commands {
 		fmt.Fprintf(&b, "    Container %q %s[0] = %s\n", h.Container, h.Field, h.Executable)
 	}
+	for _, h := range e.SeccompProfiles {
+		fmt.Fprintf(&b, "    Container %q seccompProfile.type = %s\n", h.Container, h.Type)
+	}
 	_, err := io.WriteString(w, b.String())
 	return err
 }
@@ -333,7 +336,8 @@ func evidenceEmpty(e *schema.Evidence) bool {
 		len(e.EnvVars) == 0 &&
 		len(e.Annotations) == 0 &&
 		len(e.CSIDrivers) == 0 &&
-		len(e.Commands) == 0
+		len(e.Commands) == 0 &&
+		len(e.SeccompProfiles) == 0
 }
 
 // checkedBucket is one row in the "what was checked" summary printed

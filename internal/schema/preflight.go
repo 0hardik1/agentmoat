@@ -141,6 +141,41 @@ type PreflightMetadata struct {
 	// which extends the preflight with a one-shot pod that reads the runsc
 	// binary on a gVisor node. Nil for a plain preflight.
 	Probe *ProbeMetadata `json:"probe,omitempty" yaml:"probe,omitempty"`
+
+	// SeccompProbe is set when the report came from `agentmoat probe
+	// seccomp`, which runs a trial copy of each migrated workload in a
+	// gVisor sandbox with its own seccomp profile and reads which syscalls
+	// the profile blocked. Nil for every other report.
+	SeccompProbe *SeccompProbeMetadata `json:"seccompProbe,omitempty" yaml:"seccompProbe,omitempty"`
+}
+
+// SeccompProbeMetadata records what the seccomp probe did (or, in dry-run,
+// would do). The per-workload results are in ClusterFacts.Seccomp.
+type SeccompProbeMetadata struct {
+	// DryRun is true when no pod was created.
+	DryRun bool `json:"dryRun" yaml:"dryRun"`
+
+	// RuntimeClassName is the audit RuntimeClass the trial pods requested
+	// ("gvisor-seccomp-audit" unless --audit-runtime-class was passed).
+	RuntimeClassName string `json:"runtimeClassName" yaml:"runtimeClassName"`
+
+	// RunFor is how long each trial ran once its containers started, as
+	// a Go duration ("1m0s").
+	RunFor string `json:"runFor" yaml:"runFor"`
+
+	// LogDir is the host directory of the Sentry debug logs the reader
+	// pods mounted read-only.
+	LogDir string `json:"logDir" yaml:"logDir"`
+
+	// ReaderNamespace and ReaderImage describe the reader pods: one per
+	// node that ran a trial, under runc, deleted afterwards.
+	ReaderNamespace string `json:"readerNamespace" yaml:"readerNamespace"`
+	ReaderImage     string `json:"readerImage"     yaml:"readerImage"`
+
+	// RunID is the suffix every trial pod name of this run carries, so the
+	// reader can tell this run's logs from older ones in the same
+	// directory.
+	RunID string `json:"runId,omitempty" yaml:"runId,omitempty"`
 }
 
 // ProbeMetadata records what the nvproxy probe did (or, in dry-run, what
@@ -247,6 +282,117 @@ type ClusterFacts struct {
 	// when no sandboxed pod runs anywhere, so clusters that have not
 	// migrated yet render exactly as before.
 	Sandbox *SandboxFacts `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+
+	// Seccomp is what `agentmoat probe seccomp` saw when it ran each
+	// migrated workload in a gVisor sandbox with its own seccomp profile.
+	// Nil until that probe has run.
+	Seccomp *SeccompFacts `json:"seccomp,omitempty" yaml:"seccomp,omitempty"`
+}
+
+// Seccomp profile types as a Kubernetes securityContext.seccompProfile names
+// them, plus SeccompProfileUnset for a container whose pod and container
+// set none (the kubelet then applies its default: Unconfined, unless the
+// kubelet runs with seccompDefault: true).
+const (
+	SeccompProfileRuntimeDefault = "RuntimeDefault"
+	SeccompProfileUnconfined     = "Unconfined"
+	SeccompProfileLocalhost      = "Localhost"
+	SeccompProfileUnset          = "Unset"
+)
+
+// The release in which runsc started to load a container's OCI seccomp
+// filter by default (runsc flag --oci-seccomp, default true). Before it, a
+// RuntimeDefault or Localhost profile under runsc filtered nothing inside
+// the sandbox; runsc logged "Seccomp spec is being ignored because
+// oci-seccomp is disabled". Source: google/gvisor runsc/config/flags.go at
+// tag release-20261123.1 (false at release-20261123.0).
+const OCISeccompDefaultRelease = "20261123.1"
+
+// Status values of one SeccompWorkload.
+const (
+	// SeccompTrialRan: the trial ran and its Sentry log was read.
+	SeccompTrialRan = "ran"
+	// SeccompTrialDryRun: no pod was created; the entry describes it.
+	SeccompTrialDryRun = "dry-run"
+	// SeccompTrialFailed: the trial or its log read did not complete.
+	SeccompTrialFailed = "failed"
+	// SeccompTrialSkipped: the probe would not run this workload.
+	SeccompTrialSkipped = "skipped"
+)
+
+// SeccompFacts is the result of one seccomp probe run.
+type SeccompFacts struct {
+	// ProbedAt is when the probe finished (RFC3339).
+	ProbedAt string `json:"probedAt" yaml:"probedAt"`
+
+	// Workloads has one entry per target, sorted by kind, namespace, name.
+	Workloads []SeccompWorkload `json:"workloads" yaml:"workloads"`
+}
+
+// SeccompWorkload is one migrated workload and what its trial showed.
+type SeccompWorkload struct {
+	Target WorkloadRef `json:"target" yaml:"target"`
+
+	// Status is one of the SeccompTrial* values; Reason says why for
+	// failed and skipped.
+	Status string `json:"status"           yaml:"status"`
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
+
+	// Profiles is the seccomp profile each container asks for, from the
+	// pod template (container setting first, then the pod's), in the
+	// order of the spec: init containers, then containers.
+	Profiles []ContainerSeccompProfile `json:"profiles" yaml:"profiles"`
+
+	// TrialPod and Node say where the trial ran (or would run; Node is
+	// empty in dry-run).
+	TrialPod string `json:"trialPod"       yaml:"trialPod"`
+	Node     string `json:"node,omitempty" yaml:"node,omitempty"`
+
+	// Adjustments lists what the trial pod changed from the pod template
+	// so it could run next to the real pods ("volume data: persistentVolumeClaim
+	// replaced by emptyDir"). The seccomp settings are never changed.
+	Adjustments []string `json:"adjustments,omitempty" yaml:"adjustments,omitempty"`
+
+	// RunscVersion is the release the trial sandbox ran, as its Sentry
+	// log printed it ("release-20261123.1").
+	RunscVersion string `json:"runscVersion,omitempty" yaml:"runscVersion,omitempty"`
+
+	// FiltersLoaded counts the containers of the sandbox (the pod's pause
+	// container included) whose OCI seccomp filter the Sentry installed.
+	// FiltersIgnored counts the ones it ignored because oci-seccomp was
+	// off. A container with no profile in its OCI spec is in neither.
+	FiltersLoaded  int `json:"filtersLoaded"  yaml:"filtersLoaded"`
+	FiltersIgnored int `json:"filtersIgnored" yaml:"filtersIgnored"`
+
+	// Blocked lists the syscalls the filter refused during the trial,
+	// sorted by name. Empty for a trial that ran and hit no filter.
+	Blocked []BlockedSyscall `json:"blocked,omitempty" yaml:"blocked,omitempty"`
+}
+
+// ContainerSeccompProfile is the profile one container asks for.
+type ContainerSeccompProfile struct {
+	Container string `json:"container" yaml:"container"`
+
+	// Type is one of the SeccompProfile* values.
+	Type string `json:"type" yaml:"type"`
+
+	// LocalhostProfile is the node-relative path of a Localhost profile.
+	LocalhostProfile string `json:"localhostProfile,omitempty" yaml:"localhostProfile,omitempty"`
+}
+
+// BlockedSyscall is one syscall the in-sandbox seccomp filter refused.
+type BlockedSyscall struct {
+	// Name is the syscall name for the sandbox's architecture
+	// ("get_mempolicy"); "syscall-<n>" when agentmoat's table has no name.
+	Name   string `json:"name"   yaml:"name"`
+	Number int    `json:"number" yaml:"number"`
+
+	// Action is "denied" (the call failed with an errno, or SIGSYS was
+	// sent) or "killed" (the filter killed the thread or process).
+	Action string `json:"action" yaml:"action"`
+
+	// Count is how many times the trial made the call and was refused.
+	Count int `json:"count" yaml:"count"`
 }
 
 // SandboxFacts is the co-location inventory.

@@ -11,6 +11,9 @@
 #
 # `agentmoat probe nvproxy` (creates and deletes one pod at a time) is NOT covered here;
 # its namespaced Role lives in deploy/nvproxy-probe.yaml.
+# `agentmoat probe seccomp --dry-run=false` is not covered either: it creates,
+# watches and deletes pods in the workloads' namespaces and in its reader
+# namespace, and reads pods/log there (see docs/preflight.md#seccomp-probe).
 #
 # Grant this only to the identity that runs `apply`/`rollback --dry-run=false`.
 # For scan / plan / explain / verify-without-probe, prefer the narrower

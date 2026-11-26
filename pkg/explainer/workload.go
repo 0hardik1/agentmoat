@@ -24,7 +24,7 @@
 //
 //   - "Checked" entries (rules that did NOT fire) are populated for every
 //     verdict, not just Compatible ones. This lets the operator see "we
-//     evaluated 15 rules; here is the 1 that fired and the 14 that did
+//     evaluated 16 rules; here is the 1 that fired and the 15 that did
 //     not" on a Review verdict, which matches the mental model of an
 //     audit log.
 //
@@ -88,8 +88,8 @@ func ExplainWorkload(
 
 	// Checked: one entry per rule that did NOT fire, in the input order.
 	// Populated for every verdict (not just Compatible) so even on a
-	// Review verdict the operator can see "we checked 15 rules, 1 fired,
-	// here are the 14 that didn't".
+	// Review verdict the operator can see "we checked 16 rules, 1 fired,
+	// here are the 15 that didn't".
 	checked := make([]schema.RuleCheck, 0, len(allRules))
 	for _, r := range allRules {
 		if _, fired := firedIDs[r.ID]; fired {
@@ -166,7 +166,8 @@ var evidenceExtractors = map[string]func(scanner.Workload) schema.Evidence{
 	"syscall-heavy": func(w scanner.Workload) schema.Evidence {
 		return evidenceForImageHints(w, []string{"redis", "memcached"})
 	},
-	"systemd-init": evidenceForSystemdInit,
+	"systemd-init":       evidenceForSystemdInit,
+	"seccomp-unconfined": evidenceForSeccompUnconfined,
 }
 
 // hostNamespaceEvidence returns an extractor for the host-namespace rules.
@@ -504,4 +505,16 @@ func nvidiaResourceNames(list corev1.ResourceList) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// evidenceForSeccompUnconfined lists the containers whose effective seccomp
+// profile is Unconfined (container setting first, then the pod's).
+func evidenceForSeccompUnconfined(w scanner.Workload) schema.Evidence {
+	ev := schema.Evidence{}
+	for _, p := range classifier.SeccompProfiles(w.PodSpec) {
+		if p.Type == schema.SeccompProfileUnconfined {
+			ev.SeccompProfiles = append(ev.SeccompProfiles, p)
+		}
+	}
+	return ev
 }

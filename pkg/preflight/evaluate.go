@@ -121,6 +121,7 @@ func Evaluate(facts *schema.ClusterFacts) []schema.PreflightFinding {
 	out = append(out, platformFindings(facts)...)
 	out = append(out, gpuFindings(facts)...)
 	out = append(out, sandboxFindings(facts)...)
+	out = append(out, seccompFindings(facts)...)
 	SortFindings(out)
 	return out
 }

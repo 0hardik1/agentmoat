@@ -32,6 +32,7 @@ var ruleTitles = map[string]string{
 	"io-uring":           "io_uring opt-in declared",
 	"perf-events":        "Performance event capability",
 	"network-throughput": "Network-throughput-bound workload",
+	"seccomp-unconfined": "Seccomp profile set to Unconfined",
 	"syscall-heavy":      "Syscall-heavy workload",
 	"systemd-init":       "systemd runs as PID 1",
 }

@@ -83,6 +83,15 @@ func Plan(ctx context.Context, opts PlanOptions) (*schema.MigrationPlan, error) 
 		plan.Spec.Warnings = append(plan.Spec.Warnings, *sourceManaged)
 	}
 
+	// Steps that carry seccompProfile Unconfined into gVisor. From runsc
+	// 20261123.1 the profile is enforced in the sandbox, so Unconfined is
+	// the only way out of it: a choice the plan should show. Outside the
+	// plan hash, like every warning.
+	unconfined := seccompUnconfinedWarning(plan, report)
+	if unconfined != nil {
+		plan.Spec.Warnings = append(plan.Spec.Warnings, *unconfined)
+	}
+
 	_, _ = fmt.Fprintf(stderr, "planned %d steps (%d workloads excluded)\n",
 		plan.Spec.Summary.Included,
 		plan.Spec.Summary.Excluded,
@@ -95,6 +104,9 @@ func Plan(ctx context.Context, opts PlanOptions) (*schema.MigrationPlan, error) 
 	}
 	if sourceManaged != nil {
 		_, _ = fmt.Fprintf(stderr, "plan: %s\n", sourceManaged.Message)
+	}
+	if unconfined != nil {
+		_, _ = fmt.Fprintf(stderr, "plan: %s\n", unconfined.Message)
 	}
 	return plan, nil
 }

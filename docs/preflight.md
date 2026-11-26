@@ -73,8 +73,16 @@ carries them under `spec.findings[].id`. Only `error` findings block.
 | `nvproxy-probe-dry-run` | info | `probe nvproxy` described its pod and created nothing. | Re-run with `--dry-run=false`. |
 | `nvproxy-probe-skipped` | warn | The preflight has an error finding, so there was no node to run the probe pod on. | Fix the error findings first. |
 | `nvproxy-probe-failed` | warn | The probe pod did not complete or its output did not parse. | The message names the cause (image pull, timeout, `runsc` path). |
+| `seccomp-blocked-syscalls` | warn | During its trial, the workload's own seccomp profile refused one or more syscalls inside the sandbox. One finding per workload; the message lists each syscall, `denied` or `killed`, and how often. | Check whether the workload needs those calls. If it does, allow them in a `Localhost` profile. See [Seccomp probe](#seccomp-probe). |
+| `seccomp-filter-not-loaded` | warn | The workload asks for `RuntimeDefault` or `Localhost`, but the Sentry installed no filter during its trial, so the trial says nothing about the profile. | Check that the audit handler's config on that node sets `oci-seccomp = "true"`. |
+| `seccomp-runsc-before-default` | warn | The trial ran on a `runsc` older than `release-20261123.1`, the first release that loads the OCI seccomp filter by default. | Upgrade `runsc` on the gVisor nodes ([`gvisor-version.md`](gvisor-version.md)) and re-run the probe. |
+| `seccomp-unconfined` | info | A probed workload has a container whose seccompProfile is `Unconfined`, so no filter covers it in the sandbox. | See [`explanations/seccomp-unconfined.md`](explanations/seccomp-unconfined.md). |
+| `seccomp-probe-clean` | info | Every trial ran and no filter refused a syscall. It covers only what the workloads did during the trial. | None. |
+| `seccomp-probe-dry-run` | info | `probe seccomp` described its trial and reader pods and created nothing. | Re-run with `--dry-run=false`. |
+| `seccomp-probe-failed` | warn | A trial did not start, or its Sentry log could not be read. One finding per workload. | The message names the cause (scheduling, image pull, no log on the node). |
+| `seccomp-probe-skipped` | warn | The probe ran no trial for a workload (or for any): the preflight has an error finding, the audit RuntimeClass is missing, or the workload could not be read. | The message names the cause. For the RuntimeClass: `kubectl apply -f deploy/runtimeclass-seccomp-audit.yaml`. |
 
-GPU, probe and sandbox findings never block. The sandbox facts (under
+GPU, probe, seccomp and sandbox findings never block. The sandbox facts (under
 `spec.facts.sandbox`) and findings appear only once some pod runs sandboxed,
 so a cluster that has not migrated yet reports exactly what it did before.
 GPU findings also refine the `gpu-passthrough` verdict (see
@@ -102,6 +110,11 @@ info, then by ID, so the same cluster state renders identically.
   returns the same
   PreflightReport with `metadata.probe`, `spec.facts.gpu.nvproxy`, and
   `spec.facts.runsc` filled in.
+- **`agentmoat probe seccomp`**: runs the preflight, then (unless
+  `--dry-run`, the default) runs each migrated workload once on the
+  `gvisor-seccomp-audit` RuntimeClass and reports the syscalls its own
+  seccomp profile refused, under `metadata.seccompProbe` and
+  `spec.facts.seccomp`. See [Seccomp probe](#seccomp-probe).
 - **`agentmoat scan`**: records the same facts under
   `metadata.clusterFacts` (best-effort: without node RBAC the scan still
   succeeds and omits them; `--no-cluster-facts` skips the reads;
@@ -120,7 +133,8 @@ info, then by ID, so the same cluster state renders identically.
   outside the selector demotes the step to `mismatch`. Without node RBAC the
   result says `checked: false` and the step keeps its spec-level status.
 - **MCP**: `preflight_cluster` returns the same PreflightReport; `apply_plan`
-  runs the gate and accepts `skip_preflight`; `probe_nvproxy` is the probe;
+  runs the gate and accepts `skip_preflight`; `probe_nvproxy` and
+  `probe_seccomp` are the probes;
   `scan_cluster`, `assess_workload`, and `propose_plan` accept `facts_path`.
 
 ## Example
@@ -186,15 +200,94 @@ Nor can it tell which NVIDIA driver versions that `runsc` can proxy: the
 list is compiled into the binary. `agentmoat probe nvproxy` reads it by
 running the binary on a node; see [`gpu-nvproxy.md`](gpu-nvproxy.md).
 
+## Seccomp probe
+
+From gVisor release `20261123.1`, `runsc`'s `--oci-seccomp` flag defaults to
+true: `runsc` loads the container's OCI seccomp filter inside the sandbox,
+and the Sentry applies it to the application's syscalls. Before that release
+`runsc` skipped the filter unless the flag was set, so a pod with
+`seccompProfile: RuntimeDefault` ran on gVisor with no filter at all. A
+workload that worked on an older `runsc` can now get `EPERM` (or be killed)
+on a syscall that its profile does not allow, though nothing in its spec
+changed. containerd's default profile, for example, allows `unshare`,
+`mount` and `bpf` only with `CAP_SYS_ADMIN`.
+
+`agentmoat probe seccomp` finds those syscalls before the move:
+
+```bash
+kubectl apply -f deploy/runtimeclass-seccomp-audit.yaml   # once per cluster
+agentmoat plan --output json > plan.json
+agentmoat probe seccomp --plan plan.json                  # dry run: describes, creates nothing
+agentmoat probe seccomp --plan plan.json --dry-run=false --output json > seccomp.json
+```
+
+Without `--plan` it probes the workloads in `--namespace` that already
+request the RuntimeClass (default `gvisor`).
+
+For each workload it:
+
+1. Creates one trial pod from the workload's pod template, with
+   `runtimeClassName: gvisor-seccomp-audit`, `restartPolicy: Never` and a
+   deadline. The seccomp profiles, image, command, service account and
+   environment are the workload's own. What changes is listed in the report:
+   no workload labels (so no Service sends it traffic and no controller
+   adopts it), PersistentVolumeClaims and ephemeral volumes become
+   `emptyDir`, and a fixed `nodeName`, hostname and ephemeral containers
+   are dropped.
+2. Lets it run for `--run-for` (default `1m`), then deletes it and waits
+   until it is gone.
+3. On each node that ran a trial, starts a reader pod (runc, uid 65534, no
+   capabilities, read-only root, a read-only `hostPath` of
+   `/var/log/runsc/seccomp-audit`) that prints, from each trial's Sentry
+   debug log, the `runsc` version, how many filters were installed or
+   ignored, and each `Syscall N: denied by seccomp` or `killed by seccomp`
+   line. The numbers are mapped to names for the node's architecture.
+
+The handler behind `gvisor-seccomp-audit` is the same `runsc` as `gvisor`,
+with `oci-seccomp = "true"` set explicitly (so the trial applies the filter
+even on an older `runsc`) and the Sentry's debug log on. The denials are
+logged only at debug level, which is why the trials need their own handler.
+The agentmoat AMI and the kind node image register it; see
+[`kind/runsc-seccomp-audit.toml`](../kind/runsc-seccomp-audit.toml) and
+[`packer/files/runsc-seccomp-audit.toml`](../packer/files/runsc-seccomp-audit.toml).
+
+The identity that runs it needs `create`, `get`, `list`, `watch` and
+`delete` on pods, and `get` on `pods/log`, in the workloads' namespaces and
+in `--reader-namespace` (default `default`, which must allow `hostPath`
+under Pod Security admission), on top of the read-only role.
+
+Limits:
+
+- A trial runs the workload's real code. Whatever it does at start (a
+  migration, a message to a queue, a call to an API) it does again. Use the
+  dry run to see the pods first, and probe in a cluster where that is safe.
+- The result covers what the workload did during the trial, with no Service
+  traffic. A syscall it makes only under load, or only on a request, is not
+  seen.
+- Denials are counted per pod, not per container.
+- The Sentry debug logs stay on the node under
+  `/var/log/runsc/seccomp-audit`; clean them up or rotate them.
+
+To check the change itself on a node group, without a workload, run
+`make check-oci-seccomp` (or `scripts/check-oci-seccomp.sh --context <ctx>`):
+it runs a `RuntimeDefault` pod and an `Unconfined` control on the `gvisor`
+RuntimeClass and checks that only the first one has a filter and is refused
+`unshare`. CI runs it, and `make seccomp-probe-smoke`, on the kind cluster.
+
+The `seccomp-unconfined` rule of `scan` flags `Unconfined` profiles, and
+`plan` repeats it as a warning; see
+[`explanations/seccomp-unconfined.md`](explanations/seccomp-unconfined.md).
+
 ## Plan warnings that are not from the preflight
 
-`spec.warnings` of a MigrationPlan has two more IDs. They are here so that
+`spec.warnings` of a MigrationPlan has three more IDs. They are here so that
 all the warning IDs are in one document.
 
 | ID | When | What to do |
 | --- | --- | --- |
 | `manifest-source` | The plan was made from `scan -f` (manifests, no cluster). | The plan is a preview. `apply`, `rollback`, and `verify` refuse it. Run `agentmoat plan` against the cluster. |
 | `source-managed` | One or more workloads in the plan have the marker of a deploy tool. | Add `runtimeClassName` to the source that the tool deploys from (the git repository, the chart values) too. `agentmoat patch -f <path>` adds it to manifest files. |
+| `seccomp-unconfined` | One or more workloads in the plan set `seccompProfile: Unconfined` on the pod or a container. | Nothing blocks. From gVisor `20261123.1` those containers are the only ones with no seccomp filter in the sandbox; switch them to `RuntimeDefault` or a `Localhost` profile unless that is deliberate. See [Seccomp probe](#seccomp-probe). |
 
 ### `source-managed`
 

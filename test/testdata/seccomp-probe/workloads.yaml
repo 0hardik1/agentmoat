@@ -1,0 +1,76 @@
+# agentmoat: workloads for scripts/seccomp-probe-smoke.sh.
+#
+# Three migrated Deployments (runtimeClassName gvisor), each a busybox shell:
+#
+#   seccomp-blocked     RuntimeDefault. Calls `unshare -U` every two seconds.
+#                       containerd's default profile allows unshare(2) only
+#                       with CAP_SYS_ADMIN, so from gVisor 20261123.1 the
+#                       Sentry refuses it, and the probe must report it.
+#   seccomp-clean       RuntimeDefault. Only sleeps: the probe must report
+#                       no blocked syscall.
+#   seccomp-unconfined  Unconfined. The probe must flag it (info) and report
+#                       no blocked syscall, since no filter is loaded.
+#
+# The namespace is created by the script.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seccomp-blocked
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: seccomp-blocked}
+  template:
+    metadata:
+      labels: {app: seccomp-blocked}
+    spec:
+      runtimeClassName: gvisor
+      terminationGracePeriodSeconds: 1
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: app
+          image: busybox:1.36.1
+          command: ["sh", "-c", "while true; do busybox unshare -U true 2>/dev/null; sleep 2; done"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seccomp-clean
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: seccomp-clean}
+  template:
+    metadata:
+      labels: {app: seccomp-clean}
+    spec:
+      runtimeClassName: gvisor
+      terminationGracePeriodSeconds: 1
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: app
+          image: busybox:1.36.1
+          command: ["sh", "-c", "while true; do sleep 2; done"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seccomp-unconfined
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: seccomp-unconfined}
+  template:
+    metadata:
+      labels: {app: seccomp-unconfined}
+    spec:
+      runtimeClassName: gvisor
+      terminationGracePeriodSeconds: 1
+      securityContext:
+        seccompProfile: {type: Unconfined}
+      containers:
+        - name: app
+          image: busybox:1.36.1
+          command: ["sh", "-c", "while true; do busybox unshare -U true 2>/dev/null; sleep 2; done"]

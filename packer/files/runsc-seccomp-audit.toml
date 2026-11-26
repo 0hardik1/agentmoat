@@ -1,0 +1,44 @@
+# agentmoat: runsc configuration for the seccomp audit runtime handler.
+#
+# Installed by the Packer build to /etc/containerd/runsc-seccomp-audit.toml
+# and registered as the containerd runtime handler `gvisor-seccomp-audit` in
+# the drop-in files/gvisor-runtime.toml. The kind copy is
+# kind/runsc-seccomp-audit.toml; keep the two the same.
+#
+# Only `agentmoat probe seccomp` uses this handler (through the RuntimeClass
+# in deploy/runtimeclass-seccomp-audit.yaml). It runs a short trial copy of
+# each workload and reads what the Sentry wrote here. Migrated workloads
+# keep using the plain `gvisor` handler (runsc.toml), which logs nothing.
+#
+# Why each line:
+#   platform, network  the same as runsc.toml, so a trial runs the way the
+#                      workload will run.
+#   oci-seccomp        load the container's OCI seccomp filter inside the
+#                      sandbox. gVisor turned this on by default in release
+#                      20261123.1; before that runsc ignored the filter
+#                      ("Seccomp spec is being ignored because oci-seccomp
+#                      is disabled"). Setting it here makes a trial on an
+#                      older runsc show what 20261123.1 will enforce.
+#   debug              the Sentry writes "Syscall N: denied by seccomp" (and
+#                      "killed by seccomp") only at debug level. That line is
+#                      the evidence the probe reads.
+#   debug-command      log the boot command only: it is the Sentry's log,
+#                      and it holds the runsc version, each container's spec
+#                      (with the pod name and namespace annotations, without
+#                      environment variables) and the denials. One file per
+#                      sandbox instead of one per runsc call.
+#   debug-log          one file per sandbox (%ID% is the sandbox ID). runsc
+#                      creates the directory. Delete old files from time to
+#                      time; nothing else reads them.
+#
+# References:
+#   - google/gvisor runsc/config/flags.go (oci-seccomp default, release 20261123.1)
+#   - google/gvisor pkg/sentry/kernel/task_syscall.go (the debug lines)
+
+[runsc_config]
+  platform      = "systrap"
+  network       = "sandbox"
+  oci-seccomp   = "true"
+  debug         = "true"
+  debug-command = "boot"
+  debug-log     = "/var/log/runsc/seccomp-audit/%ID%.boot.txt"
