@@ -34,6 +34,13 @@ func renderPreflightReportTable(report *schema.PreflightReport, w io.Writer, use
 	if pm := report.Metadata.Probe; pm != nil {
 		chips = append(chips, "probe: "+describeProbe(pm))
 	}
+	if sm := report.Metadata.SeccompProbe; sm != nil {
+		mode := "ran"
+		if sm.DryRun {
+			mode = "dry-run"
+		}
+		chips = append(chips, fmt.Sprintf("seccomp probe: %s (%s, run-for %s)", mode, sm.RuntimeClassName, sm.RunFor))
+	}
 	if _, err := fmt.Fprintln(w, s.Muted.Render(strings.Join(chips, "   "))); err != nil {
 		return err
 	}
@@ -122,7 +129,40 @@ func renderClusterFacts(s *Styles, facts schema.ClusterFacts, w io.Writer) error
 	if err := renderGPUFacts(s, facts.GPU, w); err != nil {
 		return err
 	}
-	return renderSandboxFacts(s, facts.Sandbox, w)
+	if err := renderSandboxFacts(s, facts.Sandbox, w); err != nil {
+		return err
+	}
+	return renderSeccompFacts(s, facts.Seccomp, w)
+}
+
+// renderSeccompFacts prints one line per probed workload: its status, the
+// runsc release, and the syscalls its profile refused. Silent until the
+// seccomp probe has run.
+func renderSeccompFacts(s *Styles, sf *schema.SeccompFacts, w io.Writer) error {
+	if sf == nil {
+		return nil
+	}
+	if _, err := fmt.Fprintf(w, "  Seccomp trials: %d\n", len(sf.Workloads)); err != nil {
+		return err
+	}
+	for _, wl := range sf.Workloads {
+		line := fmt.Sprintf("%s %s/%s  %s", wl.Target.Kind, wl.Target.Namespace, wl.Target.Name, wl.Status)
+		if wl.Status == schema.SeccompTrialRan {
+			blocked := "none"
+			if len(wl.Blocked) > 0 {
+				parts := make([]string, 0, len(wl.Blocked))
+				for _, b := range wl.Blocked {
+					parts = append(parts, fmt.Sprintf("%s(%s x%d)", b.Name, b.Action, b.Count))
+				}
+				blocked = strings.Join(parts, ",")
+			}
+			line += fmt.Sprintf("  runsc=%s  node=%s  filters=%d  blocked=%s", wl.RunscVersion, wl.Node, wl.FiltersLoaded, blocked)
+		}
+		if _, err := fmt.Fprintln(w, "    "+s.Muted.Render(line)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // renderSandboxFacts prints the co-location line and one muted line per

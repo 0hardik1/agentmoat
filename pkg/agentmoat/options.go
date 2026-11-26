@@ -359,6 +359,45 @@ type ProbeOptions struct {
 	KubeClient kubernetes.Interface
 }
 
+// SeccompProbeOptions configures pkg/agentmoat.ProbeSeccomp: a trial copy of
+// each migrated workload in a gVisor sandbox with its own seccomp profile,
+// and a report of the syscalls the profile refused. It creates pods, so
+// DryRun defaults to true in cmd/ and the MCP tool.
+type SeccompProbeOptions struct {
+	// KubeconfigPath and Context are the same as ScanOptions.
+	KubeconfigPath string
+	Context        string
+
+	// PlanPath, when set, names a MigrationPlan whose steps are the
+	// workloads to run. Without it the probe runs the workloads in
+	// Namespaces that already request RuntimeClassName.
+	PlanPath   string
+	Namespaces []string
+
+	// RuntimeClassName is the RuntimeClass the workloads migrate to. Empty
+	// means the plan's, else schema.DefaultRuntimeClassName.
+	RuntimeClassName string
+
+	// AuditRuntimeClassName, RunFor, Timeout, LogDir, ReaderNamespace and
+	// ReaderImage default to the pkg/seccompprobe constants when zero.
+	AuditRuntimeClassName string
+	RunFor                time.Duration
+	Timeout               time.Duration
+	LogDir                string
+	ReaderNamespace       string
+	ReaderImage           string
+
+	// DryRun, when true, creates nothing and reports the pods that would
+	// have been created.
+	DryRun bool
+
+	// Stderr is the writer for progress messages.
+	Stderr io.Writer
+
+	// KubeClient is an optional pre-built Kubernetes client. See ScanOptions.
+	KubeClient kubernetes.Interface
+}
+
 // ExplainOptions configures pkg/agentmoat.Explain. The orchestrator
 // supports three modes; the fields below describe which one the caller
 // has selected.

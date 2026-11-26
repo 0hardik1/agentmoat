@@ -35,6 +35,15 @@ The supported shape is a mixed cluster:
 3. Apply `deploy/runtimeclass.yaml`; its `scheduling` block steers gVisor
    pods to that pool and tolerates the taint.
 4. Re-run `agentmoat preflight` and expect exit `0`.
+5. Run `make check-oci-seccomp CONTEXT=<your EKS context>` (or
+   `scripts/check-oci-seccomp.sh --context <ctx>`). It starts a
+   `RuntimeDefault` pod and an `Unconfined` control on the gVisor pool and
+   checks that runsc enforces the pod's seccomp profile inside the sandbox,
+   which it does by default from gVisor `20261123.1`. Exit `0` means it is
+   enforced. To see what each workload's profile would refuse, apply
+   `deploy/runtimeclass-seccomp-audit.yaml` (the AMI registers its handler)
+   and run `agentmoat probe seccomp`; see
+   [`preflight.md`](preflight.md#seccomp-probe).
 
 See [`preflight.md`](preflight.md) for the full finding list.
 

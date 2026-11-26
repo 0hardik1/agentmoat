@@ -21,7 +21,7 @@ import (
 // detail.
 const serverInstructions = `agentmoat-mcp moves Kubernetes workloads from runc to gVisor (runsc).
 Read-only tools: scan_cluster, preflight_cluster, assess_workload, propose_plan, verify_migration, explain.
-Mutating tools: apply_plan, rollback_plan, probe_nvproxy change the cluster; patch_manifests changes manifest files (all default dry_run=true; must set "dry_run": false to mutate).
+Mutating tools: apply_plan, rollback_plan, probe_nvproxy, probe_seccomp change the cluster; patch_manifests changes manifest files (all default dry_run=true; must set "dry_run": false to mutate).
 To check the manifests in a repository with no cluster, call scan_cluster with manifest_paths (files or directories): it reads the files and contacts no cluster. A plan made from that report is a preview; apply_plan, rollback_plan, and verify_migration refuse it.
 To make the move as a change to the repository (a pull request, then the deploy pipeline), call patch_manifests: it adds runtimeClassName to the files of the workloads that can run in gVisor, and returns the diff. Show the diff before a call with "dry_run": false.
 After that change is deployed, call verify_migration with manifest_paths (the files as they were deployed): it checks in the cluster each workload of the files that asks for the RuntimeClass. A report with summary.notChecked above 0 is not a pass.
@@ -53,6 +53,7 @@ func newServer(deps Deps) *server.MCPServer {
 	registerScanCluster(srv, deps)
 	registerPreflightCluster(srv, deps)
 	registerProbeNvproxy(srv, deps)
+	registerProbeSeccomp(srv, deps)
 	registerAssessWorkload(srv, deps)
 	registerProposePlan(srv, deps)
 	registerPatchManifests(srv, deps)

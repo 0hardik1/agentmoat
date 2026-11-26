@@ -1037,6 +1037,10 @@ type Evidence struct {
 	PrivilegedContainers []string        `json:"privilegedContainers,omitempty" yaml:"privilegedContainers,omitempty"`
 	CSIDrivers           []CSIDriverHit  `json:"csiDrivers,omitempty"           yaml:"csiDrivers,omitempty"`
 	Commands             []CommandHit    `json:"commands,omitempty"             yaml:"commands,omitempty"`
+
+	// SeccompProfiles lists the containers whose seccomp profile triggered
+	// the seccomp-unconfined rule, with the profile each one gets.
+	SeccompProfiles []ContainerSeccompProfile `json:"seccompProfiles,omitempty" yaml:"seccompProfiles,omitempty"`
 }
 
 // CapabilityHit names a container/capability pair that triggered a rule.

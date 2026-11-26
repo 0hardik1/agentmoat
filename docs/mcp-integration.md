@@ -31,13 +31,14 @@ byte-identical: same Go struct, same `json:` tags, same APIVersion
 
 ## 3. Tools, resources, prompts
 
-### Tools (10)
+### Tools (11)
 
 | Tool                | Orchestrator                  | Mutating | Notes                                                                |
 |---------------------|-------------------------------|----------|----------------------------------------------------------------------|
 | `scan_cluster`      | `agentmoat.Scan`              | no       | Returns a `ScanReport` (with `metadata.clusterFacts`; `no_cluster_facts` skips them, `facts_path` loads them from a saved report). With `manifest_paths` it reads manifest files or directories and contacts no cluster (the `scan -f` form): use it to check a repository. Standard input is not available; pass rendered output as a file. |
 | `preflight_cluster` | `agentmoat.Preflight`         | no       | Returns a `PreflightReport`. `spec.summary.ready=false` means `apply_plan` will refuse to run. |
 | `probe_nvproxy`     | `agentmoat.Probe`             | YES      | Creates and deletes one pod on a gVisor node to read the `runsc` nvproxy driver list (a second pod when that `runsc` needs its sidecar binaries). Defaults to dry-run; `"dry_run": false` runs it. Returns a `PreflightReport` with `spec.facts.gpu.nvproxy`. |
+| `probe_seccomp`     | `agentmoat.ProbeSeccomp`      | YES      | Runs each migrated workload once as a trial pod on the `gvisor-seccomp-audit` RuntimeClass, deletes it, and reads the syscalls its seccomp profile refused from the node with a reader pod. The trial runs the workload's real code. Defaults to dry-run; `"dry_run": false` runs it. Takes `plan_path`, or `namespaces` for the workloads that already request the RuntimeClass. Returns a `PreflightReport` with `spec.facts.seccomp`. See [`preflight.md`](preflight.md#seccomp-probe). |
 | `assess_workload`   | `agentmoat.AssessWorkload`    | no       | Returns a `WorkloadResult` for one named workload. Accepts `facts_path`. |
 | `propose_plan`      | `agentmoat.Plan`              | no       | Same scan in -> same `planHash`. Accepts `scan_report_path` to reuse a saved scan, `facts_path` for the facts, `add_toleration` for the pod toleration. |
 | `patch_manifests`   | `agentmoat.Patch`             | YES (files) | Adds `runtimeClassName` to the manifest files of the workloads that can run in gVisor (the `patch` command), so that the move goes through a pull request. Contacts no cluster. Defaults to dry-run and returns a `PatchResult` with the unified diff of each file; `"dry_run": false` writes the files. With `kustomize_dir` it edits no source file and writes the change into that directory as a Kustomize component (the `--kustomize` form). |
@@ -47,7 +48,7 @@ byte-identical: same Go struct, same `json:` tags, same APIVersion
 | `explain`           | `agentmoat.Explain`           | no       | Offline; reads the embedded docs.                                    |
 
 **Safety gate.** The mutating tools (`apply_plan`, `rollback_plan`,
-`probe_nvproxy`, and `patch_manifests`) inspect the raw JSON-RPC arguments for the `dry_run` field. The handler
+`probe_nvproxy`, `probe_seccomp`, and `patch_manifests`) inspect the raw JSON-RPC arguments for the `dry_run` field. The handler
 distinguishes "field omitted" from "field set to `false`":
 
 - field absent OR `"dry_run": true` -> dry-run (no cluster mutation, no file written).

@@ -10,7 +10,7 @@ and AI agents can branch on it.
 | `2` | Compatibility issues found. At least one workload was classified as `incompatible`. For `scan`, `--fail-on` changes which workloads count (see below). | `agentmoat scan`, `agentmoat explain namespace`, `agentmoat explain workload` |
 | `3` | Partial outcome. Some steps succeeded and others failed; idempotent re-run is safe. After a partial `apply`, `rollback` with the same plan undoes the steps that succeeded (see below). For `patch`: some selected workloads are patched and others are not (see below). | `agentmoat apply`, `agentmoat rollback`, `agentmoat patch` |
 | `4` | Verify failed. Live pods do not match the expected `runtimeClassName` (of the plan, or with `-f` of the manifest files), the hosting nodes fall outside the RuntimeClass `nodeSelector`, (with `--in-pod-probe`) the in-container probe did not find gVisor markers, and/or (with `--wait`) the pods did not stay Ready before the wait time ended. | `agentmoat verify` |
-| `5` | Cluster not ready. The preflight found an error: no RuntimeClass, a RuntimeClass with no `scheduling.nodeSelector`, no Ready node matching it, untolerated taints on every matching node, or only EKS Auto Mode / Bottlerocket nodes. For `apply`, every step is reported `skipped` and nothing was mutated. For `probe nvproxy`, the probe pod was not created. | `agentmoat preflight`, `agentmoat probe nvproxy`, `agentmoat apply` |
+| `5` | Cluster not ready. The preflight found an error: no RuntimeClass, a RuntimeClass with no `scheduling.nodeSelector`, no Ready node matching it, untolerated taints on every matching node, or only EKS Auto Mode / Bottlerocket nodes. For `apply`, every step is reported `skipped` and nothing was mutated. For `probe nvproxy`, the probe pod was not created. | `agentmoat preflight`, `agentmoat probe nvproxy`, `agentmoat probe seccomp`, `agentmoat apply` |
 
 ## Scan exit code 2 and `--fail-on`
 
@@ -334,6 +334,11 @@ nowhere to run the probe pod, and the report says so with
 timeout, no `runsc` at the path) is a warning finding
 (`nvproxy-probe-failed`) and exit `0`, because the preflight itself passed.
 GPU findings are never errors, so they never produce exit `5`.
+
+`agentmoat probe seccomp` works the same way: an error finding in the
+preflight exits `5` and no trial pod is created (`seccomp-probe-skipped`).
+Every seccomp finding, a blocked syscall included, is a warning or info, so
+a probe that ran exits `0`; branch on `spec.findings[].id` instead.
 
 ## Why these exact codes
 
